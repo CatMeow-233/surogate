@@ -334,10 +334,13 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                          // records a pair; the spec says which, and the fold reads it back.
                          .diagonal_gate =
                              family::linear_mixer_gate_is_per_channel(schedule::kLinearMixer),
-                         // MTP defers each round's fold into the lane's next verify (gated delta
-                         // net only): SUROGATE_SERVE_DEFER_GDN_FOLD=0 folds every round instead.
+                         // MTP and DFlash defer each round's fold into the lane's next verify
+                         // (gated delta net only; DFlash on one device, not across pipeline
+                         // stages): SUROGATE_SERVE_DEFER_GDN_FOLD=0 folds every round instead.
                          .pending_slots =
-                             plan.speculative_backend == SpeculativeBackend::Mtp &&
+                             (plan.speculative_backend == SpeculativeBackend::Mtp ||
+                              (plan.speculative_backend == SpeculativeBackend::DFlash &&
+                               plan.pipeline_stage_first == 0 && plan.pipeline_stage_last == 0)) &&
                                      !family::linear_mixer_gate_is_per_channel(schedule::kLinearMixer) &&
                                      deferred_gdn_fold_enabled()
                                  ? static_cast<std::int32_t>(plan.max_concurrency)
@@ -935,6 +938,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                 {
                     auto attention = layout.scope();
                     (void)workspace_recipe::dflash_attention(layout, tokens, plan.geometry.dflash);
+                    (void)workspace_recipe::dflash_conv(layout, tokens, plan.geometry.dflash);
                     scratch(layout,
                             std::max(ops::swa_workspace_capacity_bytes({0, plan.capacity}, width,
                                                                        width, batch),
@@ -947,6 +951,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                 {
                     auto mlp = layout.scope();
                     (void)workspace_recipe::dflash_mlp(layout, tokens, plan.geometry.dflash);
+                    (void)workspace_recipe::dflash_conv(layout, tokens, plan.geometry.dflash);
                     scratch(layout, ops::linear_swiglu_workspace_capacity_bytes(
                                         QType::W8G32_F16S, 2 * plan.geometry.dflash.intermediate,
                                         plan.geometry.dflash.hidden, tokens, tokens));
@@ -960,6 +965,10 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                     matrix(layout, DType::BF16, plan.geometry.draft_vocab, drafts * batch);
                 } else {
                     matrix(layout, DType::BF16, plan.geometry.output_rows, drafts * batch);
+                }
+                if (plan.geometry.dflash.has_selector()) {
+                    (void)workspace_recipe::dflash_selector(layout, drafts * batch,
+                                                            plan.geometry.dflash);
                 }
                 return finish(layout);
             };

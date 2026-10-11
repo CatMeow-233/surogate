@@ -399,9 +399,10 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
             deferred_fold_columns.assign(static_cast<std::size_t>(replay_records->spec.pending_slots), 0);
             CUDA_CHECK(cudaMemsetAsync(replay_records->pending_columns.data, 0,
                                        replay_records->pending_columns.bytes(), device.stream));
-            std::fprintf(stderr, "engine: MTP folds each round's accepted linear-attention "
+            std::fprintf(stderr, "engine: %s folds each round's accepted linear-attention "
                                  "transitions into the next verify (SUROGATE_SERVE_DEFER_GDN_FOLD=0 "
-                                 "folds every round)\n");
+                                 "folds every round)\n",
+                         speculative_backend == SpeculativeBackend::DFlash ? "DFlash" : "MTP");
         }
     }
     if (replay_records.has_value() != (speculative_backend != SpeculativeBackend::None && !model.gdn_layers.empty())) {
@@ -3464,8 +3465,11 @@ ProgramImplCore::launch_mixed_round(std::span<const std::uint32_t> prefill_lanes
     }
     // Decode lanes that ride here without verifying run one column in place, so their
     // deferred folds land first; verifying ones apply them in the record (launch_mtp_round
-    // brought the counts up to date).
-    if (!mtp_verify) { settle_deferred_folds(lanes); }
+    // and launch_dflash_round brought the counts up to date). A DFlash round drafting nothing
+    // verifies one column, which updates the state in place too.
+    if (!(speculative_decode && verify != nullptr && verify_width > 1)) {
+        settle_deferred_folds(lanes);
+    }
     // The first staged prompt owns the card (its KV view and cursor); every prompt's KV is
     // addressed per segment through the batch view and its own table row.
     const std::uint32_t prefill_lane = prefill_lanes.front();
@@ -3584,7 +3588,11 @@ ProgramImplCore::launch_mixed_round(std::span<const std::uint32_t> prefill_lanes
         // decode lanes' verify included. The second segment starts from exactly the state and
         // keys the first leaves, as a chunk of the next round would, so the boundary still cuts
         // the recurrent scan where it did; a rewrite checkpoint there is copied layer by layer
-        // between the two. SUROGATE_SERVE_MIXED_SPLIT=0 keeps a round per segment.
+        // between the two. Under DFlash the drafter takes the two segments' features in turn
+        // and saves its own checkpoint between them (consume_mixed_round). MEASURED (Gemma 4
+        // 26B-A4B, DGX Spark, 32 users, ~515-token chat prompts): without the split DFlash ran
+        // 6.5 mixed rounds for 3.9 prompts where MTP ran 3.5. SUROGATE_SERVE_MIXED_SPLIT=0 keeps
+        // a round per segment.
         std::array<std::uint32_t, runtime::kMaximumMixedPrefills> splits{};
         static const bool kSplitPrompts = [] {
             const char* value = std::getenv("SUROGATE_SERVE_MIXED_SPLIT");
@@ -3594,7 +3602,7 @@ ProgramImplCore::launch_mixed_round(std::span<const std::uint32_t> prefill_lanes
         std::uint32_t window_left = mixed_chunk_cap;
         std::size_t staged_count  = 0;
         const bool invariant_cuts = ops::batch_invariant();
-        const bool split_prompts  = kSplitPrompts && !invariant_cuts && !flash && !target_only &&
+        const bool split_prompts  = kSplitPrompts && !invariant_cuts && !target_only &&
                                    !pipeline_stage() && decoder->ple.empty() &&
                                    schedule::TextContext::mixed_split_segments_supported();
         for (std::size_t i = 0; i < prefill_lanes.size() && window_left > 0; ++i) {
@@ -4108,28 +4116,41 @@ runtime::MixedRoundResult ProgramImplCore::consume_mixed_round(runtime::RoundHan
                                                 .reused_prompt_tokens = entry.base,
                                                 .prefix_reuse_path    = reported_reuse(entry)};
             score_prefill_hidden(lane_id, prefill_hidden.slice(1, column, processed), entry.cursor);
+            const bool split_checkpoint = splits[i] > 0 && entry.rewrite_checkpoint_capture &&
+                                          entry.cursor + splits[i] == entry.rewrite_checkpoint_capture->frontier;
             if (flash) {
                 if (stage_holds_head()) {
                     Tensor count = io.pos;
                     Tensor lane = io.rope_pos;
                     Tensor row = io.backend_kv_table_row;
-                    set_device_i32(count, processed);
                     set_device_i32(lane, lane_id);
                     set_device_i32(row, sequence.kv->backend ? sequence.kv->backend->bound_row() : 0);
                     schedule::DFlashAppendContext context{{device, model, work, decoder->linear_attention,
                         replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
                         proposal_head, &decoder->ple, stage}, *dflash};
-                    work.reset();
-                    Tensor features = dflash->prefill_features.slice(1, column, processed)
-                        .view({model.geometry.dflash.feature_rows, static_cast<int>(processed), 1});
-                    Tensor positions = dflash->prefill_positions.slice(0, column, processed)
-                        .view({static_cast<int>(processed), 1});
-                    schedule::dflash_append_context(context, features, positions, count, lane, row, {processed, processed});
+                    const auto append = [&](std::uint32_t offset, std::uint32_t length) {
+                        set_device_i32(count, static_cast<std::int32_t>(length));
+                        work.reset();
+                        Tensor features = dflash->prefill_features.slice(1, column + offset, length)
+                            .view({model.geometry.dflash.feature_rows, static_cast<int>(length), 1});
+                        Tensor positions = dflash->prefill_positions.slice(0, column + offset, length)
+                            .view({static_cast<int>(length), 1});
+                        schedule::dflash_append_context(context, features, positions, count, lane, row,
+                                                        {length, length});
+                    };
+                    // A prompt split at its rewrite checkpoint: the drafter's window is saved
+                    // where the first segment ends, as a round ending there would have saved it.
+                    if (split_checkpoint) {
+                        append(0, splits[i]);
+                        dflash->save_rewrite_checkpoint(sequence.lane, device.stream);
+                        append(splits[i], processed - splits[i]);
+                    } else {
+                        append(0, processed);
+                    }
                 }
                 sequence.dflash_context_frontier = entry.cursor + processed;
             }
-            if (splits[i] > 0 && entry.rewrite_checkpoint_capture &&
-                entry.cursor + splits[i] == entry.rewrite_checkpoint_capture->frontier) {
+            if (split_checkpoint) {
                 // The prompt's two segments took the checkpoint's state between them, layer by
                 // layer; its hidden is the first segment's last column.
                 Tensor hidden = prefill_hidden.slice(1, column + splits[i] - 1, 1);
@@ -4716,6 +4737,10 @@ ProgramImplCore::launch_dflash_round(std::span<const std::uint32_t> lanes,
     ops::ScopedLoraBaseRound base_scope(base_round);
     const auto started = Clock::now();
     try {
+        // A verify applies its lanes' deferred folds itself; a round drafting nothing updates
+        // the state in place, so they land first.
+        if (active_dflash_window == 0) { settle_deferred_folds(lanes); }
+        flush_deferred_fold_counts();
         DecodeGraphExecutable* executable   = nullptr;
         schedule::DFlashEnvelopes envelopes =
             dflash_envelopes(0, maximum_frontier, active_dflash_window);

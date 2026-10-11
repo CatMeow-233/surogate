@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -93,12 +94,20 @@ enum class SpeculativeBackend : std::uint8_t {
     DFlash,
 };
 
-// Draft attention supports eight rows per GPU round. Extra active requests use
-// subsequent rounds; the configured number of request lanes stays independent.
-[[nodiscard]] constexpr std::uint32_t decode_batch_capacity(
+// A GPU round's lanes. DFlash rounds used to stop at eight, leaving the rest of the active
+// requests for later rounds; on the Spark that held a 32-user Gemma 4 26B-A4B to 8 verifying
+// lanes a round, 18.4 tokens/s a user against vLLM's 34.0 with the same drafter (2026-10-11).
+// `SUROGATE_SERVE_DFLASH_MAX_LANES` restores a cap.
+[[nodiscard]] inline std::uint32_t decode_batch_capacity(
     std::uint32_t active_sequences, SpeculativeBackend backend) noexcept {
     const auto capacity = decode_batch_capacity(active_sequences);
-    return backend == SpeculativeBackend::DFlash && capacity > 8 ? 8 : capacity;
+    if (backend != SpeculativeBackend::DFlash) { return capacity; }
+    static const std::uint32_t cap = [] {
+        const char* raw = std::getenv("SUROGATE_SERVE_DFLASH_MAX_LANES");
+        const long value = raw == nullptr ? 0 : std::strtol(raw, nullptr, 10);
+        return value > 0 ? static_cast<std::uint32_t>(value) : 0U;
+    }();
+    return cap > 0 && capacity > cap ? cap : capacity;
 }
 
 /// `SpeculativeOptions::max_lanes` meaning "verify at any width".
@@ -162,6 +171,18 @@ struct EngineOptions {
     // Placement probes size a candidate without allocating its expert cache.
     bool offload_planning_only         = false;
     std::uint32_t max_context          = 2048; // Exact logical ceiling of each request.
+    // --rope-scaling: YaRN laid over the checkpoint's rotation (Hugging Face rope_type "yarn").
+    // `factor` 0 keeps the checkpoint's own; `original_context` 0 means the checkpoint's
+    // max_context, and the served context may then reach original_context * factor;
+    // `attention_factor` 0 means 0.1 * ln(factor) + 1.
+    struct RopeScaling {
+        float factor                  = 0.0F;
+        std::uint32_t original_context = 0;
+        float beta_fast               = 32.0F;
+        float beta_slow               = 1.0F;
+        float attention_factor        = 0.0F;
+    };
+    RopeScaling rope_scaling;
     // --chat-template: a Jinja template that replaces the artifact's. Empty keeps the
     // artifact's, which is the only one whose agreement with tokenizer_config.json the
     // loader can check -- an override is the operator taking that responsibility.
@@ -587,7 +608,15 @@ struct PromptCapabilities {
     /// GLM-5.3-Flash always opens one and offers no switch, so a request that
     /// asks for thinking off is refused rather than answered with thinking on.
     bool reasoning_turn = false;
+    /// What the switch above is set to when nothing asks: a Jinja template's own render with
+    /// `enable_thinking` left undefined. Qwen's templates think unless told not to; Gemma 4's
+    /// answer directly unless asked to think. The hand-written templates think.
+    bool thinking_by_default = true;
     ReasoningEffortCapabilities reasoning_effort;
+    /// The vocabulary spells Gemma 4's tool-call markers (`<|tool_call>`, `<tool_call|>` and the
+    /// `<|"|>` string quote) as special tokens: the server reads calls with the gemma4 parser
+    /// unless told otherwise.
+    bool gemma4_tool_calls = false;
 };
 
 struct PromptOptions {

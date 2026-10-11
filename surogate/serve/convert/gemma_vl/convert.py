@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 
 from surogate.serve.artifact.container import ArtifactIdentity, ArtifactWriter
-from surogate.serve.convert.common import conversion
+from surogate.serve.convert.common import conversion, official_resources
 from surogate.serve.convert.common.checkpoint import tokenizer_domain
 from surogate.serve.convert.common.inventory import RESOURCE_SPECS
 from surogate.serve.convert.common.quantize import pick_device
@@ -18,18 +18,34 @@ from . import inventory
 
 #: What a checkpoint's non-routed text matrices are stored as. The engine binds whichever format
 #: the artifact states, so this is a storage choice, not a model variant: `w8` is the groupwise
-#: int8 every Gemma artifact has used, `bf16` keeps the checkpoint's own words.
+#: int8 every Gemma artifact has used, `bf16` keeps the checkpoint's own words, and `fp8` stores
+#: the attention and feed-forward projections for the FP8 tensor cores (E4M3 with a multiplier
+#: per 128 x 128 block, or per row where only K is whole 128s), which a prompt round runs two to
+#: four times faster than W8 on a DGX Spark at the same bytes a decode step reads.
 #:
 #: The default follows the checkpoint. A BF16 checkpoint keeps `w8`, the artifact it always
-#: produced. A quantised export keeps what it stored: the modules its declaration left alone stay
-#: BF16, as the exporter shipped them -- which on Gemma 4 is also the fast route, because the
+#: produced. A per-channel FP8 export (Red Hat's Gemma 3) keeps its codes and row multipliers,
+#: `fp8`: the weights the exporter shipped, and the W8A8 FP8 compute it was made for. Any other
+#: quantised export keeps what it stored: the modules its declaration left alone stay BF16 on the
+#: mixture, as the exporter shipped them -- which on Gemma 4 is also the fast route, because the
 #: 2,112-wide dense feed-forward is not a shape the W8 tensor-core kernels take and runs on their
-#: SIMT fallback (docs/inference/serving-models.md, "Gemma 4 mixture in NVFP4").
-TEXT_FORMATS = ("w8", "bf16")
+#: SIMT fallback (docs/inference/serving-models.md, "Gemma 4 mixture in NVFP4") -- and become W8
+#: on a dense model.
+TEXT_FORMATS = ("w8", "bf16", "fp8")
 
 
 def resources_for(model, g):
     resources = {r.name: r.data for r in conversion.load_resources(model, RESOURCE_SPECS)}
+    if "frontend/chat_template.jinja" not in resources:
+        # Releases that state the template only in tokenizer_config.json or chat_template.json
+        # (Red Hat's Gemma 3 FP8 exports) would otherwise convert as a base model, and the chat
+        # endpoints refuse a base model by name.
+        template = official_resources.chat_template_bytes(Path(model))
+        if template is not None:
+            resources["frontend/chat_template.jinja"] = template
+            resources["frontend/tokenizer_config.json"] = official_resources.tokenizer_config_with_template(
+                resources["frontend/tokenizer_config.json"], template)
+            resources = {spec.name: resources[spec.name] for spec in RESOURCE_SPECS if spec.name in resources}
     config, v = g.config, g.vision
     image = json.loads(resources["frontend/preprocessor_config.json"])
     token_config = json.loads(resources["frontend/tokenizer_config.json"])
@@ -77,10 +93,11 @@ def resources_for(model, g):
     return resources
 
 
-def _text_storage(specs, text_format):
+def _text_storage(specs, text_format, *, mixture=False):
     """The text specs with every dense per-layer matrix in `text_format`. The embedding
     table (and the head tied to it) keeps W8 either way: it is the largest single object and
-    the decode step reads one of its rows per token."""
+    the decode step reads one of its rows per token. Under `fp8` a matrix the FP8 kernels do not
+    take keeps W8 on a dense model and BF16 on the mixture (its 2,112-wide down projection)."""
     if text_format not in TEXT_FORMATS:
         raise ValueError(f"text format must be one of {TEXT_FORMATS}, not {text_format!r}")
     if text_format == "w8":
@@ -88,6 +105,13 @@ def _text_storage(specs, text_format):
     from dataclasses import replace
 
     from surogate.serve.convert.common.inventory import BF16, CONTIGUOUS_LAYOUT, W8
+
+    if text_format == "fp8":
+        from surogate.serve.convert.common.fp8_block_source import fp8_projection_specs
+
+        specs = fp8_projection_specs(specs)
+        if not mixture:
+            return specs
 
     # The routed experts are not dense matrices: the MoE kernels take them W8 or quantised, never
     # BF16, and they keep whatever the checkpoint and the profile gave them.
@@ -97,6 +121,19 @@ def _text_storage(specs, text_format):
         else spec
         for spec in specs
     )
+
+
+def _declares_nvfp4(config):
+    """Whether the export's declaration is NVFP4 -- ModelOpt's `NVFP4` algorithm or a
+    compressed-tensors group packed as nvfp4 -- so the FP8 reader is not asked about it."""
+    quant = config.get("quantization_config") or {}
+    if quant.get("quant_method") == "modelopt":
+        return quant.get("quant_algo") == "NVFP4"
+    if quant.get("quant_method") == "compressed-tensors":
+        formats = {group.get("format") for group in (quant.get("config_groups") or {}).values()
+                   if isinstance(group, dict)}
+        return "nvfp4-pack-quantized" in formats or quant.get("format") == "nvfp4-pack-quantized"
+    return False
 
 
 def _dense_replaces(name, dense_sources):
@@ -128,19 +165,23 @@ def convert(model_dir, out_path, *, device="cpu", text_format=None, dflash_model
         dflash_geometry = dflash_checkpoint.geometry_from_config(
             json.loads((dflash_model / "config.json").read_text()), g.text)
         dflash_specs, dflash_recipes = dflash_checkpoint.conversion_plan(dflash_geometry, g.text)
-    # An NVFP4 export of the mixture quantises its routed experts, which the checkpoint stores
-    # per expert rather than as the stacked tensors the base recipes read: those objects come
-    # from `routed_nvfp4` instead, and every other text object keeps its recipe.
-    convention = None
-    if g.target == "gemma4_moe":
-        from surogate.serve.convert.gemma4_moe.exports import routed_nvfp4
+    # A quantised export. The mixture's NVFP4 export quantises its routed experts, which the
+    # checkpoint stores per expert rather than as the stacked tensors the base recipes read: those
+    # objects come from `routed_nvfp4` instead. On every target the quantised attention and
+    # feed-forward become NVFP4 linears (`dense_plan`), and whatever else an export quantised is
+    # read through its values (`DequantizingReader`). An FP8 export of a dense or E-series model
+    # keeps or re-encodes its codes as the text-only converters do (`fp8_block_source`).
+    from surogate.serve.convert.common import fp8_block_source
+    from surogate.serve.convert.gemma4_moe.exports import routed_nvfp4
 
-        convention = routed_nvfp4.convention_of(config)
-    elif config.get("quantization_config"):
-        raise ValueError(f"{g.target}: quantised Gemma checkpoints are served for the mixture only")
+    mixture = g.target == "gemma4_moe"
+    quantised = bool(config.get("quantization_config"))
+    fp8_export = (quantised and not mixture and not _declares_nvfp4(config)
+                  and fp8_block_source.is_fp8_export(config))
+    convention = routed_nvfp4.convention_of(config) if quantised and not fp8_export else None
     weights_id = "groupwise-int"
     routed_geometry = None
-    if convention is not None:
+    if convention is not None and mixture:
         routed_geometry = routed_nvfp4.geometry_of(g.text)
         text_specs = routed_nvfp4.tensor_specs(text_specs, routed_geometry.experts)
         text_recipes = tuple(r for r in text_recipes if not routed_nvfp4.is_routed_object(r.object_name))
@@ -148,23 +189,40 @@ def convert(model_dir, out_path, *, device="cpu", text_format=None, dflash_model
     dense_sources = {}
     if convention is not None:
         # Anything else the export quantised -- attention, the dense feed-forward -- becomes an
-        # NVFP4 linear; what it left alone keeps the base recipe.
+        # NVFP4 linear; what it left alone keeps the base recipe. A dense target keeps codes for
+        # its per-layer projections only (`DENSE_SUFFIXES`).
         with ShardReader.for_directory(model) as probe:
             text_specs, dense_sources = routed_nvfp4.dense_plan(
-                text_specs, {r.object_name: r for r in text_recipes}, probe, convention)
+                text_specs, {r.object_name: r for r in text_recipes}, probe, convention,
+                suffixes=None if mixture else routed_nvfp4.DENSE_SUFFIXES)
         text_recipes = tuple(r for r in text_recipes if not _dense_replaces(r.object_name, dense_sources))
     if text_format is None:
-        text_format = "bf16" if convention is not None else "w8"
-    text_specs = _text_storage(text_specs, text_format)
+        # What the export left unquantised. The mixture keeps it BF16 (its 2,112-wide dense
+        # feed-forward has no W8 tensor-core kernel); a dense model's attention converts to W8
+        # like every BF16 Gemma artifact, half the bytes a decode step reads. A per-channel FP8
+        # export keeps its codes.
+        text_format = ("fp8" if fp8_export and fp8_block_source.is_fp8_channel_export(config) else
+                       "bf16" if (convention is not None and mixture) else "w8")
+    text_specs = _text_storage(text_specs, text_format, mixture=mixture)
     vision_specs, vision_recipes = inventory.vision_recipes(g)
+    fp8_source = fp8_plan = None
+    if fp8_export:
+        planned_specs = (*text_specs, *vision_specs)
+        fp8_source, fp8_plan = fp8_block_source.for_checkpoint(
+            model, config, planned_specs, {r.object_name: r for r in (*text_recipes, *vision_recipes)},
+            row_codes=text_format == "fp8")
+        text_specs = fp8_plan.specs[: len(text_specs)]
+        vision_specs = fp8_plan.specs[len(text_specs):]
+        weights_id = "groupwise-int"
     specs = (*text_specs, *dflash_specs, *vision_specs)
     recipes = (*text_recipes, *dflash_recipes, *vision_recipes)
-    if convention is not None:
-        def owned(name):
-            return routed_nvfp4.is_routed_object(name) or routed_nvfp4.owns_dense(name, dense_sources)
-    else:
-        def owned(name):
-            return False
+
+    def owned(name):
+        # The NVFP4 objects, which have no base recipe. An FP8 export's objects keep theirs (the
+        # plan only changes where their payload is read from), so they stay in the coverage check.
+        return convention is not None and (
+            routed_nvfp4.is_routed_object(name) or routed_nvfp4.owns_dense(name, dense_sources))
+
     validate_recipe_coverage(recipes, tuple(spec for spec in specs if not owned(spec.name)))
     resources = resources_for(model, g)
     plan = conversion.build_object_plan((*specs, *RESOURCE_SPECS), resources)
@@ -175,13 +233,16 @@ def convert(model_dir, out_path, *, device="cpu", text_format=None, dflash_model
 
     with ExitStack() as stack:
         reader = stack.enter_context(ShardReader.for_directory(model))
+        # What the base recipes read: an NVFP4 module's values where a recipe slices or stacks it.
+        values = routed_nvfp4.DequantizingReader(reader, convention) if convention is not None else reader
         dflash_reader = (stack.enter_context(ShardReader.for_directory(dflash_model))
                          if dflash_model is not None else None)
-        preflight_source_reader(reader, tuple(r for r in recipes if not r.object_name.startswith("dflash/")))
+        preflight_source_reader(values, tuple(r for r in recipes if not r.object_name.startswith("dflash/")
+                                              and not (fp8_plan is not None and r.object_name in fp8_plan.covered)))
         if dflash_reader is not None:
             preflight_source_reader(dflash_reader, dflash_recipes)
         routed = None
-        if convention is not None:
+        if convention is not None and mixture:
             routed_nvfp4.preflight_source(reader, routed_geometry, convention)
             routed = routed_nvfp4.LayerCache(reader, routed_geometry, convention)
             print(f"routed experts: NVFP4 from the {convention.name} export", flush=True)
@@ -200,12 +261,14 @@ def convert(model_dir, out_path, *, device="cpu", text_format=None, dflash_model
         ) as writer:
             for spec in plan.specs:
                 payload = resources.get(spec.name)
-                if payload is None and convention is not None and routed_nvfp4.owns_dense(spec.name, dense_sources):
+                if payload is None and fp8_plan is not None and spec.name in fp8_plan.objects:
+                    payload = fp8_source.payload_for(spec.name, fp8_plan.objects, reader, pick_device(device))
+                elif payload is None and convention is not None and routed_nvfp4.owns_dense(spec.name, dense_sources):
                     payload = routed_nvfp4.dense_payload(spec.name, dense_sources, reader, convention)
                 elif payload is None and owned(spec.name):
                     payload = routed.payload_for(spec.name)
                 elif payload is None:
-                    source = dflash_reader if spec.name.startswith("dflash/") else reader
+                    source = dflash_reader if spec.name.startswith("dflash/") else values
                     tensor = materialize_recipe(recipe_map[spec.name], source)
                     if spec.format == "FP32":
                         tensor = tensor.to(torch.float32)
@@ -215,10 +278,14 @@ def convert(model_dir, out_path, *, device="cpu", text_format=None, dflash_model
         if routed is not None:
             routed_summary = {"convention": convention.name, **routed.summary(),
                               "dense_nvfp4_objects": len(dense_sources)}
+        elif convention is not None:
+            routed_summary = {"convention": convention.name, "dense_nvfp4_objects": len(dense_sources)}
     report = {"architecture": g.target, "model": str(model), "vision": g.vision, "objects": len(plan.specs),
               "weights_id": weights_id, "text_format": text_format}
     if routed_summary is not None:
-        report["routed_nvfp4"] = routed_summary
+        report["routed_nvfp4" if mixture else "nvfp4"] = routed_summary
+    if fp8_plan is not None:
+        report["quantization"] = {"fp8": dict(fp8_plan.counts)}
     if dflash_geometry is not None:
         report["dflash"] = {"model": str(dflash_model),
                             "geometry": dflash_checkpoint.geometry_block(dflash_geometry),
@@ -234,7 +301,8 @@ def main(argv=None):
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--text-format", choices=TEXT_FORMATS, default=None,
                         help="storage of the non-quantised text matrices (attention, dense feed-forward); "
-                             "default w8 for a BF16 checkpoint, bf16 (as stored) for an NVFP4 export")
+                             "default fp8 (codes kept) for a per-channel FP8 export, bf16 (as stored) for "
+                             "the mixture's NVFP4 export, w8 otherwise")
     parser.add_argument("--dflash-model", type=Path, default=None,
                         help="a DFlash drafter checkpoint trained for this target, stored beside it")
     args = parser.parse_args(argv)

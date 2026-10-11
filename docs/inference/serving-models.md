@@ -44,7 +44,9 @@ Adjust the settings to your workload:
 - **Simultaneous requests:** `--max-num-seqs` defaults to 1. Raise it to serve more users at
   once. `--kv-capacity auto` uses available GPU memory for the conversation cache.
 - **Context length:** `--max-model-len` defaults to `auto`. Set a number, as above, to choose
-  a specific limit for each request. Longer conversations need more memory.
+  a specific limit for each request. Longer conversations need more memory. A Qwen3.5 / 3.6
+  mixture (Surogate3.7-35B-A3B, Qwen3.6-35B-A3B) serves past its native 262,144 tokens, to a
+  million, with `--rope-scaling` (YaRN; see the [CLI reference](cli.md#context-past-the-models-native-length)).
 - **Cache precision:** the default `auto` chooses FP8 for this Qwen3.6 model. Use
   `--kv-cache-dtype bf16` for BF16 precision; it needs more memory.
 - **Generation speed:** try `--spec mtp --draft-tokens 3` when the checkpoint includes MTP
@@ -186,6 +188,15 @@ For a GGUF, supply the matching projector with `--mmproj`. To save GPU memory, a
 `--offload-vision`, `--offload-embeddings`, or `--offload-output-head`. These options also
 work when the decoder spans multiple GPUs.
 
+### Gemma 4 tool calls
+
+Gemma 4 writes a tool call in its own notation, `<|tool_call>call:get_weather{city:<|"|>Paris<|"|>}<tool_call|>`,
+not in JSON. A server for a Gemma 4 checkpoint reads it with the `gemma4` tool-call parser
+automatically, so OpenAI clients receive ordinary `tool_calls` (start the server with
+`--enable-auto-tool-choice` for `tool_choice: "auto"`). Streaming holds the call back and sends
+the parsed call when the reply ends. `tool_choice: "required"` and a named function are refused
+with that parser: Gemma 4's notation has no grammar to constrain the reply with.
+
 ## Gemma 4 mixture in NVFP4
 
 The Gemma 4 26B-A4B mixture (and fine-tunes of it) can be served from an NVFP4 export on a
@@ -242,7 +253,13 @@ The converter keeps each module as the checkpoint stores it: NVFP4 where the exp
 quantised it, BF16 where it did not. To prepare the artifact yourself, for example to add a
 DFlash drafter, run the converter directly. `--text-format w8` stores the unquantised matrices
 as W8 instead of BF16. That saves about 2 GB but makes prefill about three times slower on this
-model.
+model. `--text-format fp8` stores the attention and dense feed-forward projections in FP8 for
+the FP8 tensor cores instead, with a scale per 128 by 128 block (per row where a matrix's rows
+are not whole 128s), and quantises each prompt token's activations per 128 values.
+
+The same option applies to the other Gemma converters. A per-channel FP8 export, such as Red
+Hat's Gemma 3 `FP8-dynamic` checkpoints, defaults to `fp8` and keeps the export's own codes and
+row scales; `--text-format w8` re-encodes it as before.
 
 ```bash
 python -m surogate.serve.convert.gemma_vl.convert --model my-gemma4-26b-nvfp4 \
@@ -408,8 +425,22 @@ SUROGATE_SERVE_DFLASH_PACKED_PREFILL=1 \
   surogate serve /path/to/gemma4-26b-dflash.sinfer --vision --spec dflash --draft-tokens 7
 ```
 
+A DFlash 2 drafter, such as
+[incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2) or
+[incoai/Qwen3.6-35B-A3B-DFlash2](https://huggingface.co/incoai/Qwen3.6-35B-A3B-DFlash2), is
+prepared the same way, with `--dflash-model`, for any target that serves DFlash, including an
+NVFP4 export. It adds a two-tap convolution over the block's rows around every attention and
+feed-forward sublayer, and a candidate selector: instead of each position's best draft token on
+its own, the server takes the 16 best per position and walks them left to right, scoring each
+token after the one chosen before it. Its blocks are 8 tokens, so serve it with
+`--draft-tokens 7` or fewer. `SUROGATE_SERVE_DFLASH_SELECTOR=0` drafts each position's best token
+instead of walking the candidates, to measure what the selector adds.
+
 The drafter was trained against the base model. A fine-tune accepts fewer of its drafts;
-measure acceptance on your own prompts. On a fine-tuned 26B-A4B, seven draft tokens were faster
+measure acceptance on your own prompts. With real tool calls at 100k-200k tokens of context,
+Surogate3.7-35B-A3B (a fine-tuned merge) accepted 26-27% of the stock Qwen3.6-35B-A3B DFlash 2
+drafter's tokens and 78-81% of its own MTP head's, so it is served with `--spec mtp
+--draft-tokens 3`. On a fine-tuned 26B-A4B, seven draft tokens were faster
 than three or fifteen, and faster than `--spec-adaptive`. Speculation speeds up generation,
 including the thinking of a decision request with `"thinking": true`. It does not speed up
 one-pass decisions, which generate one token.

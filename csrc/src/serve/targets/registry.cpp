@@ -1,3 +1,4 @@
+#include "api/family/rope_scaling.h"
 #include "runtime/engine/pipeline_partition.h"
 #include <algorithm>
 #include <optional>
@@ -260,15 +261,17 @@ std::uint32_t context_prefill(std::uint32_t requested, std::uint32_t context) {
 }
 
 
-/// An MTP run that chose no proposal head drafts with the artifact's shortlist head when it
-/// carries one. Each draft then reads that head (131,072 rows at 4 bits on Qwen3.5-family
-/// NVFP4 exports) instead of the whole output head (248,320 rows at 8 bits), three times a
-/// round at three drafts. The target verifies every draft either way, so greedy output is
-/// unchanged and sampled output keeps the target's distribution: on a DGX Spark it took
-/// ~11 ms from every round of Qwen3.8-27B at the same acceptance, +10% decode at 1 and 8
-/// users and +6% at 16. --full-head-draft opts out.
+/// An MTP or DFlash run that chose no proposal head drafts with the artifact's shortlist head
+/// when it carries one. Each draft then reads that head (131,072 rows at 4 bits on
+/// Qwen3.5-family NVFP4 exports) instead of the whole output head (248,320 rows at 8 bits).
+/// The target verifies every draft either way, so greedy output is unchanged and sampled
+/// output keeps the target's distribution. On a DGX Spark it took ~11 ms from every MTP round
+/// of Qwen3.8-27B at the same acceptance, +10% decode at 1 and 8 users and +6% at 16; a DFlash
+/// round scores all its drafts at once, 56 rows at eight lanes, which the full head served in
+/// two passes of 5.5 ms. --full-head-draft opts out.
 EngineOptions with_resolved_proposal_head(const EngineOptions& options, const artifact::Reader& reader) {
-    if (options.speculative.backend != SpeculativeBackend::Mtp ||
+    if ((options.speculative.backend != SpeculativeBackend::Mtp &&
+         options.speculative.backend != SpeculativeBackend::DFlash) ||
         options.speculative.proposal_head_explicit ||
         options.speculative.proposal_head != ProposalHead::Full ||
         reader.find("text/draft_head") == nullptr) {
@@ -276,14 +279,32 @@ EngineOptions with_resolved_proposal_head(const EngineOptions& options, const ar
     }
     EngineOptions resolved              = options;
     resolved.speculative.proposal_head = ProposalHead::Optimized;
-    std::fprintf(stderr, "engine: MTP drafts with the artifact's shortlist head "
-                         "(--full-head-draft drafts with the full output head)\n");
+    std::fprintf(stderr, "engine: %s drafts with the artifact's shortlist head "
+                         "(--full-head-draft drafts with the full output head)\n",
+                 options.speculative.backend == SpeculativeBackend::DFlash ? "DFlash" : "MTP");
     return resolved;
 }
 
 family::VisionGeometry declared_vision_geometry(const artifact::Reader& reader) {
     return reader.vision_geometry().empty() ? family::VisionGeometry{}
                                             : family::VisionGeometry::resolved(reader.vision_geometry());
+}
+
+/// The dimensions to plan against: the target's declared geometry with --rope-scaling laid over
+/// it. YaRN reaches the rotation through the target's own bindings (plan_load), so only a target
+/// that lays it there takes the flag; any other refuses it rather than plan a context its
+/// rotation was never extended to.
+template <class Target>
+family::TextGeometry served_geometry(const artifact::Reader& reader, const EngineOptions& options) {
+    family::TextGeometry geometry = Target::declared_geometry(reader);
+    if (options.rope_scaling.factor != 0.0F) {
+        if (std::string_view(Target::target_key) != "qwen3_5_moe") {
+            throw std::invalid_argument("--rope-scaling: YaRN is served by the qwen3_5_moe target only, not " +
+                                        std::string(Target::target_key));
+        }
+        family::apply_rope_scaling(geometry, options);
+    }
+    return geometry;
 }
 
 template <class Target>
@@ -353,7 +374,7 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
     const auto weights_profile                    = Target::resolve_weights(identity);
     // The dimensions to plan and bind against: this target's compiled config with whatever
     // the artifact declares laid over it.
-    const family::TextGeometry geometry            = Target::declared_geometry(reader);
+    const family::TextGeometry geometry            = served_geometry<Target>(reader, options);
     const auto generation = reader.payload("frontend/generation_config.json").data;
     const ModelSamplingDefaults sampling_defaults = runtime::load_sampling_defaults(
         Target::sampling_defaults(Target::model_id),
@@ -715,7 +736,7 @@ StagePreflight<Target>
 preflight_pipeline(const EngineOptions& options, artifact::Reader& reader,
                    const std::vector<EngineOptions>& stage_options) {
     const auto weights_profile          = Target::resolve_weights(reader.identity());
-    const family::TextGeometry geometry = Target::declared_geometry(reader);
+    const family::TextGeometry geometry = served_geometry<Target>(reader, options);
     const auto count                    = stage_options.size();
 
     StagePreflight<Target> out{};

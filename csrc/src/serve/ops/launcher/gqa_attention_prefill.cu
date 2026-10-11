@@ -208,7 +208,8 @@ void gqa_attention_prompt_attention_launch_for(const Tensor& q, const Tensor& po
                 static_cast<__nv_bfloat16*>(out.data), tokens, selection);
     } else if (cache.dtype == DType::FP8_E4M3FN) {
         const dim3 attention_grid(static_cast<unsigned>(div_up(tokens, kGqaPrefillBr)),
-                                  static_cast<unsigned>(q.ne[1]), 1u);
+                                  static_cast<unsigned>(q.ne[1]),
+                                  static_cast<unsigned>(kGqaPrefillOutSplit<Geometry::HeadDim>));
         // A QSA selection takes the same e4m3 Q Kᵀ as the dense chunks: the mask is applied to
         // the scores either way, and the selection's chunks are the ones past the budget, where
         // the attention is longest.
@@ -247,7 +248,8 @@ void gqa_attention_prompt_attention_launch_for(const Tensor& q, const Tensor& po
             }
         };
         if constexpr (kGqaPrefillFp8QkRegistered<Geometry::HeadDim>) {
-            if (::sinfer::ops::prompt_attention_fp8_query()) {
+            if (::sinfer::ops::prompt_attention_fp8_query() &&
+                (Geometry::HeadDim <= 256 || ::sinfer::ops::prompt_attention_fp8_query_wide())) {
                 launch_sparse.template operator()<true>();
             } else {
                 launch_sparse.template operator()<false>();
@@ -257,7 +259,8 @@ void gqa_attention_prompt_attention_launch_for(const Tensor& q, const Tensor& po
         }
     } else {
         const dim3 attention_grid(static_cast<unsigned>(div_up(tokens, kGqaPrefillBr)),
-                                  static_cast<unsigned>(q.ne[1]), 1u);
+                                  static_cast<unsigned>(q.ne[1]),
+                                  static_cast<unsigned>(kGqaPrefillOutSplit<Geometry::HeadDim>));
         if (selection.words != nullptr) {
             CUDA_CHECK(::sinfer::ops::set_func_attribute_per_device(
                 gqa_attention_prefill_bf16_kernel<Geometry, Metadata, __nv_bfloat16, true, 4>,
@@ -544,6 +547,14 @@ void set_prompt_attention_fp8_query(bool enabled) noexcept {
 
 bool prompt_attention_fp8_query() noexcept {
     return prompt_attention_fp8_query_switch().load(std::memory_order_relaxed);
+}
+
+bool prompt_attention_fp8_query_wide() noexcept {
+    static const bool enabled = [] {
+        const char* text = std::getenv("SUROGATE_SERVE_PROMPT_ATTENTION_FP8_QK_WIDE");
+        return text == nullptr || std::string_view(text) != "0";
+    }();
+    return enabled;
 }
 
 } // namespace sinfer::ops

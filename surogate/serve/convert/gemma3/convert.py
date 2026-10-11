@@ -346,6 +346,8 @@ def load_resources(model_dir: str | Path) -> tuple[ResourcePayload, ...]:
             data = (path.read_bytes() if template is None
                     else official_resources.tokenizer_config_with_template(
                         path.read_bytes(), template))
+        elif filename == "tokenizer.json" and path.exists():
+            data = text_model_tokenizer(path.read_bytes(), _vocab_size(root))
         elif path.exists():
             data = path.read_bytes()
         elif filename == "generation_config.json":
@@ -364,6 +366,42 @@ def load_resources(model_dir: str | Path) -> tuple[ResourcePayload, ...]:
     return tuple(payloads)
 
 
+
+
+def _vocab_size(root: Path) -> int | None:
+    config_path = Path(root) / "config.json"
+    if not config_path.exists():
+        return None
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    text = config.get("text_config") if isinstance(config.get("text_config"), dict) else config
+    value = text.get("vocab_size", config.get("vocab_size"))
+    return value if isinstance(value, int) and value > 0 else None
+
+
+def text_model_tokenizer(data: bytes, vocab_size: int | None) -> bytes:
+    """The checkpoint's `tokenizer.json` without the added tokens past the embedding table.
+
+    Every Gemma 3 release ships the multimodal tokenizer, which adds `<image_soft_token>` at id
+    262,144 -- one past the last row of the text-only sizes' 262,144-row table (the 270M and the
+    1B; the vision sizes pad theirs to 262,208). The text model has no row for it, so the artifact
+    could not state a token domain its head covers and was refused at load ("token_domain exceeds
+    output_rows"), and a prompt that spelled the marker would have indexed past the table. The
+    marker means nothing without an image tower, so it is dropped from the stored tokenizer, which
+    then splits that text into ordinary pieces as the GGUF releases do. A vocabulary entry past
+    the table is a different checkpoint problem and is left for the domain check to refuse.
+    """
+    if vocab_size is None:
+        return data
+    tokenizer = json.loads(data)
+    added = tokenizer.get("added_tokens") or []
+    kept = [token for token in added if token.get("id", 0) < vocab_size]
+    if len(kept) == len(added):
+        return data
+    dropped = [token.get("content") for token in added if token.get("id", 0) >= vocab_size]
+    print(f"tokenizer: dropping added tokens past the {vocab_size}-row embedding: {dropped}",
+          flush=True)
+    tokenizer["added_tokens"] = kept
+    return json.dumps(tokenizer, ensure_ascii=False).encode("utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +443,17 @@ def build_object_plan(
         object_specs = GgufRepackSource.native_specs(object_specs, native)
     return family_conversion.build_object_plan(object_specs, resources)
 
+
+
+def stored_tokenizer_domain(preflight: "ConversionPreflight") -> int:
+    """The domain of the tokenizer the artifact stores, which `text_model_tokenizer` may have
+    trimmed; the checkpoint's own file when no tokenizer resource is carried."""
+    from surogate.serve.convert.common.checkpoint import tokenizer_json_ids
+
+    for item in preflight.resources:
+        if item.name == "frontend/tokenizer.json":
+            return tokenizer_json_ids(json.loads(item.data))[-1] + 1
+    return tokenizer_domain(preflight.model_dir)
 
 
 def geometry_block(preflight: "ConversionPreflight", *, token_domain: int) -> dict[str, float]:
@@ -558,12 +607,21 @@ def build_conversion_report(
     }
 
 
+#: How the attention and feed-forward projections are stored: `w8`, the groupwise int8 every
+#: Gemma 3 artifact has used, or `fp8` for the FP8 tensor cores (E4M3 with a multiplier per
+#: 128 x 128 block, or per row where only K is whole 128s), which a prompt round runs two to four
+#: times faster than W8 on a DGX Spark. A per-channel FP8 export (Red Hat's) defaults to `fp8`
+#: and keeps its own codes and row multipliers; a BF16 checkpoint defaults to `w8`.
+TEXT_FORMATS = ("w8", "fp8")
+
+
 def convert(
     model_dir: str | Path,
     out_path: str | Path,
     *,
     device: str | torch.device = "cuda",
     gguf_repack: str | Path | None = None,
+    text_format: str | None = None,
 ) -> Path:
     """Run the complete conversion and return the conversion-report path."""
 
@@ -611,9 +669,20 @@ def convert(
             print(f"native K-quants: {len(native)} objects served as the GGUF stores them",
                   flush=True)
 
+    if text_format is None:
+        text_format = ("fp8" if fp8_block_source.is_fp8_channel_export(config) and repack is None
+                       else "w8")
+    if text_format not in TEXT_FORMATS:
+        raise ValueError(f"text format must be one of {TEXT_FORMATS}, not {text_format!r}")
+    if text_format == "fp8":
+        if repack is not None:
+            raise ValueError("--text-format fp8 stores the projections from the checkpoint's "
+                             "values; a GGUF repack serves its own")
+        object_specs = fp8_block_source.fp8_projection_specs(object_specs)
     # An FP8 export keeps its codes where the kernels read them (common/fp8_block_source.py).
     fp8_source, fp8_plan = fp8_block_source.for_checkpoint(model, config, object_specs,
-                                                           recipes_by_name, repack=repack)
+                                                           recipes_by_name, repack=repack,
+                                                           row_codes=text_format == "fp8")
     if fp8_plan is not None:
         object_specs = fp8_plan.specs
     preflight = preflight_conversion(
@@ -636,7 +705,7 @@ def convert(
             output,
             ArtifactIdentity(inventory.MODEL_ID, inventory.WEIGHTS_ID, architecture="gemma3"),
             preflight.object_plan.specs,
-            geometry=geometry_block(preflight, token_domain=tokenizer_domain(model)),
+            geometry=geometry_block(preflight, token_domain=stored_tokenizer_domain(preflight)),
             layer_types=geometry.layer_types,
             external=external,
         ) as writer:
@@ -688,6 +757,7 @@ def convert(
             "model": str(model_dir),
             "out": str(out_path),
             "device": requested_device,
+            "text_format": text_format,
         },
         config_summary=preflight.config_summary,
         source_preflight=preflight.source,
@@ -716,8 +786,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--gguf-repack", type=Path, default=None,
                         help="repack map: objects this GGUF serves as it stores them")
+    parser.add_argument("--text-format", choices=TEXT_FORMATS, default=None,
+                        help="storage of the attention and feed-forward projections; default fp8 "
+                             "(codes kept) for a per-channel FP8 export, w8 otherwise")
     args = parser.parse_args(argv)
-    convert(args.model, args.out, device=args.device, gguf_repack=args.gguf_repack)
+    convert(args.model, args.out, device=args.device, gguf_repack=args.gguf_repack,
+            text_format=args.text_format)
 
 
 if __name__ == "__main__":

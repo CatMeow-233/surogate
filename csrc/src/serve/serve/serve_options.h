@@ -61,6 +61,8 @@ struct ServeOptions {
     ModelPriority model_priority = ModelPriority::Normal;
     std::string request_log_jsonl;                // empty => structured request logging disabled
     std::uint32_t max_context              = 8192;
+    /// --rope-scaling: YaRN over the checkpoint's rotation (EngineOptions::RopeScaling).
+    EngineOptions::RopeScaling rope_scaling;
     KvCapacityPolicy kv_capacity           = KvCapacityPolicy::explicit_capacity(8192);
     // --host-moe-layers N|all: experts of this many mixture layers live in pinned host memory,
     // read over PCIe, instead of on the card. What lets a model larger than the cards load.
@@ -122,8 +124,9 @@ struct ServeOptions {
     // on what else shares its rounds (api/ops/batch_invariant.h). Off by default: it trades
     // throughput for reproducibility.
     bool batch_invariant = false;
-    bool enable_thinking =
-        true; // default thinking mode for the generation prompt (--no-thinking opts out)
+    // Default thinking mode for the generation prompt: --thinking or --no-thinking, else what
+    // the chat template does when nothing asks (PromptCapabilities::thinking_by_default).
+    std::optional<bool> enable_thinking;
     bool preserve_thinking = false;
     int default_max_tokens = kDefaultMaxTokens;
     bool enable_cors       = false; // send permissive CORS headers for browser UIs
@@ -133,6 +136,9 @@ struct ServeOptions {
     // tool calls in the Qwen block.
     ReasoningFormat reasoning_format = ReasoningFormat::ThinkTags;
     ToolCallFormat tool_call_format  = ToolCallFormat::QwenXml;
+    /// --tool-call-parser was given. Without it a checkpoint whose vocabulary spells Gemma 4's
+    /// tool-call markers is served with the gemma4 parser (GenerationService).
+    bool tool_call_format_explicit = false;
     /// --enable-auto-tool-choice: vLLM gates automatic tool selection behind this
     /// flag and requires a tool-call parser with it. Off, a request asking for
     /// `tool_choice: "auto"` with tools attached is refused rather than answered

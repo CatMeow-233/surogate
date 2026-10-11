@@ -24,19 +24,28 @@ inline constexpr int kGqaPrefillBcFor = HeadDim > 256 ? 16 : 32;
 inline constexpr int kGqaPrefillBc       = kGqaPrefillBcFor<256>;
 inline constexpr int kGqaPrefillThreads  = 128;
 
+// How many CTAs share a query tile's output columns. A 512-wide head's output would be 256 FP32
+// accumulators a thread, past the register file, so two CTAs each compute the whole Q Kᵀ (the
+// scores need every column) and P V for half the columns: the query-key product is paid twice,
+// but nothing spills. Narrower heads keep the whole row in one CTA.
+template <int HeadDim>
+inline constexpr int kGqaPrefillOutSplit = HeadDim > 256 ? 2 : 1;
+
 // Dynamic shared-memory arena of the BF16 prompt kernel: one Q tile plus the K
-// and V tiles it streams over, all bf16. The head dimension is a template
-// parameter rather than a file constant, so a launcher asks for the arena of the
-// geometry it is about to launch: 64 KiB at head dim 256, 32 KiB at 128.
+// and V tiles it streams over, all bf16, V only for the CTA's own output columns.
+// The head dimension is a template parameter rather than a file constant, so a
+// launcher asks for the arena of the geometry it is about to launch: 64 KiB at
+// head dim 256, 32 KiB at 128.
 template <int HeadDim>
 inline constexpr int kGqaPrefillSmemBytes =
-    (kGqaPrefillBr + 2 * kGqaPrefillBcFor<HeadDim>) * HeadDim *
+    ((kGqaPrefillBr + kGqaPrefillBcFor<HeadDim>) * HeadDim +
+     kGqaPrefillBcFor<HeadDim> * (HeadDim / kGqaPrefillOutSplit<HeadDim>)) *
     static_cast<int>(sizeof(__nv_bfloat16));
 
 // Both arenas stay within the device opt-in shared-memory limit.
 static_assert(kGqaPrefillSmemBytes<256> == 65536);
 // The 512-wide arena may not exceed it either: 101,376 bytes is what the card opts in to.
-static_assert(kGqaPrefillSmemBytes<512> == 98304);
+static_assert(kGqaPrefillSmemBytes<512> == 90112);
 
 // An e4m3 cache can't be staged with cp.async straight into the bf16 tiles: its codes have to
 // be widened on the way. Where the arena has room, the kernel lands each key block's raw codes,
@@ -48,6 +57,7 @@ template <int HeadDim>
 inline constexpr int kGqaPrefillFp8RawBytes = 4 * kGqaPrefillBcFor<HeadDim> * HeadDim;
 template <int HeadDim>
 inline constexpr bool kGqaPrefillFp8Raw =
+    kGqaPrefillOutSplit<HeadDim> == 1 &&
     kGqaPrefillSmemBytes<HeadDim> + kGqaPrefillFp8RawBytes<HeadDim> <= 101376;
 template <int HeadDim>
 inline constexpr int kGqaPrefillFp8SmemBytes =
@@ -60,15 +70,22 @@ static_assert(!kGqaPrefillFp8Raw<512>);
 // the e4m3 tensor cores at twice the bf16 rate; only V is widened. The arena holds the e4m3 Q
 // tile and its row scales, one raw block each of K and V codes, and the widened V tile: under
 // half of an SM's 100 KiB at head dim 256, so two CTAs share an SM. The 16-byte swizzle needs
-// eight chunks a row.
+// eight chunks a row. A 512-wide head's two output-split CTAs each hold the whole e4m3 Q and K
+// but only their own half of V, codes and widened: 52 KiB, one CTA to an SM.
+// MEASURED (DGX Spark, FP8 cache, 2,048 new tokens over 131,072 cached ones, d512-h16-kv2): the
+// bf16 product with V and K widened straight from global memory took 499 ms (17.8 TFLOP/s) where
+// a 256-wide head took 41 ms (109 TFLOP/s); at Gemma 4's five to ten global layers that was most
+// of a long-context agent turn.
 template <int HeadDim>
-inline constexpr bool kGqaPrefillFp8QkRegistered = HeadDim == 128 || HeadDim == 256;
+inline constexpr bool kGqaPrefillFp8QkRegistered = HeadDim == 128 || HeadDim == 256 || HeadDim == 512;
 template <int HeadDim>
 inline constexpr int kGqaPrefillFp8QkSmemBytes =
     kGqaPrefillBr * HeadDim + kGqaPrefillBr * static_cast<int>(sizeof(float)) +
-    2 * kGqaPrefillBcFor<HeadDim> * HeadDim +
-    kGqaPrefillBcFor<HeadDim> * HeadDim * static_cast<int>(sizeof(__nv_bfloat16));
+    kGqaPrefillBcFor<HeadDim> * HeadDim +
+    kGqaPrefillBcFor<HeadDim> * (HeadDim / kGqaPrefillOutSplit<HeadDim>) *
+        (1 + static_cast<int>(sizeof(__nv_bfloat16)));
 static_assert(kGqaPrefillFp8QkSmemBytes<256> == 49408);
+static_assert(kGqaPrefillFp8QkSmemBytes<512> == 53504);
 
 struct GqaPrefillDirectMetadata {
     const std::int32_t* table;
@@ -115,17 +132,18 @@ __device__ __forceinline__ std::int64_t gqa_prefill_q_index(int q_head, int d, i
                                                static_cast<std::int64_t>(q_heads) * token);
 }
 
-template <typename Geometry>
+// Columns [d_begin, d_begin + Columns) of each row, all of them by default.
+template <typename Geometry, int Columns = Geometry::HeadDim>
 __device__ __forceinline__ void gqa_prefill_zero_output_rows(__nv_bfloat16* out, int q_head,
                                                              int row_begin, int row_end, int tid,
                                                              int threads,
-                                                             int q_heads = Geometry::QHeads) {
+                                                             int q_heads = Geometry::QHeads,
+                                                             int d_begin = 0) {
     if (row_begin >= row_end) { return; }
-    constexpr int D    = Geometry::HeadDim;
-    const int elements = (row_end - row_begin) * D;
+    const int elements = (row_end - row_begin) * Columns;
     for (int element = tid; element < elements; element += threads) {
-        const int row = row_begin + element / D;
-        const int d   = element - (row - row_begin) * D;
+        const int row = row_begin + element / Columns;
+        const int d   = d_begin + element - (row - row_begin) * Columns;
         out[gqa_prefill_q_index<Geometry>(q_head, d, row, q_heads)] = __float2bfloat16(0.0f);
     }
 }

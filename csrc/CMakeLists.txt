@@ -1298,6 +1298,7 @@ add_library(sinfer_ops STATIC EXCLUDE_FROM_ALL
   ${SERVE_ROOT}/ops/launcher/gqa_attention_decode_gqa128_16q8.cu
   ${SERVE_ROOT}/ops/launcher/gqa_attention_decode_gqa128_16q2.cu
   ${SERVE_ROOT}/ops/launcher/gqa_attention_decode_gqa128_32q4.cu
+  ${SERVE_ROOT}/ops/launcher/gqa_attention_decode_gqa128_32q16.cu
   ${SERVE_ROOT}/ops/launcher/gqa_attention_decode_gqa64_32q4.cu
   ${SERVE_ROOT}/ops/launcher/gqa_attention_decode_gqa64_32q8.cu
   ${SERVE_ROOT}/ops/launcher/gqa_attention_decode_gqa256_4q1.cu
@@ -1323,6 +1324,7 @@ add_library(sinfer_ops STATIC EXCLUDE_FROM_ALL
   ${SERVE_ROOT}/ops/launcher/mask_columns.cu
   ${SERVE_ROOT}/ops/launcher/prepare_ragged_prefix.cu
   ${SERVE_ROOT}/ops/launcher/prepare_masked_block.cu
+  ${SERVE_ROOT}/ops/launcher/dflash2.cu
   ${SERVE_ROOT}/ops/launcher/residual_add.cu
   ${SERVE_ROOT}/ops/launcher/rmsnorm.cu
   ${SERVE_ROOT}/ops/launcher/logit_softcap.cu
@@ -1544,6 +1546,7 @@ ${SERVE_ROOT}/ops/launcher/head_linear.cu
   ${SERVE_ROOT}/ops/wrapper/mask_columns.cpp
   ${SERVE_ROOT}/ops/wrapper/prepare_ragged_prefix.cpp
   ${SERVE_ROOT}/ops/wrapper/prepare_masked_block.cpp
+  ${SERVE_ROOT}/ops/wrapper/dflash2.cpp
   ${SERVE_ROOT}/ops/wrapper/residual_add.cpp
   ${SERVE_ROOT}/ops/wrapper/rmsnorm.cpp
   ${SERVE_ROOT}/ops/wrapper/logit_softcap.cpp
