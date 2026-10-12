@@ -4987,3 +4987,127 @@ against `SUROGATE_SERVE_NVFP4_CUTLASS=rows`: Gemma 4 12B 172.8 against 131.2 tok
 users, 483.2 against 409.6 at 32, 4,659 against 3,994 tok/s on 2,048-token prompts; Gemma 3 12B
 480.0 against 409.6 at 32 users; Gemma 4 E4B 972.8 against 905.6 at 32 users. Greedy replies on the
 12B are identical to the old rule's (4 of 4, 64 tokens).
+
+## 135
+
+**Decode attention over an e4m3 cache loads each key tile one tile ahead (2026-10-11).** The
+resident-query small-T kernel (#132) loaded a cached e4m3 tile only when its turn came, four chunks
+at a time, and widened it before any arithmetic on it: nothing overlapped a tile's loads with the
+scoring and accumulation of the tile before. On a DGX Spark a decode call at head dim 256
+(Surogate3.7-35B-A3B: 16 query heads, 2 KV heads) read the cache at about 251 GB/s at the margin,
+but spent a fixed ~220 us a call besides. That was a long context's last wave of 2048-key
+partitions (1 MB of codes a CTA): a few CTAs streaming alone at a few GB/s each. Ten full-attention
+layers made it ~2 ms of every decode step.
+
+- **One tile ahead** (`gqa_small_t_load_fp8_tile`, `gqa_small_t_widen_fp8_tile`,
+  `ops/kernel/gqa_attention_decode_bf16.cuh`): each thread holds its share of the next tile's codes
+  in registers (16 pairs of 8 codes at two warps) while the current tile is scored, and widens them
+  into shared memory at the next tile's turn.
+- **Widest partitions first**: a CTA takes partition `active - 1 - blockIdx.y`, so the 2048-key
+  partitions start in the first wave and the 128- and 512-key ones fill the end. Each partition
+  still writes its own split's partials, so the reduction is unchanged.
+- **No QSA block list in the resident layout** (`GqaSmallTTcResidentSmem`). The resident kernel is
+  never sparse, and with the 1 KB list a four-token tile of two row warps (an MTP 3 verify of a
+  group of eight) took 50,432 bytes. Two of those plus the 1 KB a block reserves overran a GB10
+  SM's 100 KB, so verify ran one CTA an SM; it now runs two.
+- The widened values and every operation on them are unchanged: `sinfer_gqa_attention_test`'s
+  resident-against-legacy check passes bit for bit, and MTP draft acceptance in the engine is
+  identical before and after.
+- The causal attention bench takes contexts up to the op's 1,048,576 visible keys.
+
+Measured on a DGX Spark against 5110824. Kernel (`sinfer_causal_softmax_attention_bench`,
+`d256-h16-kv2`, e4m3, graph, cold cache):
+
+| B | W | 32K | 131K | 262K |
+|---|---|---|---|---|
+| 1 | 1 | 367 -> 306 us | 756 -> 658 us | 1289 -> 1161 us |
+| 1 | 4 | 323 -> 268 us | 837 -> 693 us | 1418 -> 1244 us |
+| 4 | 1 | 783 -> 673 us | 2497 -> 2329 us | 4816 -> 4538 us |
+| 4 | 4 | 902 -> 784 us | 2893 -> 2549 us | 5524 -> 4902 us |
+
+Most of it is the one-tile-ahead load and the layout; widest-first adds 1-5%. At 1,040,000 keys a
+batch-1 call takes 4.9 ms (217 GB/s).
+
+Engine: Surogate3.7-35B-A3B NVFP4 with FP8 KV, 1,024 tokens after a cached prompt, the same build
+with 5110824's kernel file for the "before" runs. No speculation: 46.1-47.3 -> 49.1-49.3 tok/s at
+123K prompt tokens, 42.7-43.5 -> 43.8-43.9 at 197K. MTP 3: 89.2-89.4 -> 93.9-94.2 and 79.2-79.4 ->
+84.1-84.2, acceptance 67.6% and 67.2% both times. Agent turns with real tool calls
+(`agentic_long_bench.py --tools`, 1 agent, 100K-200K): decode p50 96.2 -> 99.2 tok/s with MTP 3,
+46.7 -> 47.5 without; first token unchanged (1.11-1.12 s).
+
+## 136
+
+**A prompt reuses the token ids of a recent prompt it opens with (2026-10-11).** An agent sends its
+whole conversation every turn, and the server rendered and tokenized all of it each time: on a
+DGX Spark a Surogate3.7-35B-A3B turn at ~147K prompt tokens, of which ~2,200 new, spent 0.26 s
+before its prefill began (18% of the turn with MTP 3), almost all of it in the BPE encode.
+
+- **`Tokenizer::encode_reusing_prefix`** (`family/impl/frontend/tokenizer.cpp`, used by
+  `encode_rendered_chat` for the rendered chat and its rewrite-checkpoint prefix): the tokenizer
+  keeps the ids of its 32 most recent prompts of 16 KB or more (256 MB of text at most) with the
+  byte offset and id index of each added token. A new prompt takes the ids of the one sharing the
+  most opening bytes, up to the last added token that starts at least the longest added token's
+  length inside the shared bytes, and encodes the rest. A prompt holding nearly all of the one it
+  reused (the same conversation's previous turn) replaces it.
+- The ids are exactly `encode()`'s: an ordinary span between added tokens is encoded on its own,
+  and the added-token scan reads no further ahead than the longest added token, so up to that
+  token both encodes make the same decisions on the same bytes. SentencePiece checkpoints (encoded
+  by the project tokenizer) and shorter texts take `encode()`.
+- `SUROGATE_SERVE_PROMPT_TOKEN_REUSE=0` encodes every prompt whole; `verify` also encodes it whole
+  and fails the request if the ids differ. `sinfer_added_token_matching_test` checks reuse against
+  `encode()` on growing, cut and branching prompts over overlapping added tokens, six
+  conversations at once.
+
+Measured on a DGX Spark (`agentic_long_bench.py --tools`, MTP 3, 100K-200K, same build otherwise):
+at 1 agent prepare p50 0.262 -> 0.026 s, first token p50 1.117 -> 0.874 s, turn p50 1.421 -> 1.186 s,
+35.7 against 31.3 turns a minute, draft acceptance identical (81.5%); at 4 agents prepare 0.305 ->
+0.025 s, first token p50 2.00 -> 1.79 s, turn p50 4.82 -> 4.34 s. A session run with `verify`
+(42 turns of real tool calls) found no difference.
+
+## 137
+
+**Prompt attention over an e4m3 cache takes P V on the e4m3 tensor cores too, on sm_12x (2026-10-12).**
+After #119 the prompt kernel took Q Kᵀ in e4m3 but still widened every block's V codes to bf16 in
+shared memory and multiplied P V in bf16. On a DGX Spark it ran at ~110 TFLOP/s at head dim 256,
+under half the GB10's e4m3 rate. Skipping its parts one at a time showed it waiting, not
+tensor-bound: its non-tensor work alone took about as long as the whole kernel (the staging,
+widening, softmax and two barriers a block), and the tensor work alone ran at 135 TFLOP/s. Each
+block's codes landed only behind the P V of the block before, since one slot of each was all the
+arena held beside the 16 KB bf16 V tile at two CTAs an SM; #119's two-slot variant at one CTA an
+SM was slower.
+
+- **V's codes straight into the tensor cores** (`PvFp8`, `ops/kernel/gqa_attention_prefill_bf16.cuh`):
+  `ldmatrix.m16n16.x2.trans.b8` (an sm_12x instruction) reads two 16x16 tiles of a block's V codes as
+  the cache holds them and hands each lane the m16n8k32 e4m3 B operand of two 8-column n-tiles. P,
+  scaled by 448 so a block's largest probability lands on e4m3's largest finite value, is rounded
+  to e4m3 from the score registers. Nothing is widened, and P V takes half the tensor time.
+- **K in a fixed key order** (`gqa_prefill_pv8_row`, `gqa_prefill_pv8_column_key`): an m16n8 score
+  fragment gives a thread columns 2l, 2l+1 of each 8-column n-tile, and the k32 A operand wants keys
+  4l..4l+3 of each 16, so K's rows land permuted (score column 16h + 8t + 2l + i holds key
+  16h + 4l + 2t + i; SageAttention2's trick, the sum over keys being order-free). P packs straight
+  from the scores, and the mask reads each column's key through the same map.
+- **Two slots, one barrier** a block: the bf16 V tile's 16 KB holds a second block of K and V codes
+  (`kGqaPrefillFp8QkSmemBytes` unchanged, 49,408 bytes at head dim 256, two CTAs an SM). Block kb+1's
+  codes go in flight right after block kb's only barrier, a whole block ahead.
+- Head dims 128 and 256 on the e4m3 Q Kᵀ path's 32-key blocks, dense, QSA and gathered prompts, in
+  layers without a sliding window, on devices of compute capability 12.x (the instruction is gated
+  by `__CUDA_ARCH_FAMILY_SPECIFIC__` and the launcher by the device). A windowed layer reads at most
+  its window of keys, so its prompt attention is cheap, and its few keys average P's rounding the
+  least: with Gemma 4 12B's 1,024-key sliding layers on the path, the model's own 900-token answer
+  given a 93,832-token document scored +0.017 +- 0.011 nats (paired), top-1 agreement 94.3%. Its
+  512-wide global layers are not on the path, so that model is unchanged. **`ops::prompt_attention_fp8_pv`** is on by default;
+  `SUROGATE_SERVE_PROMPT_ATTENTION_FP8_PV=0` keeps P V in bf16 over widened V. `sinfer_gqa_attention_test`
+  holds the path to FlashAttention-3's FP8 bound and passes with the switch on and off;
+  `sinfer_gqa_long_context_test`, `sinfer_sparse_gqa_batch_test` and
+  `sinfer_mixed_attention_workspace_test` pass with it on.
+
+Measured on a DGX Spark, the same build with the switch off and on. Kernel
+(`sinfer_causal_softmax_attention_bench`, `d256-h16-kv2`, e4m3, 2,048 new tokens, graph, cold cache):
+109.7 -> 147.4 TFLOP/s over 32K cached keys, 110.5 -> 146.7 over 131K. Surogate3.7-35B-A3B NVFP4
+with FP8 KV: the 900 tokens of a reference answer scored given its 94,631-token document,
+-0.0013 +- 0.0050 nats (paired), top-1 agreement 95.9%; the three-passphrase needle 3/3 at every
+length. Cold prompts: 203,377 tokens 59 -> 51 s, 403,459 with YaRN 183 -> 150 s (183 s measured
+on 5110824), 1,000,667 with YaRN 946 -> 741 s (946 s on 5110824). Agent turns with real tool calls
+(`agentic_long_bench.py --tools`, MTP 3, 100K-200K): 1 agent first token p50 0.862 -> 0.721 s, turn
+p50 1.190 -> 1.055 s, 35.8 -> 40.0 turns a minute; 4 agents first token p50 1.79 -> 1.15 s, turn
+p50 4.34 -> 3.92 s, 35.2 -> 41.5 turns a minute (the 4-agent "before" from #136's build).
