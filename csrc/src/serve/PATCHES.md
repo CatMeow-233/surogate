@@ -5111,3 +5111,52 @@ on 5110824), 1,000,667 with YaRN 946 -> 741 s (946 s on 5110824). Agent turns wi
 (`agentic_long_bench.py --tools`, MTP 3, 100K-200K): 1 agent first token p50 0.862 -> 0.721 s, turn
 p50 1.190 -> 1.055 s, 35.8 -> 40.0 turns a minute; 4 agents first token p50 1.79 -> 1.15 s, turn
 p50 4.34 -> 3.92 s, 35.2 -> 41.5 turns a minute (the 4-agent "before" from #136's build).
+
+## 138
+
+**Prompt attention's e4m3 P V loop, software-pipelined** (sm_12x; `ops/kernel/gqa_attention_prefill_bf16.cuh`,
+`PvFp8`). #137's loop ran each key block's Q Kᵀ, softmax and P V in turn, so a warp's tensor-core work stood
+still through its softmax (the row maxima's shuffles, 16 exp2s, P's e4m3 packing) and only the other CTA's warp
+on the SM sub-partition could fill it. The loop now issues block kb + 1's Q Kᵀ first and runs block kb's softmax
+between its contraction steps, as FlashAttention-3 overlaps a warpgroup's softmax with its next GEMM:
+
+- K's codes land two blocks ahead and V's one, in #137's two slots each: at block kb's barrier the K slot block
+  kb's Q Kᵀ read (a block earlier) and the V slot block kb - 1's P V read are both free, so the arena stays
+  49,408 bytes at head dim 256, two CTAs an SM, 238 registers, no local memory.
+- The softmax runs in stages (scale and mask, row maxima and rescale factors, then each n-tile's exp2s and
+  packing) placed after the Q Kᵀ's steps. The same arithmetic in the same order as #137: Surogate3.7-35B-A3B's
+  reference answer scores the same to the last printed digit (mean NLL 0.11539, top-1 0.9678).
+- Placing the row maxima and the rescale ahead of the Q Kᵀ instead (so its branch came first) was slower
+  (150 TFLOP/s): the maxima's shuffles then stood alone before the MMAs.
+- A lambda parameter whose type names the kernel's own constexpr n-tile count crashes cudafe++ (CUDA 13.0,
+  segfault in the front end); the loop's lambdas spell their score arrays' bound out (#139: under the alias
+  `GqaPrefillPv8Scores`).
+
+Measured on a DGX Spark (`sinfer_causal_softmax_attention_bench`, `d256-h16-kv2`, e4m3, 2,048 new tokens,
+graph, cold cache; two runs each, same session): 32K cached keys 146.9 / 148.3 -> 151.5 / 154.3 TFLOP/s, 131K
+146.7 / 150.1 -> 155.8 / 156.1. `sinfer_gqa_attention_test` (switch on and off), `sinfer_gqa_long_context_test`,
+`sinfer_sparse_gqa_batch_test` and `sinfer_mixed_attention_workspace_test` pass. Compile-time ablations of the
+pipelined loop (timing only, wrong results): no K/V codes landed in the loop 192-196 TFLOP/s, no softmax
+arithmetic 204-211, so the codes' landing and the softmax are still about a fifth and a quarter of the kernel.
+
+## 139
+
+**Prompt attention's e4m3 P V loop lands whole key blocks from precomputed offsets** (sm_12x;
+`ops/kernel/gqa_attention_prefill_bf16.cuh`, `PvFp8`). #138's ablation without the codes' landing ran ~25% faster,
+and the loop's SASS showed why most of that was not memory: each block's 8 cp.async a thread (4 chunks each of K
+and V) came wrapped in ~100 integer and predicate instructions, a range check, a constant-bank pointer load and
+64-bit address arithmetic per chunk, rebuilt every block. A thread's chunks are the same keys and bytes of every
+block (keys `tid / (D / 16) + i * KeysPerStep8`, bytes `(tid % (D / 16)) * 16`), so their places in a slot (K's
+rows permuted by `gqa_prefill_pv8_row`, both swizzled by `gqa_prefill_swz8`) and in the cache's page are worked
+out once, before the loop. A block whose keys are all visible (every block but the diagonal's, a 32-key block never
+crossing a 64-key page) lands from one base pointer a tensor; diagonal and gathered blocks keep `stage_raw`'s
+checked path. The score arrays of #138's lambdas take the alias `GqaPrefillPv8Scores`.
+
+Bit-exact with #138: Surogate3.7-35B-A3B's reference answer scores mean NLL 0.11539, top-1 0.9678, paired
+difference 0 on all 900 tokens. Measured on a DGX Spark (`sinfer_causal_softmax_attention_bench`,
+`d256-h16-kv2`, e4m3, 2,048 new tokens, graph, cold cache; same session, two runs): 32K cached keys 155.2 ->
+168.8 / 168.8 TFLOP/s, 131K 154.0 -> 167.4 / 171.1. The four attention tests pass.
+
+Tried and dropped: folding the score scale and P's 448 into the exponent's one FMA (32 fewer multiplies a block a
+thread) left the kernel at 154 TFLOP/s and failed `sinfer_gqa_attention_test`'s split-numerator precision case
+(QSA, width 131) on its changed rounding; the softmax's cost is not its multiplies.
