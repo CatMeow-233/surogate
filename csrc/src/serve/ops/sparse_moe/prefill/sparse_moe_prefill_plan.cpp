@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <stdexcept>
 
 namespace sinfer::ops::detail {
@@ -44,6 +45,32 @@ bool ggml_q3k_gate_vetoed() noexcept {
     static const bool vetoed = env_vetoed("SUROGATE_SERVE_MOE_GGML_Q3K");
     return vetoed;
 }
+/// The i-quants (IQ4_NL, IQ4_XS, IQ3_XXS, IQ3_S, IQ2_S, IQ2_XXS, IQ1_M) on the int8 route, on
+/// either side (wide BF16 route when vetoed).
+bool ggml_iq_vetoed() noexcept {
+    static const bool vetoed = env_vetoed("SUROGATE_SERVE_MOE_GGML_IQ");
+    return vetoed;
+}
+/// The i-quants admitted to the prefill family at all; vetoed, their pairs keep the small-T
+/// slices they took before.
+bool ggml_iq_prefill_vetoed() noexcept {
+    static const bool vetoed = env_vetoed("SUROGATE_SERVE_MOE_GGML_IQ_PREFILL");
+    return vetoed;
+}
+bool is_iq(QType qtype) noexcept {
+    switch (qtype) {
+    case QType::IQ4_NL:
+    case QType::IQ4_XS:
+    case QType::IQ3_XXS:
+    case QType::IQ3_S:
+    case QType::IQ2_S:
+    case QType::IQ2_XXS:
+    case QType::IQ1_M:
+        return true;
+    default:
+        return false;
+    }
+}
 
 /// The three K-quants with a hand codec on both prefill routes: the pairs served first.
 bool is_ggml_k_hand(QType qtype) noexcept {
@@ -58,10 +85,12 @@ bool is_ggml_k_hand(QType qtype) noexcept {
 /// one otherwise), and every registered geometry's reduction axes are multiples of 64.
 ///
 /// Only formats covered by `test_sparse_moe_ggml_prefill.cpp`: the published
-/// Gemma 4 mixtures and Flash-Next's Q2_0 routed experts. Q2_K, Q4_0, Q4_1, IQ4_NL and F16 decode on
-/// the same generic codec and would very likely be right, but no artifact here holds experts
-/// in them and nothing measures them, so they keep the small-T slices; to admit one, add its
-/// fixture and mixture to that test and its case here.
+/// Gemma 4 mixtures, Flash-Next's Q2_0 routed experts, and the i-quants of the GSQ-RCO Flash-Next
+/// GGUFs (IQ4_NL down; IQ4_XS, IQ3_XXS, IQ3_S, IQ2_S, IQ2_XXS and IQ1_M gate/up), which until
+/// then ran every prompt on the small-T slices at about 200 tokens a second. Q2_K, Q4_0, Q4_1 and
+/// F16 decode on the same generic codec and would very likely be right, but no artifact here
+/// holds experts in them and nothing measures them, so they keep the small-T slices; to admit
+/// one, add its fixture and mixture to that test and its case here.
 std::int32_t ggml_prefill_k_multiple(QType qtype) noexcept {
     switch (qtype) {
     case QType::Q3_K:
@@ -74,6 +103,15 @@ std::int32_t ggml_prefill_k_multiple(QType qtype) noexcept {
     case QType::Q5_0:
     case QType::Q5_1:
         return 64;
+    case QType::IQ4_NL:
+        return ggml_iq_prefill_vetoed() ? 0 : 64;
+    case QType::IQ4_XS:
+    case QType::IQ3_XXS:
+    case QType::IQ3_S:
+    case QType::IQ2_S:
+    case QType::IQ2_XXS:
+    case QType::IQ1_M:
+        return ggml_iq_prefill_vetoed() ? 0 : 256;
     default:
         return 0;
     }
@@ -112,13 +150,13 @@ std::int32_t prefill_min_tokens(QType routed_gate_up, QType routed_down) noexcep
     // The two admissions that predate the general one keep their own vetoes, so each still
     // returns exactly the pairs it covered to small-T and no others.
     if (is_ggml_k_hand(routed_gate_up) && is_ggml_k_hand(routed_down)) {
-        return kSparseMoePrefillGgmlKMin;
+        return sparse_moe_ggml_prefill_min();
     }
     if (is_ggml_k_hand(routed_gate_up) && routed_down == QType::Q8_0) {
-        return ggml_q80_down_vetoed() ? 0 : kSparseMoePrefillGgmlKMin;
+        return ggml_q80_down_vetoed() ? 0 : sparse_moe_ggml_prefill_min();
     }
     // Every other block pair. SUROGATE_SERVE_MOE_GGML_WIDE=0 returns all of them to small-T.
-    return ggml_wide_vetoed() ? 0 : kSparseMoePrefillGgmlKMin;
+    return ggml_wide_vetoed() ? 0 : sparse_moe_ggml_prefill_min();
 }
 
 /// Whether this format has an int8 tensor-core codec for the side named, and its veto is not
@@ -141,7 +179,7 @@ bool int8_codec_admitted(QType qtype, bool gate_up_side) noexcept {
     case QType::Q3_K:
         return gate_up_side && !ggml_q3k_gate_vetoed();
     default:
-        return false;
+        return is_iq(qtype) && !ggml_iq_vetoed();
     }
 }
 
@@ -150,6 +188,51 @@ bool int8_codec_admitted(QType qtype, bool gate_up_side) noexcept {
 bool sparse_moe_routed_fp8_profile(QType routed_gate_up, QType routed_down) noexcept {
     return routed_gate_up == QType::FP8_E4M3FN_BLK128_F32S &&
            routed_down == QType::FP8_E4M3FN_BLK128_F32S;
+}
+
+std::int32_t sparse_moe_ggml_prefill_min() noexcept {
+    // The width from which a GGML block pair leaves the small-T slices for the wide kernels.
+    // Small-T decodes a path's weights for every token it serves; the wide kernels decode an
+    // expert's tile once for all the columns routed to it, which matters most where a format's
+    // decode is the cost (the i-quants' grid lookups) and a round's columns share experts (a
+    // speculative verify's).
+    static const std::int32_t value = [] {
+        const char* raw = std::getenv("SUROGATE_SERVE_MOE_GGML_PREFILL_MIN");
+        if (raw == nullptr || *raw == '\0') { return kSparseMoePrefillGgmlKMin; }
+        char* end         = nullptr;
+        const long parsed = std::strtol(raw, &end, 10);
+        if (end == raw || *end != '\0' || parsed < 1 || parsed > kSparseMoeSmallTMax + 1) {
+            std::fprintf(stderr,
+                         "sparse moe: ignoring SUROGATE_SERVE_MOE_GGML_PREFILL_MIN=%s (want 1..%d)\n",
+                         raw, kSparseMoeSmallTMax + 1);
+            return kSparseMoePrefillGgmlKMin;
+        }
+        return static_cast<std::int32_t>(parsed);
+    }();
+    return value;
+}
+
+std::int32_t sparse_moe_i8_wide128_min() noexcept {
+    static const std::int32_t value = [] {
+        constexpr std::int32_t never = std::numeric_limits<std::int32_t>::max();
+        const char* raw = std::getenv("SUROGATE_SERVE_MOE_I8_WIDE128_MIN");
+        if (raw == nullptr || *raw == '\0') {
+            return kSparseMoePrefillI8Wide128Min > 0 ? kSparseMoePrefillI8Wide128Min : never;
+        }
+        char* end         = nullptr;
+        const long parsed = std::strtol(raw, &end, 10);
+        if (end == raw || *end != '\0' || parsed < 0) {
+            std::fprintf(stderr,
+                         "sparse moe: ignoring SUROGATE_SERVE_MOE_I8_WIDE128_MIN=%s (want 0 for "
+                         "off, or a width)\n",
+                         raw);
+            return kSparseMoePrefillI8Wide128Min > 0 ? kSparseMoePrefillI8Wide128Min : never;
+        }
+        if (parsed == 0) { return never; }
+        return static_cast<std::int32_t>(
+            std::clamp<long>(parsed, kSparseMoePrefillWideMin, never));
+    }();
+    return value;
 }
 
 std::int32_t sparse_moe_fp8_prefill_min() noexcept {

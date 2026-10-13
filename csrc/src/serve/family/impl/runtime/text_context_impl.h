@@ -687,7 +687,7 @@ void TextContext::mtp_prefill_trunk_block(const Tensor& ids, const Tensor& hidde
             Tensor keys = k.view({cfg_.head_dim, cfg_.n_kv, tokens});
             Tensor kn = work_.alloc(DType::BF16, {cfg_.head_dim, cfg_.n_kv, tokens});
             ops::rmsnorm(keys, block.key_norm, cfg_.rms_eps, norm_unit_offset<V>(), kn, s);
-            Tensor rope = text_rope_positions<V>(rope_positions);
+            Tensor rope = contiguous_positions(text_rope_positions<V>(rope_positions), s);
             rope_text(cfg_, rope, cfg_.rotary_dim, cfg_.rope_theta, kn, s);
             ops::gqa_kv_append(kn, v.view({cfg_.head_dim, cfg_.n_kv, tokens}), positions,
                                mtp_kv_.layer_view(0), s);
@@ -696,7 +696,7 @@ void TextContext::mtp_prefill_trunk_block(const Tensor& ids, const Tensor& hidde
             Tensor query = q.slice(1, tokens - 1, 1).view({cfg_.head_dim, cfg_.n_q, 1});
             Tensor qn = work_.alloc(DType::BF16, {cfg_.head_dim, cfg_.n_q, 1});
             ops::rmsnorm(query, block.query_norm, cfg_.rms_eps, norm_unit_offset<V>(), qn, s);
-            Tensor last_rope = rope.slice(0, tokens - 1, 1);
+            Tensor last_rope = contiguous_positions(rope.slice(0, tokens - 1, 1), s);
             rope_text(cfg_, last_rope, cfg_.rotary_dim, cfg_.rope_theta, qn, s);
             Tensor a = work_.alloc(DType::BF16, {cfg_.head_dim, cfg_.n_q, 1});
             ops::gqa_attention_cached(qn, positions.slice(0, tokens - 1, 1), cfg_.attention_scale,
@@ -1312,6 +1312,21 @@ void TextContext::mtp_propose_batch(const Tensor& hidden, Tensor& logits, Tensor
     require_tensor_shape(logits, DType::BF16, {cfg_.vocab, batch}, "MTP proposal batch logits");
     require_tensor_shape(draft_tokens, DType::I32, {batch}, "MTP proposal batch tokens");
     proposal_argmax(hidden, logits, draft_tokens);
+}
+
+Tensor TextContext::contiguous_positions(const Tensor& positions, cudaStream_t s) {
+    if (positions.is_contiguous()) { return positions; }
+    if (positions.dtype != DType::I32 || positions.nb[0] != sizeof(std::int32_t) ||
+        positions.ne[2] != 1 || positions.ne[3] != 1) {
+        throw std::invalid_argument("rope positions must be I32 with contiguous axes");
+    }
+    const std::int32_t tokens = positions.ne[0];
+    const std::int32_t axes   = positions.ne[1];
+    Tensor out = work_.alloc(DType::I32, {tokens, axes});
+    CUDA_CHECK(cudaMemcpy2DAsync(out.data, out.nb[1], positions.data, positions.nb[1],
+                                 static_cast<std::size_t>(tokens) * sizeof(std::int32_t),
+                                 static_cast<std::size_t>(axes), cudaMemcpyDeviceToDevice, s));
+    return out;
 }
 
 bool TextContext::fused_qk_norm_rope(const Tensor* q_norm, const Tensor* k_norm, int layer,
@@ -2142,6 +2157,7 @@ ops::GqaBlockMask TextContext::text_indexer_selection(const FullLayerW& w, const
             .rms_eps    = cfg_.rms_eps,
             .mrope_height = cfg_geometry().mrope_height,
             .mrope_width = cfg_geometry().mrope_width,
+            .yarn = cfg_.rope_yarn ? &*cfg_.rope_yarn : nullptr,
         };
         // Dependent on V so the discarded branch is never checked against a target whose
         // attention payload has no indexer.
@@ -2208,11 +2224,18 @@ ops::GqaBlockMask TextContext::text_indexer_selection(const FullLayerW& w, const
                 CUDA_CHECK(cudaMemcpy2DAsync(rope_view.data, rope_view.nb[1], indexer_positions.data,
                     indexer_positions.nb[1], tokens * sizeof(std::int32_t), 3, cudaMemcpyDeviceToDevice, s));
             }
-            ops::rope_interleaved(rope_view, geometry.rotary_dim, geometry.rope_theta,
-                                  {cfg_geometry().mrope_temporal, geometry.mrope_height, geometry.mrope_width},
-                                  heads_norm, s);
+            if (cfg_.rope_yarn) {
+                // YaRN's form carries the model's sections (ModelConfig), as the block keys'
+                // fold reads them from the geometry.
+                ops::rope(rope_view, geometry.rotary_dim, geometry.rope_theta, *cfg_.rope_yarn,
+                          heads_norm, s);
+            } else {
+                ops::rope_interleaved(rope_view, geometry.rotary_dim, geometry.rope_theta,
+                                      {cfg_geometry().mrope_temporal, geometry.mrope_height, geometry.mrope_width},
+                                      heads_norm, s);
+            }
         } else {
-            ops::rope(indexer_positions, geometry.rotary_dim, geometry.rope_theta, heads_norm, s);
+            rope_text(cfg_, indexer_positions, geometry.rotary_dim, geometry.rope_theta, heads_norm, s);
         }
 
         ops::qsa_indexer_select(heads_norm, column_positions, table_rows, columns_per_row, geometry,
@@ -2483,9 +2506,11 @@ PrefillChunkResult TextContext::mixed_chunk_multi(std::span<const MixedPrefillSe
         }
     }
     if constexpr (Hooks::prologue) {
-        if (width != 1) { throw std::logic_error("mixed speculative prologue is unavailable"); }
-        // Segment columns take their segment's start and slot; the decode lanes behind them
-        // are one-column segments on their own slots.
+        // Segment columns take their segment's start and slot. Each decode lane behind them owns
+        // `width` consecutive columns, one segment on its own slot -- a speculative verify's
+        // layout (prologue_staging::verify_columns): the n-gram state after each of a lane's
+        // columns lands in that slot's snapshots, and the speculative fold commits the accepted
+        // prefix's last one, as it does after a verify round.
         std::vector<int> begin_host(static_cast<std::size_t>(total));
         std::vector<int> last_host(static_cast<std::size_t>(total), 0);
         std::vector<int> slot_host(static_cast<std::size_t>(prefill_cols));
@@ -2498,8 +2523,9 @@ PrefillChunkResult TextContext::mixed_chunk_multi(std::span<const MixedPrefillSe
             last_host[static_cast<std::size_t>(segment_begin[i] + length - 1)] = 1;
         }
         for (int c = prefill_cols; c < total; ++c) {
-            begin_host[static_cast<std::size_t>(c)] = c;
-            last_host[static_cast<std::size_t>(c)]  = 1;
+            const int column = c - prefill_cols;
+            begin_host[static_cast<std::size_t>(c)] = prefill_cols + column - column % width;
+            last_host[static_cast<std::size_t>(c)]  = column % width == width - 1 ? 1 : 0;
         }
         prologue_.ids           = ids_device;
         prologue_.segment_begin = work_.alloc(DType::I32, {total});
@@ -2510,9 +2536,18 @@ PrefillChunkResult TextContext::mixed_chunk_multi(std::span<const MixedPrefillSe
         Tensor slots_prefill = prologue_.slots.slice(0, 0, prefill_cols);
         copy_i32(slot_host.data(), slots_prefill, s);
         Tensor slots_decode = prologue_.slots.slice(0, prefill_cols, decode_columns);
-        CUDA_CHECK(cudaMemcpyAsync(slots_decode.data, decode.linear_state_slots.data,
-                                   static_cast<std::size_t>(decode_columns) * sizeof(std::int32_t),
-                                   cudaMemcpyDeviceToDevice, s));
+        if (width == 1) {
+            CUDA_CHECK(cudaMemcpyAsync(slots_decode.data, decode.linear_state_slots.data,
+                                       static_cast<std::size_t>(decode_columns) * sizeof(std::int32_t),
+                                       cudaMemcpyDeviceToDevice, s));
+        } else if (decode_columns > 0) {
+            // The lane's slot repeated over its columns; the expansion's own starts and closes
+            // are relative to the decode columns, so the ones written above stand.
+            Tensor begin_scratch = work_.alloc(DType::I32, {decode_columns});
+            Tensor last_scratch  = work_.alloc(DType::I32, {decode_columns});
+            ops::ngram_ple_expand_columns(decode.linear_state_slots, width, slots_decode,
+                                          begin_scratch, last_scratch, s);
+        }
     }
     Tensor positions_decode = positions.slice(0, prefill_cols, decode_columns);
     CUDA_CHECK(cudaMemcpyAsync(positions_decode.data, decode.cache_positions.data,

@@ -1,15 +1,18 @@
 #include "ops/linear/ggml/ggml_linear.h"
 
 #include "core/device.h"
+#include "ops/kernel/func_attribute.cuh"
 
 #include "ops/linear/ggml/ggml_dense_decode.cuh"
 #include "ops/linear/ggml/ggml_dense_block32.cuh"
 #include "ops/linear/ggml/ggml_i8_tile.cuh"
 #include "ops/linear/ggml/ggml_q8_1.h"
+#include "ops/linear/ggml/ggml_tile_order.cuh"
 
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 
 namespace sinfer::ops::detail::ggml {
@@ -32,6 +35,45 @@ void run_gemv(GgmlType type, const void* blocks, std::int32_t rows, std::int32_t
 
 /// Static shared memory every architecture the kernels build for accepts (sm_89 included).
 constexpr std::size_t kStaticSharedLimit = 48 * 1024;
+static_assert(kStaticSharedLimit == kI8StaticSmemLimit);
+/// The most shared memory one block may opt in to on every target (sm_89 and sm_12x: 99 KiB).
+constexpr std::size_t kDynamicSharedLimit = 99 * 1024;
+
+/// Whether a codec whose 128-column tile is above the static limit (Q6_K) may take that tile on
+/// dynamic shared memory, one block to an SM: SUROGATE_SERVE_GGML_WIDE_DYNAMIC=0 keeps it at 64.
+bool wide_dynamic_allowed() noexcept {
+    static const bool allowed = [] {
+        const char* raw = std::getenv("SUROGATE_SERVE_GGML_WIDE_DYNAMIC");
+        return raw == nullptr || *raw == '\0' || std::strcmp(raw, "0") != 0;
+    }();
+    return allowed;
+}
+
+/// Weight rows per block of the generic formats' wide tile (64 columns and up): 32, or 16 with
+/// SUROGATE_GGML_AFFINE_ROWS=16. The arithmetic per output is the same at either height. 32 rows
+/// read the activation tile half as often: 10240 x 2560 IQ4_XS at 4,096 tokens on GB10 takes
+/// 7.4 ms against 9.1 (SINFER_GGML_BENCH), where the Q6_K int8 tile takes 6.1. A group-major
+/// 64 x 128 tile with the same bits (8.3 ms; 13.5 with producer warps) did not beat it.
+int affine_rows() noexcept {
+    static const int value = [] {
+        const char* raw = std::getenv("SUROGATE_GGML_AFFINE_ROWS");
+        return raw != nullptr && std::strcmp(raw, "16") == 0 ? 16 : 32;
+    }();
+    return value;
+}
+
+/// Weight rows per block of the cp_async-staged 32-column tile (dense_affine_staged_kernel): 32, or
+/// 16 with SUROGATE_GGML_AFFINE_STAGED=16; =0 keeps dense_affine_mma_kernel. Same bits. On GB10 a
+/// 32-token decode round (8 users, MTP 3) streams IQ4_XS from DRAM at 163 GB/s against 148, and
+/// Swift-1.5 IQ2_XS decodes 16.5 tokens/s a user at 8 users against 15.4 (26.2 vs 26.0 at 4).
+int affine_staged_rows() noexcept {
+    static const int value = [] {
+        const char* raw = std::getenv("SUROGATE_GGML_AFFINE_STAGED");
+        if (raw == nullptr || *raw == '\0') { return 32; }
+        return std::strcmp(raw, "0") == 0 ? 0 : std::strcmp(raw, "16") == 0 ? 16 : 32;
+    }();
+    return value;
+}
 
 std::atomic<std::int32_t> tile_multiprocessors_override{0};
 
@@ -42,11 +84,13 @@ template <class Codec, int TileRows, int TileCols>
 __global__ __launch_bounds__((TileCols / 8) * 32) void dense_i8_kernel(
     const std::uint8_t* blocks, const std::int8_t* codes, const __half2* ds,
     int rows, int k, int tokens, __nv_bfloat16* out, bool accumulate) {
-    static_assert(sizeof(GgmlI8Smem<Codec, TileCols, TileRows>) <= kStaticSharedLimit,
-                  "static shared memory above 48 KiB does not build for sm_89");
-    __shared__ GgmlI8Smem<Codec, TileCols, TileRows> sm;
-    const int row0 = blockIdx.x * TileRows;
-    const int col0 = blockIdx.y * TileCols;
+    // Above 48 KiB (Q6_K's 128-column tile) the tile lives in dynamic shared memory.
+    static_assert(sizeof(GgmlI8Smem<Codec, TileCols, TileRows>) <= kDynamicSharedLimit,
+                  "the tile does not fit the shared memory of an sm_89 block");
+    auto& sm = i8_tile_smem<GgmlI8Smem<Codec, TileCols, TileRows>>();
+    const int2 tile = grouped_tile<8>();
+    const int row0  = tile.x * TileRows;
+    const int col0  = tile.y * TileCols;
     auto row_base = [&](int row) {
         return blocks + static_cast<std::int64_t>(min(row0 + row, rows - 1)) *
                             (k / QK_K) * Codec::kBlockBytes;
@@ -89,27 +133,35 @@ void run_dense(GgmlType type, const void* blocks, std::int32_t rows, std::int32_
                 return;
             }
             const auto tile = [&]<int TileRows, int TileCols>() {
+                constexpr std::size_t dynamic =
+                    i8_dynamic_smem_bytes<GgmlI8Smem<Codec, TileCols, TileRows>>();
+                auto* const kernel = dense_i8_kernel<Codec, TileRows, TileCols>;
+                if constexpr (dynamic > 0) {
+                    CUDA_CHECK(set_func_attribute_per_device(
+                        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                        static_cast<int>(dynamic)));
+                }
                 const dim3 grid((rows + TileRows - 1) / TileRows,
                                 (tokens + TileCols - 1) / TileCols);
-                dense_i8_kernel<Codec, TileRows, TileCols>
-                    <<<grid, (TileCols / 8) * 32, 0, stream>>>(
-                        static_cast<const std::uint8_t*>(blocks), codes, ds, rows, k,
-                        tokens, out, beta != 0.0f);
+                kernel<<<grid, (TileCols / 8) * 32, dynamic, stream>>>(
+                    static_cast<const std::uint8_t*>(blocks), codes, ds, rows, k, tokens, out,
+                    beta != 0.0f);
             };
             // A wide step takes wider token tiles, so each block unpacks a weight tile once for
             // more columns, while the grid still fills the device: a 128-column block runs alone
-            // on its SM, a 64-column one about two to an SM. Q6_K's 128-column tile needs more
-            // static shared memory than sm_89 allows, so it stops at 64. Every column is still one
+            // on its SM, a 64-column one about two to an SM. Q6_K's 128-column tile is above the
+            // static shared-memory limit and takes it dynamically. Every column is still one
             // warp's, with the same K loop, so a token's result does not depend on its tile.
-            constexpr bool widest_fits = sizeof(GgmlI8Smem<Codec, 128, 64>) <= kStaticSharedLimit;
+            const bool widest = sizeof(GgmlI8Smem<Codec, 128, 64>) <= kStaticSharedLimit ||
+                                wide_dynamic_allowed();
             const auto grid_blocks = [&](int columns) {
                 return ((rows + 63) / 64) * ((tokens + columns - 1) / columns);
             };
             const std::int32_t sms = kquant_tile_multiprocessors();
             if (tokens <= 8) { tile.template operator()<16, 8>(); }
             else if (tokens <= 32) { tile.template operator()<32, 32>(); }
-            else if (widest_fits && tokens >= 256 && grid_blocks(128) >= sms) {
-                if constexpr (widest_fits) { tile.template operator()<64, 128>(); }
+            else if (widest && tokens >= 256 && grid_blocks(128) >= sms) {
+                tile.template operator()<64, 128>();
             }
             else if (tokens >= 128 && grid_blocks(64) >= 2 * sms) { tile.template operator()<64, 64>(); }
             else { tile.template operator()<64, 32>(); }
@@ -189,6 +241,24 @@ void run_dense(GgmlType type, const void* blocks, std::int32_t rows, std::int32_
                 if constexpr (Type == GgmlType::F16) {
                     dense_f16_mma_kernel<Cols><<<grid, (Cols / 8) * 32, 0, stream>>>(
                         static_cast<const __half*>(blocks), x, rows, k, tokens, out, beta != 0);
+                } else if (Cols == 32 && affine_staged_rows() != 0) {
+                    if constexpr (Cols == 32) {
+                        // Under 2,048 rows (the shared expert's 640-row gate and up) a 32-row
+                        // block leaves SMs idle: 640 x 2560 IQ4_XS at 16 tokens takes 16 us at
+                        // 16 rows against 22. Same bits at either height.
+                        if (affine_staged_rows() == 16 || rows < 2048) {
+                            dense_affine_staged_kernel<Type, Cols, 16><<<grid, (Cols / 8) * 32, 0, stream>>>(
+                                bytes, codes, ds, rows, k, tokens, out, beta != 0);
+                        } else {
+                            const dim3 tall((rows + 31) / 32, (tokens + Cols - 1) / Cols);
+                            dense_affine_staged_kernel<Type, Cols, 32><<<tall, (Cols / 8) * 32, 0, stream>>>(
+                                bytes, codes, ds, rows, k, tokens, out, beta != 0);
+                        }
+                    }
+                } else if (Cols >= 64 && affine_rows() == 32) {
+                    const dim3 tall((rows + 31) / 32, (tokens + Cols - 1) / Cols);
+                    dense_affine_mma_kernel<Type, Cols, 32><<<tall, (Cols / 8) * 32, 0, stream>>>(
+                        bytes, codes, ds, rows, k, tokens, out, beta != 0);
                 } else {
                     dense_affine_mma_kernel<Type, Cols><<<grid, (Cols / 8) * 32, 0, stream>>>(
                         bytes, codes, ds, rows, k, tokens, out, beta != 0);

@@ -27,6 +27,12 @@ inline constexpr std::int32_t kSparseMoePrefillGgmlKMin     = 47;
 /// it up, Hopper's grouped GEMM (fp8_moe_sm90) runs them inside this family.
 inline constexpr std::int32_t kSparseMoePrefillFp8Min       = 20;
 inline constexpr std::int32_t kSparseMoePrefillWideMin      = 768;
+/// The int8 experts' 128-column tile (sixteen warps, one block to an SM) from a full 4,096-token
+/// slice. Measured on GB10 against the 64-column tile, Flash-Next expert pairs: at 4,096 tokens
+/// (80 per expert) IQ3_S/IQ4_NL 21.7 -> 18.9 ms, IQ2_XXS/Q2_0 23.1 -> 21.0, IQ2_S/Q2_0 24.4 ->
+/// 23.7; at 2,048 (40 per expert, most of a 128-column tile empty) every pair is slower, IQ3_S
+/// 12.0 -> 13.6, Q2_0 16.2 -> 21.3. SUROGATE_SERVE_MOE_I8_WIDE128_MIN names another width (0: off).
+inline constexpr std::int32_t kSparseMoePrefillI8Wide128Min = 4096;
 inline constexpr std::int32_t kSparseMoePrefillSliceMax     = 4096;
 inline constexpr std::int32_t kSparseMoeRouteTileTokens     = 8;
 // Router logits padded to a 16-byte-aligned per-token stride (257 -> 260, 513 -> 516).
@@ -68,6 +74,14 @@ struct SparseMoePrefillPlan {
 /// SUROGATE_SERVE_MOE_FP8_PREFILL_MIN in [1, 47] so the crossover can be re-measured. Never
 /// above the small-T bound plus one, so no width falls to the per-token decode loop.
 [[nodiscard]] std::int32_t sparse_moe_fp8_prefill_min() noexcept;
+/// The first width a GGML block pair takes the wide kernels at: kSparseMoePrefillGgmlKMin unless
+/// SUROGATE_SERVE_MOE_GGML_PREFILL_MIN (1..47) says otherwise.
+[[nodiscard]] std::int32_t sparse_moe_ggml_prefill_min() noexcept;
+
+/// The first width at which an int8 round's route jobs are 128 columns rather than 64: from
+/// kSparseMoePrefillI8Wide128Min or SUROGATE_SERVE_MOE_I8_WIDE128_MIN (at least the wide plan's
+/// 768); a large value when neither names one, so no width reaches it.
+[[nodiscard]] std::int32_t sparse_moe_i8_wide128_min() noexcept;
 
 /// Whether a routed codec pair takes the int8 tensor-core route.
 [[nodiscard]] bool sparse_moe_routed_int8_profile(QType routed_gate_up, QType routed_down) noexcept;
