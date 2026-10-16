@@ -1817,6 +1817,92 @@ NB_MODULE(_surogate, m) {
             "- deepstack_visual_embeds: optional list of float32 packed embeds, same shape as visual_embeds.\n"
             "  List length should match config.DeepstackVisualLayers.")
         .def(
+            "set_routing_replay",
+            [](MultiGPUPyTrainer* trainer,
+               nb::ndarray<std::int16_t, nb::ndim<4>, nb::c_contig, nb::device::cpu> rows) {
+                const std::size_t local_gpus = static_cast<std::size_t>(trainer->local_world_size());
+                // Rows cover the whole step sequence: under chunked-sequence training each chunk's forward reads
+                // its slice (step_grpo_native_chunked sets the token offset per chunk).
+                const std::size_t tokens = static_cast<std::size_t>(trainer->batch_size()) *
+                                           static_cast<std::size_t>(trainer->step_seq_length());
+                if (rows.shape(0) != local_gpus || rows.shape(2) != tokens) {
+                    throw std::runtime_error(
+                        "routing replay rows must have shape [local_gpus, num_layers, batch_size * step_seq_length, top_k]");
+                }
+                trainer->set_routing_replay(rows.data(),
+                                            static_cast<int>(rows.shape(1)),
+                                            static_cast<long>(rows.shape(2)),
+                                            static_cast<int>(rows.shape(3)));
+            },
+            nb::arg("rows"),
+            "Rollout Routing Replay: use the rollout engine's expert choices in the MoE top-k op until cleared.\n\n"
+            "- rows: int16 [local_gpus, num_layers, batch_size * step_seq_length, top_k] (the full step sequence,\n"
+            "  also under chunked-sequence training); a row starting with -1 is\n"
+            "  not replayed (the computed selection is kept). Weights are recomputed from the current router.")
+        .def("clear_routing_replay",
+             &MultiGPUPyTrainer::clear_routing_replay,
+             "Stop replaying rollout routing; the MoE top-k op selects experts itself again.")
+        .def(
+            "routing_replay_diagnostics",
+            [](MultiGPUPyTrainer* trainer) {
+                nb::list out;
+                for (const auto& [bad_rows, mismatches] : trainer->routing_replay_diagnostics()) {
+                    out.append(nb::make_tuple(bad_rows, mismatches));
+                }
+                return out;
+            },
+            "Per GPU: (rows with an out-of-range expert id since the last set, forwards whose token count or top_k\n"
+            "did not match the replay rows - those forwards ran without replay).")
+        .def("set_routing_capture",
+             &MultiGPUPyTrainer::set_routing_capture,
+             nb::arg("enabled"),
+             nb::call_guard<nb::gil_scoped_release>(),
+             "Colocate Rollout Routing Replay: record the experts each serving forward selects (decode sessions,\n"
+             "persistent decode, next_token_logits). Training and replayed forwards are never captured; outputs are\n"
+             "unchanged.")
+        .def(
+            "decode_session_routing",
+            [](MultiGPUPyTrainer* trainer, std::int64_t session) -> nb::object {
+                RoutingCaptureRows rows;
+                {
+                    nb::gil_scoped_release release;
+                    rows = trainer->decode_session_routing(session);
+                }
+                if (rows.start < 0 || rows.layers <= 0 || rows.top_k <= 0) return nb::none();
+                const std::size_t n = rows.rows.size() / (static_cast<std::size_t>(rows.layers) * rows.top_k);
+                auto* data = new std::int16_t[rows.rows.size()];
+                std::copy(rows.rows.begin(), rows.rows.end(), data);
+                nb::capsule owner(data, [](void* p) noexcept { delete[] static_cast<std::int16_t*>(p); });
+                auto array = nb::ndarray<nb::numpy, std::int16_t, nb::ndim<3>>(
+                    data, {n, static_cast<std::size_t>(rows.layers), static_cast<std::size_t>(rows.top_k)}, owner);
+                return nb::make_tuple(rows.start, array);
+            },
+            nb::arg("session"),
+            "A decode session's captured routing (session -1: the persistent decode state) as (start, rows) with\n"
+            "rows int16 [n, num_layers, top_k] for positions [start, start + n), or None when nothing was captured.\n"
+            "Read before release_decode_sessions / reset_decode_state.")
+        .def(
+            "last_routing_capture",
+            [](MultiGPUPyTrainer* trainer) -> nb::object {
+                RoutingCaptureRows rows;
+                {
+                    nb::gil_scoped_release release;
+                    rows = trainer->last_routing_capture();
+                }
+                if (rows.start < 0 || rows.batch <= 0 || rows.layers <= 0 || rows.top_k <= 0) return nb::none();
+                const std::size_t per_row = rows.rows.size() / rows.batch;
+                const std::size_t tokens = per_row / (static_cast<std::size_t>(rows.layers) * rows.top_k);
+                auto* data = new std::int16_t[rows.rows.size()];
+                std::copy(rows.rows.begin(), rows.rows.end(), data);
+                nb::capsule owner(data, [](void* p) noexcept { delete[] static_cast<std::int16_t*>(p); });
+                return nb::cast(nb::ndarray<nb::numpy, std::int16_t, nb::ndim<4>>(
+                    data,
+                    {static_cast<std::size_t>(rows.batch), tokens, static_cast<std::size_t>(rows.layers),
+                     static_cast<std::size_t>(rows.top_k)},
+                    owner));
+            },
+            "The last next_token_logits forward's captured routing, int16 [B, T, num_layers, top_k], or None.")
+        .def(
             "validate",
             [](MultiGPUPyTrainer* trainer, TokenArray inputs, TokenArray targets) {
                 // Use local_world_size (GPUs on this node) not global world_size
