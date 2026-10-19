@@ -24,8 +24,8 @@ using Json = nlohmann::ordered_json;
 
 /// vLLM's parser names, mapped onto the formats the engine can actually decode.
 /// Several names share a format because the models share a convention: qwen3 and
-/// deepseek_r1 both fence reasoning with `<think>`, hermes and qwen3_xml both emit
-/// the same `<tool_call>` block. Aliases are kept because deployments name the
+/// deepseek_r1 both fence reasoning with `<think>`; qwen3_coder and qwen3_xml are one
+/// parser in vLLM 0.31, as here. Aliases are kept because deployments name the
 /// model's parser, not ours.
 struct ReasoningName {
     std::string_view name;
@@ -46,10 +46,11 @@ struct ToolCallName {
     ToolCallFormat format;
 };
 
-constexpr std::array<ToolCallName, 9> kToolCallNames{{
+constexpr std::array<ToolCallName, 10> kToolCallNames{{
     {"none", ToolCallFormat::None},
     {"off", ToolCallFormat::None},
-    {"qwen3_xml", ToolCallFormat::QwenXml},
+    {"qwen3_coder", ToolCallFormat::Qwen3Coder},
+    {"qwen3_xml", ToolCallFormat::Qwen3Coder},
     {"hermes", ToolCallFormat::QwenXml},
     {"muse_glimmer", ToolCallFormat::MuseAtem},
     {"spark25", ToolCallFormat::Spark25},
@@ -259,6 +260,7 @@ ParsedToolCalls parse_tool_calls(ToolCallFormat format, const std::string& text,
         return out;
     case ToolCallFormat::MuseAtem:
     case ToolCallFormat::QwenXml:
+    case ToolCallFormat::Qwen3Coder: // without the token ids: the text-only reading (GenerationService reads ids)
     case ToolCallFormat::Spark25: {
         ParsedToolCallOutput parsed = format == ToolCallFormat::MuseAtem
             ? parse_muse_tool_call_output(text, max_tool_name_length, tools)
