@@ -13,10 +13,16 @@
 
 namespace sinfer::serve {
 
-// Protocol default when the client omits max_tokens. Engine independently
-// clamps the request to its effective context capacity.
-inline constexpr int kDefaultMaxTokens                    = 8192;
+// --default-max-tokens when not given: 0, no server default. A chat / Responses request without max_tokens then gets
+// the rest of the context, as vLLM 0.31 gives it when the checkpoint's generation_config has no max_new_tokens
+// (vllm/entrypoints/serve/utils/api_utils.py get_max_tokens); --default-max-tokens N plays that max_new_tokens.
+inline constexpr int kDefaultMaxTokens                    = 0;
 inline constexpr std::size_t kDefaultMaxRequestBytes      = 384ULL << 20;
+
+/// --overlong-max-tokens: `reject` refuses a max_tokens that does not fit the context next to the prompt with
+/// vLLM 0.31's HTTP 400 (serve/vllm_max_tokens.h); `cap` caps it to the rest of the context, as the engine did
+/// before.
+enum class OverlongMaxTokens { Reject, Cap };
 
 struct ServeOptions {
     bool help_requested = false;
@@ -132,6 +138,10 @@ struct ServeOptions {
     std::optional<bool> enable_thinking;
     bool preserve_thinking = false;
     int default_max_tokens = kDefaultMaxTokens;
+    // --overlong-max-tokens reject|cap: what a max_tokens that does not fit the context next to the prompt gets.
+    // reject (default) answers HTTP 400 as vLLM 0.31 does; cap is the earlier silent cap to the rest of the
+    // context (serve/vllm_max_tokens.h).
+    OverlongMaxTokens overlong_max_tokens = OverlongMaxTokens::Reject;
     bool enable_cors       = false; // send permissive CORS headers for browser UIs
 
     // Output parsing, named the way vLLM names it. Defaults preserve the behaviour

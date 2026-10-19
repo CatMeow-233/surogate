@@ -30,6 +30,9 @@ struct ApiError {
     std::string message;
     std::string param; // optional
     std::string code;  // optional
+    /// vLLM's error shape: `code` is the HTTP status as a number (and the keys come in vLLM's order). 0 = the
+    /// string `code` above.
+    int numeric_code = 0;
 };
 
 class ApiException : public std::runtime_error {
@@ -43,9 +46,17 @@ private:
     ApiError error_;
 };
 
+/// vLLM's CompletionRequest.max_tokens default (the OpenAI one): /v1/completions without a max_tokens asks for 16.
+inline constexpr int kVllmCompletionDefaultMaxTokens = 16;
+
 // Server-side context needed while parsing/validating a request.
 struct RequestLimits {
-    int default_max_tokens = 8192;
+    /// --default-max-tokens; 0 = none, a request without max_tokens gets the rest of the context (vLLM's
+    /// get_max_tokens without a generation-config max_new_tokens), resolved where the prompt is measured.
+    int default_max_tokens = 0;
+    /// --overlong-max-tokens reject: a max_tokens below 1 is left for vLLM's check after the prompt is counted
+    /// (serve/vllm_max_tokens.h), which is where vLLM refuses it, instead of being refused while parsing.
+    bool vllm_max_tokens = false;
 };
 
 struct CompletionUsage {
@@ -207,8 +218,14 @@ struct GenerationRequest {
     bool ignore_eos = false;
     /// The fewest tokens to generate before a stop token may be drawn.
     int min_tokens = 0;
-    int max_tokens      = 0; // 0 => use server default
+    /// 0 with max_tokens_set false: no server default, the rest of the context (RequestLimits::default_max_tokens).
+    int max_tokens      = 0;
     bool max_tokens_set = false;
+    /// The field max_tokens came from (max_tokens, max_completion_tokens, max_output_tokens), for vLLM's message.
+    std::string max_tokens_param = "max_tokens";
+    /// The client's max_tokens when it does not fit `max_tokens` (which then saturates); vLLM's rule words its
+    /// refusal with the value as sent.
+    std::optional<std::int64_t> max_tokens_wide;
     bool stream         = false;
     bool include_usage  = false;
     std::optional<bool> enable_thinking; // non-standard extension; falls back to server default
