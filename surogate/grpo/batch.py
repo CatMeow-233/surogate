@@ -228,12 +228,13 @@ def prepare_batch(
         "Number of micro batches is not divisible by number of data ranks"
     )
 
-    per_gpu_micro_batches = len(micro_batches) // num_train_workers
-    batches_per_gpu = []
-    for _ in range(num_train_workers):
-        batches = []
-        for _ in range(per_gpu_micro_batches):
-            batches.append(micro_batches.pop(0))
-        batches_per_gpu.append(batches)
+    if num_train_workers == 1:
+        return [micro_batches]
 
-    return batches_per_gpu
+    per_gpu_micro_batches = len(micro_batches) // num_train_workers
+    # Preserve contiguous rank ordering without shifting every remaining entry
+    # for each pop(0), which makes large accumulation batches quadratic.
+    return [
+        micro_batches[rank * per_gpu_micro_batches : (rank + 1) * per_gpu_micro_batches]
+        for rank in range(num_train_workers)
+    ]

@@ -80,15 +80,8 @@ def _find_sample_boundaries(position_ids_flat: np.ndarray) -> list[tuple[int, in
     increment by one, and the engine branches on ``curr < prev`` for that case;
     GRPO packs text positions only.
     """
-    boundaries = [0]
-    for i in range(1, len(position_ids_flat)):
-        if position_ids_flat[i] - position_ids_flat[i - 1] != 1:
-            boundaries.append(i)
-    ranges: list[tuple[int, int]] = []
-    for i, start in enumerate(boundaries):
-        end = boundaries[i + 1] if i + 1 < len(boundaries) else len(position_ids_flat)
-        ranges.append((start, end))
-    return ranges
+    boundaries = [0, *(np.flatnonzero(np.diff(position_ids_flat) != 1) + 1).tolist()]
+    return list(zip(boundaries, boundaries[1:] + [len(position_ids_flat)]))
 
 
 class GRPOTrainer:
@@ -439,9 +432,11 @@ class GRPOTrainer:
         orig_position_ids = mb["position_ids"]
         orig_targets = mb["targets"]
         T_actual = orig_input_ids.shape[1]
-        loss_mask_flat = mb["loss_mask"].flatten()
+        # These source arrays are read-only here; native code receives the
+        # independent padded arrays below, so contiguous inputs need no copy.
+        loss_mask_flat = mb["loss_mask"].ravel()
 
-        sample_ranges = _find_sample_boundaries(orig_position_ids.flatten())
+        sample_ranges = _find_sample_boundaries(orig_position_ids.ravel())
 
         input_padded = np.zeros((1, seq_len), dtype=np.int32)
         input_padded[0, :T_actual] = orig_input_ids[0, :T_actual]
@@ -453,7 +448,7 @@ class GRPOTrainer:
             pos_padded[0, T_actual:] = np.arange(last_pos + 1, last_pos + 1 + seq_len - T_actual, dtype=np.int32)
 
         temp_padded = np.ones((1, seq_len), dtype=np.float32)
-        temp_padded[0, :T_actual] = mb["temperatures"].flatten()[:T_actual]
+        temp_padded[0, :T_actual] = mb["temperatures"].ravel()[:T_actual]
 
         targets_padded = np.full((1, seq_len), -100, dtype=np.int32)
         targets_padded[0, :T_actual] = orig_targets[0, :T_actual]
@@ -464,21 +459,21 @@ class GRPOTrainer:
         targets_padded[0, :T_actual][~tmask_shifted] = -100
 
         inference_padded = np.zeros(seq_len, dtype=np.float32)
-        inference_padded[:T_actual] = mb["inference_logprobs"].flatten()[:T_actual]
+        inference_padded[:T_actual] = mb["inference_logprobs"].ravel()[:T_actual]
         advantages_padded = np.zeros(seq_len, dtype=np.float32)
-        advantages_padded[:T_actual] = mb["advantages"].flatten()[:T_actual]
+        advantages_padded[:T_actual] = mb["advantages"].ravel()[:T_actual]
         loss_mask_padded = np.zeros(seq_len, dtype=np.uint8)
         loss_mask_padded[:T_actual] = loss_mask_flat[:T_actual].astype(np.uint8)
 
         teacher_padded = None
         if mb["teacher_logprobs"] is not None:
             teacher_padded = np.zeros(seq_len, dtype=np.float32)
-            teacher_padded[:T_actual] = mb["teacher_logprobs"].flatten()[:T_actual]
+            teacher_padded[:T_actual] = mb["teacher_logprobs"].ravel()[:T_actual]
 
         turn_ids_padded = None
         if mb.get("turn_ids") is not None:
             turn_ids_padded = np.full(seq_len, -1, dtype=np.int32)
-            turn_ids_padded[:T_actual] = mb["turn_ids"].flatten()[:T_actual]
+            turn_ids_padded[:T_actual] = mb["turn_ids"].ravel()[:T_actual]
 
         return {
             "input": input_padded,
@@ -869,20 +864,21 @@ class GRPOTrainer:
                 orig_input_ids = mb["input_ids"]  # [1, T_mb]
                 orig_position_ids = mb["position_ids"]  # [1, T_mb]
                 orig_targets = mb["targets"]  # [1, T_mb]
-                advantages_flat = mb["advantages"].flatten()
-                inference_lp = mb["inference_logprobs"].flatten()
-                loss_mask_flat = mb["loss_mask"].flatten()
-                temps_flat = mb["temperatures"].flatten()
+                # Read-only views; every native input is copied into its own padded array.
+                advantages_flat = mb["advantages"].ravel()
+                inference_lp = mb["inference_logprobs"].ravel()
+                loss_mask_flat = mb["loss_mask"].ravel()
+                temps_flat = mb["temperatures"].ravel()
 
                 teacher_lp = None
                 if mb["teacher_logprobs"] is not None:
-                    teacher_lp = mb["teacher_logprobs"].flatten()
+                    teacher_lp = mb["teacher_logprobs"].ravel()
 
                 T_actual = orig_input_ids.shape[1]
                 ngpu = config.gpus
 
                 # Find sample boundaries for per-sample logprob/gradient shifting
-                pos_flat = orig_position_ids.flatten()
+                pos_flat = orig_position_ids.ravel()
                 sample_ranges = _find_sample_boundaries(pos_flat)
 
                 # --- Build logprob targets (global next-token shift across packed sequence) ---
@@ -936,7 +932,7 @@ class GRPOTrainer:
                 turn_ids_padded = None
                 if mb.get("turn_ids") is not None:
                     turn_ids_padded = np.full(seq_len, -1, dtype=np.int32)
-                    turn_ids_flat = mb["turn_ids"].flatten()
+                    turn_ids_flat = mb["turn_ids"].ravel()
                     turn_ids_padded[:T_actual] = turn_ids_flat[:T_actual]
                 teacher_padded = None
                 if teacher_lp is not None:
