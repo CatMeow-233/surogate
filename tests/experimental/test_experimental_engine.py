@@ -277,11 +277,14 @@ def test_failed_checkpoint_write_preserves_previous_file_and_removes_temporary(t
     assert list(tmp_path.iterdir()) == [path]
 
 
-def test_previous_vocabulary_logits_are_released_before_next_forward(tmp_path, monkeypatch):
+@pytest.mark.parametrize("gradient_checkpointing", [False, True])
+def test_vocabulary_logits_are_released_before_backward(tmp_path, monkeypatch, gradient_checkpointing):
     from surogate.experimental.train import engine
 
     build = engine._build_model
+    backward = torch.Tensor.backward
     observed = []
+    backward_calls = []
 
     def instrumented_build(*args, **kwargs):
         model, architecture = build(*args, **kwargs)
@@ -297,9 +300,16 @@ def test_previous_vocabulary_logits_are_released_before_next_forward(tmp_path, m
         model.register_forward_hook(after_forward)
         return model, architecture
 
+    def checked_backward(tensor, *args, **kwargs):
+        assert observed and observed[-1]() is None, "vocabulary logits survived until backward"
+        backward_calls.append(len(observed))
+        return backward(tensor, *args, **kwargs)
+
     monkeypatch.setattr(engine, "_build_model", instrumented_build)
-    run_training(tiny_config(tmp_path, gradient_accumulation_steps=2))
+    monkeypatch.setattr(torch.Tensor, "backward", checked_backward)
+    run_training(tiny_config(tmp_path, gradient_accumulation_steps=2, gradient_checkpointing=gradient_checkpointing))
     assert len(observed) == 4
+    assert backward_calls == [1, 2, 3, 4]
     assert all(reference() is None for reference in observed)
 
 

@@ -1,3 +1,9 @@
+Version **0.1.0a3** releases the raw vocabulary logits and loss-cast references
+before backward, letting autograd retain only what it needs. Optimizer updates
+also reuse temporary buffers while preserving arithmetic order and random draws.
+CPU reference tests check identical results; GPU memory and throughput still need
+measurements on the target card.
+
 This alpha release provides the independent **surogate-experimental** PyTorch
 trainer for Python 3.12+. It includes the rank-scaled optimizer with optional BF16
 stochastic rounding, LISA-style layer sampling, optimizer-in-backward, and PEFT

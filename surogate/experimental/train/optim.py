@@ -44,7 +44,7 @@ def _stochastic_round_bfloat16(values: Tensor, generator: torch.Generator) -> Te
     finite_values = values.clamp(min=-limit, max=limit)
     noise = torch.randint(0, 1 << 16, values.shape, device=values.device, dtype=torch.int32, generator=generator)
     bits = finite_values.view(torch.int32)
-    rounded_bits = (bits + noise).bitwise_and_(-65536)
+    rounded_bits = noise.add_(bits).bitwise_and_(-65536)
     rounded = rounded_bits.view(torch.float32).to(dtype=torch.bfloat16)
     return torch.where(torch.isfinite(values), rounded, values.to(dtype=torch.bfloat16))
 
@@ -54,8 +54,8 @@ def _adam_direction(first: Tensor, second: Tensor, gradient: Tensor, step: int, 
     first.mul_(beta1).add_(gradient, alpha=1 - beta1)
     second.mul_(beta2).addcmul_(gradient, gradient, value=1 - beta2)
     corrected_first = first / (1 - beta1**step)
-    denominator = (second / (1 - beta2**step)).sqrt().add_(group["eps"])
-    return corrected_first / denominator
+    denominator = (second / (1 - beta2**step)).sqrt_().add_(group["eps"])
+    return corrected_first.div_(denominator)
 
 
 def _project_bfloat16_chunked(gradient: Tensor, basis: Tensor, side: str) -> Tensor:

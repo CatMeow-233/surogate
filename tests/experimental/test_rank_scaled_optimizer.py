@@ -407,6 +407,65 @@ def test_autocast_does_not_lower_projection_precision():
         )
 
 
+@pytest.mark.parametrize("step", [1, 37])
+def test_adam_temporary_reuse_matches_original_formula_bitwise(step):
+    gradient = _values((2, 3, 7), offset=0.123)
+    first = _values(gradient.shape, offset=-0.19)
+    second = _values(gradient.shape, offset=0.4).square()
+    original_gradient = gradient.clone()
+    expected_first, expected_second = first.clone(), second.clone()
+    group = dict(betas=(0.7, 0.95), eps=1e-5)
+    beta1, beta2 = group["betas"]
+    expected_first.mul_(beta1).add_(gradient, alpha=1 - beta1)
+    expected_second.mul_(beta2).addcmul_(gradient, gradient, value=1 - beta2)
+    corrected_first = expected_first / (1 - beta1**step)
+    denominator = (expected_second / (1 - beta2**step)).sqrt().add_(group["eps"])
+    expected = corrected_first / denominator
+    actual = optim_module._adam_direction(first, second, gradient, step, group)
+    for value, reference in (
+        (actual, expected),
+        (first, expected_first),
+        (second, expected_second),
+        (gradient, original_gradient),
+    ):
+        assert torch.equal(value.view(torch.int32), reference.view(torch.int32))
+
+
+@pytest.mark.parametrize("transposed", [False, True])
+def test_rounding_noise_reuse_matches_original_formula_bits_and_rng(transposed):
+    raw_generator = torch.Generator(device="cpu").manual_seed(401)
+    raw = torch.randint(-(1 << 31), (1 << 31) - 1, (16, 64), dtype=torch.int32, generator=raw_generator)
+    values = raw.view(torch.float32)
+    values[0, :8] = torch.tensor(
+        [
+            0.0,
+            -0.0,
+            float("nan"),
+            float("inf"),
+            -float("inf"),
+            torch.finfo(torch.float32).max,
+            torch.finfo(torch.float32).tiny,
+            torch.finfo(torch.bfloat16).max,
+        ]
+    )
+    if transposed:
+        values = values.T
+    before = values.clone()
+    generator = torch.Generator(device="cpu").manual_seed(123)
+    reference_generator = torch.Generator(device="cpu").manual_seed(123)
+    global_rng = torch.random.get_rng_state().clone()
+    finite_values = values.clamp(min=-torch.finfo(torch.bfloat16).max, max=torch.finfo(torch.bfloat16).max)
+    noise = torch.randint(0, 1 << 16, values.shape, dtype=torch.int32, generator=reference_generator)
+    rounded_bits = (finite_values.view(torch.int32) + noise).bitwise_and_(-65536)
+    rounded = rounded_bits.view(torch.float32).bfloat16()
+    expected = torch.where(torch.isfinite(values), rounded, values.bfloat16())
+    actual = optim_module._stochastic_round_bfloat16(values, generator)
+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+    assert torch.equal(values.view(torch.int32), before.view(torch.int32))
+    assert torch.equal(generator.get_state(), reference_generator.get_state())
+    assert torch.equal(torch.random.get_rng_state(), global_rng)
+
+
 def test_stochastic_rounding_preserves_exact_values_and_nonfinite_classes():
     exact = torch.tensor(
         [

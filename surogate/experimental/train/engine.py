@@ -415,10 +415,12 @@ def run_training(config: TrainConfig, *, resume_from: str | None = None) -> dict
                         )
                         loss = loss_sum / valid_tokens
                     summed_loss += loss_sum.detach()
+                    # CE retains the tensors needed for its gradient. Release
+                    # model logits and their FP32 cast before backward allocates
+                    # gradients, rather than keeping these large outputs alive.
+                    del outputs, logits
                     loss.backward()
-                    # Do not retain a vocabulary-sized logits tensor until the
-                    # next forward allocates its replacement or checkpoint IO ends.
-                    del outputs, logits, loss_sum, loss, batch
+                    del loss_sum, loss, batch
                 mean_loss = float((summed_loss / valid_tokens).item())
                 if not math.isfinite(mean_loss):
                     raise FloatingPointError("non-finite experimental loss; no new checkpoint was saved")

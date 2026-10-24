@@ -13,11 +13,11 @@ claim measured RTX 5090 speed or capacity improvements.
 ## Install
 
 Use Python 3.12 or newer. Download the wheel and `SHA256SUMS` from the same
-`experimental-v0.1.0a2` release of **CatMeow-233/surogate**. Check the wheel's
+`experimental-v0.1.0a3` release of **CatMeow-233/surogate**. Check the wheel's
 SHA-256 against its entry in that manifest before installing it:
 
 ```bash
-python -m pip install ./surogate_experimental-0.1.0a2-py3-none-any.whl
+python -m pip install ./surogate_experimental-0.1.0a3-py3-none-any.whl
 python -m surogate.experimental.train --help
 ```
 
