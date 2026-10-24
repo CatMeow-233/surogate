@@ -6,10 +6,12 @@
 #ifndef SUROGATE_SRC_EXECUTOR_GRAPH_EXECUTOR_UTILS_H
 #define SUROGATE_SRC_EXECUTOR_GRAPH_EXECUTOR_UTILS_H
 
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -54,6 +56,13 @@ bool infer_block_tensor_shape(const ExecState& st, std::string_view name, std::v
 std::string tensor_shape_str(const Tensor& t);
 bool tensor_shape_matches(const Tensor& t, const std::vector<long>& shape);
 std::size_t shape_nelem(const std::vector<long>& shape);
+
+// Read resident tensors on one stream with a single completion fence. Preserve
+// request order (including duplicate names); empty names and absent/empty storage
+// produce empty payloads. Sources must remain resident until this call returns.
+// Host storage is allocated before any copies are submitted; not capture-safe.
+std::vector<std::pair<std::string, std::vector<std::byte>>>
+copy_named_tensors_to_host(const std::vector<std::pair<std::string, const Tensor*>>& tensors, cudaStream_t stream);
 
 // Attribute access helpers
 const AttrValue* find_attr(const AttrMap& attrs, std::string_view key);

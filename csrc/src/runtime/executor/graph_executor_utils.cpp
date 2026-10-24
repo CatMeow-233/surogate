@@ -18,6 +18,49 @@
 #include "utilities/tensor.h"
 
 namespace dsl {
+
+std::vector<std::pair<std::string, std::vector<std::byte>>>
+copy_named_tensors_to_host(const std::vector<std::pair<std::string, const Tensor*>>& tensors, cudaStream_t stream) {
+    std::vector<std::pair<std::string, std::vector<std::byte>>> host;
+    host.reserve(tensors.size());
+    bool have_copies = false;
+    // Finish every allocation before submitting work: a later allocation failure
+    // must not free a destination while an earlier asynchronous copy still uses it.
+    for (const auto& [name, tensor] : tensors) {
+        const std::size_t bytes = !name.empty() && tensor && tensor->Data ? tensor->bytes() : 0;
+        host.emplace_back(name, std::vector<std::byte>(bytes));
+        have_copies = have_copies || bytes > 0;
+    }
+    if (!have_copies) return host;
+
+    cudaStreamCaptureStatus capture_status = cudaStreamCaptureStatusNone;
+    CUDA_CHECK(cudaStreamIsCapturing(stream, &capture_status));
+    if (capture_status != cudaStreamCaptureStatusNone) {
+        throw std::logic_error("copy_named_tensors_to_host cannot run during CUDA graph capture");
+    }
+
+    bool submitted = false;
+    try {
+        for (std::size_t i = 0; i < tensors.size(); ++i) {
+            if (host[i].second.empty()) continue;
+            submitted = true;
+            CUDA_CHECK(cudaMemcpyAsync(host[i].second.data(),
+                                       tensors[i].second->Data,
+                                       host[i].second.size(),
+                                       cudaMemcpyDeviceToHost,
+                                       stream));
+        }
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+    } catch (...) {
+        // A later enqueue can fail after earlier copies were accepted. Drain the
+        // stream before stack unwinding releases their host destinations, while
+        // preserving the original CUDA error.
+        if (submitted) (void)cudaStreamSynchronize(stream);
+        throw;
+    }
+    return host;
+}
+
 namespace {
 
 // Forward declaration for local helper

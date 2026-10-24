@@ -2550,6 +2550,17 @@ std::vector<std::byte> GraphExecutor::read_named_bytes(const std::string& name) 
     return host;
 }
 
+std::vector<std::pair<std::string, std::vector<std::byte>>>
+GraphExecutor::read_named_bytes_batch(const std::vector<std::string>& names) {
+    std::vector<std::pair<std::string, const Tensor*>> tensors;
+    tensors.reserve(names.size());
+    for (const auto& name : names) {
+        tensors.emplace_back(name,
+                             mCompiledExecutor && !name.empty() ? mCompiledExecutor->try_get_tensor(name) : nullptr);
+    }
+    return copy_named_tensors_to_host(tensors, mRunState.MainStream);
+}
+
 void GraphExecutor::set_inject_named(std::vector<std::pair<std::string, std::vector<std::byte>>> items) {
     if (mCompiledExecutor) mCompiledExecutor->set_inject_named(std::move(items));
 }

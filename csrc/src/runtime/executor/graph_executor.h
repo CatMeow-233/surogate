@@ -332,6 +332,10 @@ public:
     // stage/clear named boundary tensors to bind on the next forward (cross-GPU
     // handoff). restore_stage_base drops a preserved stage's allocations.
     std::vector<std::byte> read_named_bytes(const std::string& name);
+    // Batched resident boundary read: one fence for all requested tensors, with
+    // names/order preserved and empty payloads for missing tensors. Eager only.
+    std::vector<std::pair<std::string, std::vector<std::byte>>>
+    read_named_bytes_batch(const std::vector<std::string>& names);
     void set_inject_named(std::vector<std::pair<std::string, std::vector<std::byte>>> items);
     void clear_inject_named();
     void restore_stage_base();

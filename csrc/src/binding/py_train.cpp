@@ -2705,8 +2705,7 @@ std::vector<float> MultiGPUPyTrainer::dispatch_pp_forward_hidden_multigpu(const 
                 } else {
                     const std::string res_name = "blocks[" + std::to_string(hi) + "].res_att";
                     const std::string x_name = "blocks[" + std::to_string(hi) + "].mlp_down";
-                    next_boundary.emplace_back(res_name, ge->read_named_bytes(res_name));
-                    next_boundary.emplace_back(x_name, ge->read_named_bytes(x_name));
+                    next_boundary = ge->read_named_bytes_batch({res_name, x_name});
                     // Drop the preserved stage's stack allocations now that the
                     // boundary is read, so this GPU is clean if reused (round-robin).
                     ge->restore_stage_base();
@@ -2768,8 +2767,7 @@ std::vector<float> MultiGPUPyTrainer::dispatch_pp_grad_norms_multigpu(const std:
                 if (lo > 0) {
                     const std::string rn = "d_blocks[" + std::to_string(lo - 1) + "].res_att";
                     const std::string xn = "d_blocks[" + std::to_string(lo - 1) + "].mlp_down";
-                    next_boundary.emplace_back(rn, ge->read_named_bytes(rn));
-                    next_boundary.emplace_back(xn, ge->read_named_bytes(xn));
+                    next_boundary = ge->read_named_bytes_batch({rn, xn});
                 }
             },
             gpu);
@@ -2884,10 +2882,7 @@ std::vector<float> MultiGPUPyTrainer::dispatch_pp_forward_logprobs_multigpu(cons
                                                          hi,
                                                          std::move(inj),
                                                          /*preserve_output=*/true);
-                        Boundary o;
-                        o.emplace_back(rn, ge->read_named_bytes(rn));
-                        o.emplace_back(xn, ge->read_named_bytes(xn));
-                        (*my_out)[static_cast<std::size_t>(m)] = std::move(o);
+                        (*my_out)[static_cast<std::size_t>(m)] = ge->read_named_bytes_batch({rn, xn});
                     }
                     ge->restore_stage_base();
                     readyp[s * M + m].store(1, std::memory_order_release);
@@ -3003,9 +2998,7 @@ float MultiGPUPyTrainer::dispatch_pp_train_step_multigpu(const std::int32_t* inp
                                                          hi,
                                                          std::move(inj),
                                                          /*preserve_output=*/true);
-                        Boundary o;
-                        o.emplace_back(rn, ge->read_named_bytes(rn));
-                        o.emplace_back(xn, ge->read_named_bytes(xn));
+                        Boundary o = ge->read_named_bytes_batch({rn, xn});
                         ge->restore_stage_base();  // reclaim this microbatch's preserved activations
                         (*my_out)[static_cast<std::size_t>(m)] = std::move(o);
                         readyp[s * M + m].store(1, std::memory_order_release);
@@ -3099,10 +3092,7 @@ float MultiGPUPyTrainer::dispatch_pp_train_step_multigpu(const std::int32_t* inp
                             (*vtpm)[static_cast<std::size_t>(m)] = model->dispatch_pp_loss_valid_tokens();
                         }
                         if (lo > 0) {
-                            Boundary g;
-                            g.emplace_back(rn, ge->read_named_bytes(rn));
-                            g.emplace_back(xn, ge->read_named_bytes(xn));
-                            (*my_g)[static_cast<std::size_t>(m)] = std::move(g);
+                            (*my_g)[static_cast<std::size_t>(m)] = ge->read_named_bytes_batch({rn, xn});
                         }
                         // Reclaim this microbatch's backward activations before the next.
                         // Grads persist in the grad store and the grad boundary is already
