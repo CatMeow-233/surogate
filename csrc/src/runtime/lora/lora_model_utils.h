@@ -6,6 +6,8 @@
 #define SUROGATE_SRC_MODULES_LORA_LORA_MODEL_UTILS_H
 
 #include <vector>
+#include <array>
+#include <cstdint>
 #include <string>
 #include <map>
 #include <optional>
@@ -1088,6 +1090,160 @@ inline void backward_lora_layer(Tensor& dA,
                    stream);
         }
     }
+}
+
+/// Resolved, non-grouped projections of one matmul, all sharing its input.
+struct LoRABackwardSlice {
+    Tensor* dA;
+    Tensor* dB;
+    const Tensor* A;
+    const Tensor* B;
+    int offset;
+    int out_features;
+};
+
+/// Optional bandwidth optimization: keep each adapter's dA/dB computation, then
+/// accumulate all dx contributions with one GEMM. Returns false before launching
+/// anything when the existing scratch/layout cannot safely support the operation.
+/// dx is rounded once after the combined reduction, unlike sequential BF16 updates.
+inline bool backward_lora_slices_fused_dx(const LoRABackwardSlice* projections,
+                                          int count,
+                                          Tensor& dx,
+                                          const Tensor& dL_dy,
+                                          const Tensor& x,
+                                          float scaling,
+                                          float dropout_prob,
+                                          bool is_training,
+                                          Tensor& intermediate,
+                                          Tensor& scratch,
+                                          int BT,
+                                          int in_features,
+                                          int rank,
+                                          bool accumulate,
+                                          cublasLtHandle_t handle,
+                                          Tensor& workspace,
+                                          cudaStream_t stream) {
+    // backward_lora_layer otherwise uses scratch for input dropout or the
+    // opt-in transposed-A debug path, which would overwrite the packed operands.
+    if (!projections || count < 2 || count > 3 || BT <= 0 || in_features <= 0 ||
+        (rank != 8 && rank != 16 && rank != 32 && rank != 64) || lora_uses_input_dropout(is_training, dropout_prob) ||
+        std::getenv("SUROGATE_ENABLE_LORA_TRANSPOSED_A_BWD") != nullptr) {
+        return false;
+    }
+    auto bf16_matrix = [](const Tensor& tensor, long rows, long cols) {
+        return tensor.Data && tensor.DType == ETensorDType::BF16 && tensor.Rank == 2 && tensor.Sizes[0] == rows &&
+               tensor.Sizes[1] == cols;
+    };
+    if (!bf16_matrix(x, BT, in_features) || !bf16_matrix(dx, BT, in_features) || !dL_dy.Data ||
+        dL_dy.DType != ETensorDType::BF16 || dL_dy.Rank != 2 || dL_dy.Sizes[0] != BT || !intermediate.Data ||
+        intermediate.DType != ETensorDType::BF16 || intermediate.nelem() < static_cast<long>(BT) * rank ||
+        !scratch.Data || scratch.DType != ETensorDType::BF16) {
+        return false;
+    }
+    const long packed_rank = static_cast<long>(count) * rank;
+    const long g_elements = static_cast<long>(BT) * packed_rank;
+    const long a_elements = packed_rank * in_features;
+    if (scratch.nelem() < g_elements + a_elements) return false;
+    auto overlaps = [](const Tensor& left, const Tensor& right) {
+        if (!left.Data || !right.Data) return false;
+        const auto l = reinterpret_cast<std::uintptr_t>(left.Data);
+        const auto r = reinterpret_cast<std::uintptr_t>(right.Data);
+        return l < r + right.bytes() && r < l + left.bytes();
+    };
+    if (overlaps(scratch, intermediate) || overlaps(scratch, x) || overlaps(scratch, dx) || overlaps(scratch, dL_dy) ||
+        overlaps(dx, x) || overlaps(dx, dL_dy) || overlaps(dx, intermediate)) {
+        return false;
+    }
+    for (int i = 0; i < count; ++i) {
+        const auto& p = projections[i];
+        if (!p.A || !p.B || !p.dA || !p.dB || p.offset < 0 || p.out_features <= 0 ||
+            static_cast<long>(p.offset) + p.out_features > dL_dy.Sizes[1] || !bf16_matrix(*p.A, rank, in_features) ||
+            !bf16_matrix(*p.B, p.out_features, rank)) {
+            return false;
+        }
+        auto gradient_matrix = [](const Tensor& tensor, long rows, long cols) {
+            return tensor.Data && tensor.Rank == 2 && tensor.Sizes[0] == rows && tensor.Sizes[1] == cols &&
+                   (tensor.DType == ETensorDType::BF16 || tensor.DType == ETensorDType::FP32);
+        };
+        if (!gradient_matrix(*p.dA, rank, in_features) || !gradient_matrix(*p.dB, p.out_features, rank) ||
+            overlaps(scratch, *p.A) || overlaps(scratch, *p.B) || overlaps(scratch, *p.dA) ||
+            overlaps(scratch, *p.dB) || overlaps(dx, *p.A) || overlaps(dx, *p.B) || overlaps(dx, *p.dA) ||
+            overlaps(dx, *p.dB)) {
+            return false;
+        }
+        for (int j = 0; j < i; ++j) {
+            const auto& other = projections[j];
+            if ((static_cast<long>(p.offset) < static_cast<long>(other.offset) + other.out_features &&
+                 static_cast<long>(other.offset) < static_cast<long>(p.offset) + p.out_features) ||
+                overlaps(*p.dA, *other.dA) || overlaps(*p.dB, *other.dB)) {
+                return false;
+            }
+        }
+    }
+
+    constexpr std::size_t element_bytes = sizeof(nv_bfloat16);
+    Tensor g_cat =
+        Tensor::from_pointer(scratch.Data, scratch.Device, scratch.DType, std::array<long, 2>{BT, packed_rank});
+    Tensor a_cat = Tensor::from_pointer(scratch.Data + g_elements * element_bytes,
+                                        scratch.Device,
+                                        scratch.DType,
+                                        std::array<long, 2>{packed_rank, in_features});
+    for (int i = 0; i < count; ++i) {
+        const auto& p = projections[i];
+        backward_lora_layer(*p.dA,
+                            *p.dB,
+                            dx,
+                            dL_dy,
+                            p.offset,
+                            x,
+                            *p.A,
+                            *p.B,
+                            scaling,
+                            dropout_prob,
+                            /*dropout_seed=*/0,
+                            is_training,
+                            intermediate,
+                            scratch,
+                            BT,
+                            in_features,
+                            p.out_features,
+                            rank,
+                            accumulate,
+                            handle,
+                            workspace,
+                            stream,
+                            /*skip_dx=*/true);
+        // On return the intermediate contains scaled dY_slice @ B, after dA
+        // consumed it. The next projection will reuse it, so persist it now.
+        CUDA_CHECK(cudaMemcpy2DAsync(g_cat.Data + static_cast<long>(i) * rank * element_bytes,
+                                     packed_rank * element_bytes,
+                                     intermediate.Data,
+                                     rank * element_bytes,
+                                     rank * element_bytes,
+                                     BT,
+                                     cudaMemcpyDeviceToDevice,
+                                     stream));
+        CUDA_CHECK(cudaMemcpyAsync(a_cat.Data + static_cast<long>(i) * rank * in_features * element_bytes,
+                                   p.A->Data,
+                                   static_cast<long>(rank) * in_features * element_bytes,
+                                   cudaMemcpyDeviceToDevice,
+                                   stream));
+    }
+    matmul(dx,
+           a_cat,
+           g_cat,
+           std::nullopt,
+           nullptr,
+           nullptr,
+           handle,
+           workspace,
+           in_features,
+           BT,
+           static_cast<int>(packed_rank),
+           EMMTranspose::NN,
+           /*accumulate=*/true,
+           stream);
+    return true;
 }
 
 /**

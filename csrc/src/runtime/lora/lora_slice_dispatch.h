@@ -10,6 +10,7 @@
 
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <cublasLt.h>
@@ -150,6 +151,50 @@ inline void apply_lora_slices_backward(const std::vector<dsl::LoRASlice>& slices
     const float dropout = is_training ? config->dropout : 0.0f;
     const int in_features = static_cast<int>(input_2d.Sizes[input_2d.Rank - 1]);
     const int total_out = static_cast<int>(d_output_2d.Sizes[d_output_2d.Rank - 1]);
+
+    // Opt-in until GPU numerical/performance validation establishes useful shapes.
+    // No dropout masks are combined: the helper rejects active input dropout.
+    const char* fuse_dx = std::getenv("SUROGATE_FUSE_LORA_DX");
+    if (fuse_dx && std::string_view(fuse_dx) == "1") {
+        LoRABackwardSlice projections[3];
+        int count = 0;
+        bool supported = true;
+        for (const auto& slice : slices) {
+            if (slice.grouped) continue;
+            const int size = resolve_and_validate_slice_size(slice, total_out, layer_idx, "apply_lora_slices_backward");
+            auto* lora = get_layer_weight_by_target(block, slice.id);
+            if (!lora || !lora->has_value()) continue;
+            if (lora->A.Sizes[1] != in_features || lora->B.Sizes[0] != size)
+                throw std::invalid_argument("LoRA projection shape mismatch at layer " + std::to_string(layer_idx) +
+                                            ": " + slice_label(slice));
+            auto* grad = get_layer_weight_by_target(grad_block, slice.id);
+            if (!grad || !grad->has_value()) continue;
+            if (count == 3) {
+                supported = false;
+                break;
+            }
+            projections[count++] = {&grad->A, &grad->B, &lora->A, &lora->B, slice.offset, size};
+        }
+        if (supported && backward_lora_slices_fused_dx(projections,
+                                                       count,
+                                                       dx_2d,
+                                                       d_output_2d,
+                                                       input_2d,
+                                                       scaling,
+                                                       dropout,
+                                                       is_training,
+                                                       run_state->intermediate,
+                                                       run_state->slice,
+                                                       BT,
+                                                       in_features,
+                                                       rank,
+                                                       lora_accum,
+                                                       handle,
+                                                       workspace,
+                                                       stream)) {
+            return;
+        }
+    }
 
     for (const auto& slice : slices) {
         if (slice.grouped) continue;
