@@ -20,7 +20,7 @@ import numpy as np
 
 from surogate import _surogate
 from surogate.grpo.config import GRPOTrainConfig
-from surogate.grpo.data import GRPODataLoader
+from surogate.grpo.data import GRPODataLoader, InProcessMicroBatchBuffer
 from surogate.grpo.loss import compute_grpo_per_token_grads, shift_to_target, unshift_to_logical
 from surogate.grpo.routing_replay import moe_layer_ids, trainer_rows
 from surogate.grpo.turn_stats import TurnAccumulator
@@ -681,6 +681,11 @@ class GRPOTrainer:
 
         init_multi_run_manager(output_dir=config.output_dir)
 
+        # The packer and loader run serially in this process. Keep the external
+        # orchestrator transport, but hand packed batches directly to rank zero
+        # instead of serializing them through a second filesystem/ZMQ channel.
+        micro_batch_buffer = InProcessMicroBatchBuffer(Path(config.output_dir), start_step)
+
         # Setup packer on master (packs TrainingBatch -> MicroBatch)
         tokenizer = config.tokenizer
         self.packer = setup_grpo_packer(
@@ -690,6 +695,7 @@ class GRPOTrainer:
             tokenizer=tokenizer,
             transport_config=transport_config,
             start_step=start_step,
+            micro_batch_sender=micro_batch_buffer,
         )
         # chunked GRPO: no packed-doc isolation in chunked training attention
         self.packer.single_sample_bins = bool(getattr(config, 'single_sample_bins', False))
@@ -702,6 +708,7 @@ class GRPOTrainer:
             dp_rank=dp_rank,
             start_step=start_step,
             transport_config=transport_config,
+            micro_batch_receiver=micro_batch_buffer,
         )
 
     def train(self):

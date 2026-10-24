@@ -46,17 +46,23 @@ class BasePacker(ABC):
         tokenizer,
         config,
         start_step: int = 0,
+        *,
+        micro_batch_sender: MicroBatchSender | None = None,
     ):
         self.multi_run_manager = get_multi_run_manager()
         self.dp_world_size = dp_world_size
         self.seq_len = seq_len
         self.pad_to_multiple_of = pad_to_multiple_of
         self.tokenizer = tokenizer
+        if micro_batch_sender is not None and dp_world_size != micro_batch_sender.data_world_size:
+            raise ValueError("micro-batch sender worker count does not match the packer")
+        if micro_batch_sender is not None and getattr(micro_batch_sender, "current_step", start_step) != start_step:
+            raise ValueError("micro-batch sender step does not match the packer resume step")
         self.receiver = setup_training_batch_receiver(config, start_step=start_step)
         shutil.rmtree(get_rollout_dir(self.multi_run_manager.output_dir), ignore_errors=True)
-        self.sender: MicroBatchSender = setup_micro_batch_sender(
-            self.multi_run_manager.output_dir, dp_world_size, start_step, config
-        )
+        self.sender = micro_batch_sender
+        if self.sender is None:
+            self.sender = setup_micro_batch_sender(self.multi_run_manager.output_dir, dp_world_size, start_step, config)
 
     @abstractmethod
     def pack(self) -> None:
@@ -73,8 +79,13 @@ class SinglePacker(BasePacker):
         tokenizer,
         config,
         start_step: int = 0,
+        *,
+        micro_batch_sender: MicroBatchSender | None = None,
     ):
-        super().__init__(dp_world_size, seq_len, pad_to_multiple_of, tokenizer, config, start_step)
+        super().__init__(
+            dp_world_size, seq_len, pad_to_multiple_of, tokenizer, config, start_step,
+            micro_batch_sender=micro_batch_sender,
+        )
         assert self.multi_run_manager.max_runs == 1, "SinglePacker only supports one run"
 
     def pack(self):
@@ -90,6 +101,11 @@ class SinglePacker(BasePacker):
 
         assert len(batches) == 1, "SinglePacker only supports one batch per step"
         batch = batches[0]
+        # TrainingSample permits an unset advantage, but packed MicroBatch
+        # requires floats. A local handoff has no second msgspec decoder to
+        # reject None before NumPy could silently convert it to NaN.
+        if any(sample.advantage is None for sample in batch.examples):
+            raise ValueError("training samples must have advantages before packing")
 
         self.multi_run_manager.ready_to_update[0] = True
         self.multi_run_manager.progress[0].step += 1
@@ -327,17 +343,26 @@ def setup_grpo_packer(
     tokenizer,
     transport_config,
     start_step: int = 0,
+    *,
+    micro_batch_sender: MicroBatchSender | None = None,
 ) -> BasePacker:
     """Create a packer for GRPO training.
 
     Requires init_multi_run_manager() to have been called first.
+    An injected micro-batch sender is limited to one local worker and one run;
+    the orchestrator's training-batch transport is unchanged.
 
     Returns:
         SinglePacker (for 1 run) or MultiPacker (for multi-run).
     """
     multi_run_manager = get_multi_run_manager()
+    if micro_batch_sender is not None and (dp_world_size != 1 or multi_run_manager.max_runs != 1):
+        raise ValueError("a local micro-batch sender requires one data worker and one run")
     if multi_run_manager.max_runs == 1:
-        packer = SinglePacker(dp_world_size, seq_len, pad_to_multiple_of, tokenizer, transport_config, start_step)
+        packer = SinglePacker(
+            dp_world_size, seq_len, pad_to_multiple_of, tokenizer, transport_config, start_step,
+            micro_batch_sender=micro_batch_sender,
+        )
     else:
         packer = MultiPacker(dp_world_size, seq_len, pad_to_multiple_of, tokenizer, transport_config, start_step)
 
