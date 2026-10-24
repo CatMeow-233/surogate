@@ -45,6 +45,10 @@ The training runtime applies these optimizations without changing configuration:
   it does not imply a CUDA allocator call was removed from every matmul.
 - A ready GRPO batch is packed immediately. Empty receives retain polling
   backoff and cancellation checks.
+- Packed-document boundaries are detected with NumPy operations instead of a
+  Python iteration over every token. Read-only source arrays use `ravel` views;
+  padded native inputs retain independent writable storage. Per-rank batch
+  distribution preserves ordering without repeated front-of-list removal.
 - The GRPO trainer's single-worker, single-run packer passes packed micro-batches
   directly to its local loader. External orchestrator traffic still uses the
   configured filesystem or ZMQ transport. A bounded one-slot handoff prevents
@@ -55,6 +59,42 @@ The training runtime applies these optimizations without changing configuration:
   host destinations before enqueueing copies and waiting once for the batch.
   This removes a redundant explicit completion fence; transfers still use the
   existing host boundary protocol and are not P2P or zero-copy.
+- Generic FP8 MoE backward does not allocate the input-quantization buffer that
+  only the forward recipe consumes. This saves aligned scratch proportional to
+  `routed_tokens * input_features`, plus its statistics. It reduces stack demand;
+  an already-reserved arena may not immediately release device memory.
+- Full-parameter MoE weight backward skips a full dW clear when every expert has
+  tokens and every destination element will be overwritten by a beta-zero GEMM.
+  Empty experts retain zero gradients on overwrite steps, and accumulation never
+  clears existing gradients. Frozen LoRA bases do not use this base-weight path.
+
+## CPU optimizer parallelism
+
+The training library links `OpenMP::OpenMP_CXX` directly, so its existing CPU
+AdamW, gradient-norm, and vector-add pragmas are enabled independently of the
+serving encoder. The imported target applies host compilation flags to C++
+sources; it does not pass `-fopenmp` directly to nvcc.
+
+Install the matching compiler runtime, such as GCC's `libgomp` or Clang's
+`libomp`. Choose `OMP_NUM_THREADS` for the host's available cores, memory
+bandwidth, and NUMA placement, rather than assuming more threads always help.
+Per-element AdamW updates retain their arithmetic; parallel floating-point norm
+reduction can change final rounding bits. Validate clipping/numerical tolerance
+and actual optimizer-step time on the target host.
+
+The standalone wiring regression needs a C++ compiler and OpenMP, but no GPU or
+CUDA headers:
+
+```bash
+source .venv/bin/activate
+cmake -S csrc/src/testing/host/openmp -B build/host-openmp -G Ninja
+cmake --build build/host-openmp --parallel 2
+ctest --test-dir build/host-openmp --output-on-failure
+```
+
+It checks that the training OpenMP helper enables a real two-worker host library
+and exact integer outputs. A runtime thread limit can cause an explicit skip.
+This test does not compile the CUDA training library or validate AdamW numerics.
 
 ## RTX 5090 32 GB: dense and MoE fine-tuning
 
@@ -145,6 +185,7 @@ regressions before a model benchmark (replace `BUILD_DIR` with that build path):
 cmake --build BUILD_DIR --target integration-tests dsl-run-state-tests --parallel 4
 BUILD_DIR/integration-tests '[fp8][recipe]'
 BUILD_DIR/integration-tests '[lora][fused-dx]'
+BUILD_DIR/integration-tests '[moe][gemm][wgrad-zero]'
 BUILD_DIR/dsl-run-state-tests '[dispatch-pp][host-copy]'
 ```
 

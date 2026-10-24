@@ -14,6 +14,7 @@
 #include "runtime/dsl/tensor_role.h"
 #include "runtime/executor/op_registry.h"
 #include "runtime/executor/graph_executor_utils.h"
+#include "runtime/ops/moe_weight_grad_policy.h"
 #include "kernels/kernels.h"
 #include "recipes/recipe.h"
 #include "utilities/dtype.h"
@@ -57,7 +58,7 @@ void CompiledExecutor::backward_moe_base_weights(const CompiledOp& op,
         throw std::runtime_error("Expert weight gradients require BF16/FP32 tensors");
     };
     const bool accumulate = mFfnTileAccumulate || mAccumulateTensors.count(op.outputs[1].name) > 0;
-    if (!accumulate) fill_zero(dw, mRunState.MainStream);
+    if (moe_weight_grad_needs_zero(offsets, experts, accumulate)) fill_zero(dw, mRunState.MainStream);
     const float alpha = 1.f, beta = accumulate ? 1.f : 0.f;
     CUBLAS_CHECK(cublasSetStream(mRunState.cublas_handle(), mRunState.MainStream));
     for (int e = 0; e < experts; ++e) {
@@ -842,9 +843,8 @@ void CompiledExecutor::dispatch_moe_grouped_gemm_backward(const CompiledOp& op) 
         attach_moe_fp8_cache(ctx, op.inputs[2].name);
 
         // Allocate FP8 buffers if using FP8 hybrid recipe
-        Tensor dout_quant_buf, dout_stats_buf, inp_quant_buf, inp_stats_buf;
+        Tensor dout_quant_buf, dout_stats_buf;
         if (mRecipe->is_fp8_hybrid() && ctx.allow_fp8) {
-            const long num_elements = total_tokens * out_features;
             dout_quant_buf = mRunState.temp_alloc(ETensorDType::FP8_E5M2,
                                                   {total_tokens, static_cast<long>(out_features)},
                                                   "moe_grouped_gemm_dout_quant_buf");
@@ -854,15 +854,6 @@ void CompiledExecutor::dispatch_moe_grouped_gemm_backward(const CompiledOp& op) 
             ctx.dout_quant = &dout_quant_buf;
             mTemps.push_back(dout_quant_buf);
             mTemps.push_back(dout_stats_buf);
-
-            inp_quant_buf = mRunState.temp_alloc(ETensorDType::FP8_E4M3,
-                                                 {total_tokens, static_cast<long>(in_features)},
-                                                 "moe_grouped_gemm_bwd_inp_quant_buf");
-            inp_stats_buf = mRunState.temp_alloc(ETensorDType::FP32, {Tensor::STATS_FLOATS}, "moe_grouped_gemm_bwd_inp_stats_buf");
-            inp_quant_buf.Stats = inp_stats_buf.get<float>();
-            ctx.inp_quant = &inp_quant_buf;
-            mTemps.push_back(inp_quant_buf);
-            mTemps.push_back(inp_stats_buf);
         }
 
         mRecipe->backward_moe_matmul(ctx);
