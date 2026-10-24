@@ -16,9 +16,9 @@ quality need measurements on the target card.
 
 The prerelease channel belongs only to
 [CatMeow-233/surogate](https://github.com/CatMeow-233/surogate/releases).
-For version `0.1.0a1`, download these assets from tag `experimental-v0.1.0a1`:
+For version `0.1.0a2`, download these assets from tag `experimental-v0.1.0a2`:
 
-- `surogate_experimental-0.1.0a1-py3-none-any.whl`
+- `surogate_experimental-0.1.0a2-py3-none-any.whl`
 - `experimental-examples.zip`
 - `SHA256SUMS`
 
@@ -26,7 +26,7 @@ Keep the appropriate CUDA-enabled PyTorch installation in your GPU environment.
 Install the wheel there using Python 3.12 or later:
 
 ```bash
-python -m pip install ./surogate_experimental-0.1.0a1-py3-none-any.whl
+python -m pip install ./surogate_experimental-0.1.0a2-py3-none-any.whl
 python -m zipfile -e experimental-examples.zip experimental-examples
 python -m surogate.experimental.train --help
 python -m surogate.experimental.train experimental-examples/examples/experimental/smoke.yaml
