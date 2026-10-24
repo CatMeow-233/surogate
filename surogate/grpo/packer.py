@@ -85,7 +85,8 @@ class SinglePacker(BasePacker):
                 check_cancelled()
             self.multi_run_manager.discover_runs()
             batches = self.receiver.receive()
-            time.sleep(0.2)
+            if not batches:
+                time.sleep(0.2)
 
         assert len(batches) == 1, "SinglePacker only supports one batch per step"
         batch = batches[0]

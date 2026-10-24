@@ -305,9 +305,14 @@ class GRPOTrainer:
                 shutil.copy(src, dst_path / filename)
 
     def _log_step(self, *, step, orch_step, step_metrics, result, lr, n_mb,
-                  expected_loss_scale, step_time, turn_acc) -> None:
+                  expected_loss_scale, step_time, turn_acc, cycle_metrics=None) -> None:
         """Turn diagnostics + step logging + metrics; shared by the native,
-        diagnostic and dispatch-PP micro-step paths so all three report identically."""
+        diagnostic and dispatch-PP micro-step paths so all three report identically.
+
+        Cycle timings span publication of the preceding update through this
+        optimizer update, including batch acquisition, excluding logging and
+        checkpointing. The existing train duration/throughput keep their scope.
+        """
         config = self.config
         # 5b. Turn-resolved diagnostics
         turn_summary: dict[str, float] = {}
@@ -331,6 +336,15 @@ class GRPOTrainer:
 
         # 6. Logging
         if step % config.logging_steps == 0:
+            cycle_summary = ""
+            if cycle_metrics is not None:
+                cycle_summary = (
+                    f" cycle={cycle_metrics['train/cycle_duration_ms'] / 1000:.3f}s"
+                    f" publish={cycle_metrics['train/publish_duration_ms'] / 1000:.3f}s"
+                    f" pack={cycle_metrics['train/pack_duration_ms'] / 1000:.3f}s"
+                    f" batch_wait={cycle_metrics['train/batch_wait_duration_ms'] / 1000:.3f}s"
+                    f" receive={cycle_metrics['train/batch_receive_duration_ms'] / 1000:.3f}s"
+                )
             logger.info(
                 f"step={step} loss={step_metrics.get('policy_loss', 0):.4f} "
                 f"grad_norm={result['norm']:.4f} lr={lr:.2e} "
@@ -339,7 +353,7 @@ class GRPOTrainer:
                 f"tokens={step_metrics.get('total_tokens', 0)} "
                 f"micro_batches={n_mb} "
                 f"expected={expected_loss_scale} "
-                f"time={step_time:.2f}s"
+                f"time={step_time:.2f}s{cycle_summary}"
             )
 
             if self.metrics_writer is not None:
@@ -366,6 +380,7 @@ class GRPOTrainer:
                         "train/duration_ms": duration_ms,
                         "train/tokens_per_second": tps,
                         "train/orch_step": float(orch_step),
+                        **(cycle_metrics or {}),
                         **turn_summary,
                         **self._r3_step_summary,
                     },
@@ -742,6 +757,7 @@ class GRPOTrainer:
             if self.phase_controller is not None:
                 self.phase_controller.check_cancelled()
             orch_step = self.start_step + packs_done
+            cycle_start = time.perf_counter()
 
             # 1. Broadcast weights (after first orchestrator step)
             if orch_step > 0:
@@ -754,12 +770,22 @@ class GRPOTrainer:
                 break
 
             # 2. Pack and wait for batch — packer increments progress[0].step
+            publish_done = time.perf_counter()
             self.packer.pack()
+            pack_done = time.perf_counter()
             packs_done += 1
             self.data_loader.wait_for_batch()
+            batch_ready = time.perf_counter()
 
             # 3. Get micro-batches
             micro_batches = self.data_loader.get_batch()
+            batch_received = time.perf_counter()
+            cycle_metrics = {
+                "train/publish_duration_ms": (publish_done - cycle_start) * 1000.0,
+                "train/pack_duration_ms": (pack_done - publish_done) * 1000.0,
+                "train/batch_wait_duration_ms": (batch_ready - pack_done) * 1000.0,
+                "train/batch_receive_duration_ms": (batch_received - batch_ready) * 1000.0,
+            }
             if not micro_batches:
                 logger.warning("No micro-batches received, retrying...")
                 continue
@@ -811,6 +837,7 @@ class GRPOTrainer:
                 result = self._dispatch_pp_step(micro_batches, float(loss_scale), opt_config, step, turn_acc)
                 step_metrics = dict(self._diag_metrics or {})
                 step_time = time.time() - step_start
+                cycle_metrics["train/cycle_duration_ms"] = (time.perf_counter() - cycle_start) * 1000.0
                 self._log_step(
                     step=step,
                     orch_step=orch_step,
@@ -821,6 +848,7 @@ class GRPOTrainer:
                     expected_loss_scale=expected_loss_scale,
                     step_time=step_time,
                     turn_acc=turn_acc,
+                    cycle_metrics=cycle_metrics,
                 )
                 if config.save_steps > 0 and step > 0 and step % config.save_steps == 0 and config.checkpoint_dir:
                     logger.info(f"Saving checkpoint at step {step}...")
@@ -996,11 +1024,13 @@ class GRPOTrainer:
                 step_metrics = dict(self.trainer.get_grpo_native_metrics())
 
             step_time = time.time() - step_start
+            cycle_metrics["train/cycle_duration_ms"] = (time.perf_counter() - cycle_start) * 1000.0
 
             self._log_step(
                 step=step, orch_step=orch_step, step_metrics=step_metrics, result=result, lr=lr,
                 n_mb=n_mb, expected_loss_scale=expected_loss_scale,
                 step_time=step_time, turn_acc=turn_acc,
+                cycle_metrics=cycle_metrics,
             )
 
             # 7. Checkpointing

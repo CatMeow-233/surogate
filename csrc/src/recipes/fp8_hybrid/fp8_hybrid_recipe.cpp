@@ -459,8 +459,9 @@ void FP8HybridRecipe::backward_matmul(modules::MatmulContext& ctx) const {
         if (!weight_e4m3.scale()) {
             throw std::runtime_error("FP8HybridRecipe::backward_matmul: cached FP8 weight missing scale Stats");
         }
-    } else {
+    } else if (!cached_is_transposed) {
         // Quantize BF16/FP32 weight to E4M3 on-the-fly
+        // A cached W^T is consumed directly below; no untransposed copy is needed.
         weight_e4m3 = rs.temp_alloc(ETensorDType::FP8_E4M3, {N, K}, "weight_e4m3");
         weight_stats = rs.temp_alloc(ETensorDType::FP32, {Tensor::STATS_FLOATS}, "weight_stats");
         weight_e4m3.Stats = weight_stats.get<float>();

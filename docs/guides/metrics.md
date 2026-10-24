@@ -102,6 +102,28 @@ Legend:
 
 `kd_loss` is the mean τ²-scaled KL divergence `τ² · KL(teacher_topk ‖ student)` per valid token, accumulated over the micro-steps of the optimizer step and reported rank-0 local. `loss` remains the plain (unweighted) cross-entropy; the optimized objective is `ce_weight · loss + kd_weight · kd_loss`. See the [Knowledge Distillation guide](distillation.md). For MoE models the step line carries the MoE metrics instead.
 
+## GRPO Cycle Timing
+
+GRPO logs acquisition and publication timings alongside its existing training
+metrics. They are printed and written by the trainer at `logging_steps` intervals.
+
+| Metric | Description |
+| --- | --- |
+| `train/publish_duration_ms` | Publishing and cleaning up the preceding policy update; no publication on the initial step. |
+| `train/pack_duration_ms` | Waiting for rollouts and packing the next batch. |
+| `train/batch_wait_duration_ms` | Waiting for the packed micro-batch transport to become ready. |
+| `train/batch_receive_duration_ms` | Receiving and decoding the packed micro-batches. |
+| `train/cycle_duration_ms` | From the start of policy publication through the completed optimizer update, including batch acquisition and preparation. |
+
+Cycle timings use a monotonic clock and exclude step logging, checkpointing, and
+the final weight publication. They measure a trainer iteration, rather than the
+entire run's wall time. An empty-batch retry does not produce a completed cycle
+metric. `train/duration_ms` and `train/tokens_per_second` retain their existing
+training-step scope, so acquisition delays do not change the meaning of historical
+throughput charts. Compare the cycle and training durations when diagnosing input
+starvation or policy-publication overhead. The same timing boundaries apply to the
+native, diagnostic, and dispatch-PP paths.
+
 ## Evaluation Metrics
 
 Logged during validation via `log_eval()`:

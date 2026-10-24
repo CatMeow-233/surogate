@@ -825,26 +825,20 @@ void CompiledExecutor::dispatch_matmul_backward(const CompiledOp& op, const modu
     if (!used_recipe && mRecipe && mode == EMMTranspose::NT && a.Sizes[0] == mB * mT && allow_quant &&
         !disable_qkv_recipe_bwd) {
         Tensor dA_tmp{};
-        Tensor dB_tmp{};
         Tensor* dA_use = dA_ptr;
-        Tensor* dB_use = dB_ptr;
 
         if (!dA_use) {
             dA_tmp = mRunState.temp_alloc(a.DType, {a.Sizes[0], a.Sizes[1]}, "matmul_dA_tmp");
             mTemps.push_back(dA_tmp);
             dA_use = &dA_tmp;
         }
-        if (!dB_use) {
-            dB_tmp = mRunState.temp_alloc(b.DType, {b.Sizes[0], b.Sizes[1]}, "matmul_dB_tmp");
-            mTemps.push_back(dB_tmp);
-            dB_use = &dB_tmp;
-        }
-
         Tensor streamed_fp4_data_view{};
         Tensor streamed_fp4_scales_view{};
         modules::MatmulContext ctx;
         ctx.dinp = dA_use;
-        ctx.dweight = dB_use;
+        // Recipes accept a null dweight when wgrad is skipped. In particular,
+        // frozen weights must not consume a weight-sized temporary on the stack.
+        ctx.dweight = dB_ptr;
         ctx.dout = &d_out;
         ctx.inp = &a;
         ctx.weight = &b;
