@@ -1,0 +1,101 @@
+name: Experimental Trainer Release
+
+on:
+  push:
+    tags:
+      - 'experimental-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.repository == 'CatMeow-233/surogate'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Install build tool and CPU test dependencies
+        run: |
+          python -m pip install 'uv==0.12.23'
+          uv --no-config venv --python 3.12 .venv-experimental-release
+          uv --no-config pip install --python .venv-experimental-release/bin/python 'torch==2.11.0+cpu' --index-url https://download.pytorch.org/whl/cpu
+          uv --no-config pip install --python .venv-experimental-release/bin/python 'transformers==5.20.2' 'peft==0.21.2' 'numpy==2.5.4' 'pyyaml==6.0.3' 'pytest==9.1.1' 'setuptools-scm==10.3.4'
+      - name: Run experimental CPU tests
+        run: .venv-experimental-release/bin/python -m pytest -q tests/experimental --no-gpu
+      - name: Build the standalone wheel, sdist, and examples
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            python scripts/build_experimental_release.py --tag "$RELEASE_TAG"
+          else
+            python scripts/build_experimental_release.py
+          fi
+      - name: Check the installed package outside the checkout
+        run: |
+          uv --no-config pip install --python .venv-experimental-release/bin/python --no-deps build/experimental-release/artifacts/*.whl
+          uv --no-config pip check --python .venv-experimental-release/bin/python
+          interpreter="$GITHUB_WORKSPACE/.venv-experimental-release/bin/python"
+          archive="$GITHUB_WORKSPACE/build/experimental-release/artifacts/experimental-examples.zip"
+          cd "$RUNNER_TEMP"
+          "$interpreter" -m zipfile -e "$archive" experimental-examples
+          "$interpreter" -I -m surogate.experimental.train --help
+          "$interpreter" -I -m surogate.experimental.train experimental-examples/examples/experimental/smoke.yaml --validate-only
+          "$interpreter" -I -m surogate.experimental.train experimental-examples/examples/experimental/smoke.yaml
+      - name: Verify release checksums
+        working-directory: build/experimental-release/artifacts
+        run: sha256sum --check SHA256SUMS
+      - name: Verify the built source identity
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          info = json.loads(Path('build/experimental-release/artifacts/build-info.json').read_text())
+          assert info['source_commit'] == os.environ['GITHUB_SHA']
+          assert info['source_dirty'] is False
+          assert info['native_cuda_artifacts'] is False
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: surogate-experimental-release
+          path: build/experimental-release/artifacts/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.repository == 'CatMeow-233/surogate' && startsWith(github.ref, 'refs/tags/experimental-v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: surogate-experimental-release
+          path: experimental-artifacts
+      - name: Verify downloaded artifacts
+        working-directory: experimental-artifacts
+        run: sha256sum --check SHA256SUMS
+      - name: Publish the fork's experimental prerelease
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          repository: CatMeow-233/surogate
+          tag_name: ${{ github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          name: Surogate experimental trainer ${{ github.ref_name }}
+          body_path: packaging/experimental/RELEASE_NOTES.md
+          prerelease: true
+          make_latest: false
+          fail_on_unmatched_files: true
+          files: experimental-artifacts/*

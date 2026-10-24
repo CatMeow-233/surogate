@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools==84.2.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "surogate-experimental"
+version = "0.1.0a1"
+description = "Independent experimental PyTorch training for Surogate"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = [
+    "torch>=2.11",
+    "transformers>=5.5",
+    "peft",
+    "numpy",
+    "pyyaml",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Repository = "https://github.com/CatMeow-233/surogate"
+Documentation = "https://github.com/CatMeow-233/surogate/blob/main/docs/experimental/training.md"
+
+[project.scripts]
+surogate-experimental-train = "surogate.experimental.train.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["surogate.experimental*"]
+namespaces = true
