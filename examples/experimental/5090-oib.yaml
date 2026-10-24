@@ -1,0 +1,22 @@
+# All parameters trainable; release each gradient after its own update.
+# No accumulation, checkpointing, global clipping, compile, or LISA in this mode.
+schema_version: 1
+model: Qwen/Qwen3-4B
+train_jsonl: ./train.tokens.jsonl
+output_dir: ../../outputs/experimental-5090-oib
+device: cuda
+dtype: bfloat16
+max_sequence_length: 1024
+batch_size: 1
+gradient_accumulation_steps: 1
+max_steps: 1000
+learning_rate: 0.00002
+warmup_steps: 25
+optimizer: rank_scaled
+projection_rank: 1
+projection_interval: 200
+gradient_checkpointing: false
+optimizer_in_backward: true
+max_grad_norm: 0
+save_every: 100
+seed: 42
