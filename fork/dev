@@ -46,7 +46,8 @@ Commands
                                     build the surogate-experimental wheel, sdist and examples zip
   exp-train <config.yaml> [args]    run the experimental trainer from the checkout
   fmt                               clang-format the lines changed since upstream, ruff format fork code
-  check                             ledger check and make-target probe
+  check                             ledger, generated maps, doc links and make targets
+  map                               regenerate fork/docs/maps/*.md and fork/patches/README.md
 EOF
 }
 
@@ -174,6 +175,8 @@ fmt() {
 
 check() {
     run python3 -I fork/tools/check_divergence.py --strict
+    run python3 -I fork/tools/gen_maps.py --check
+    run python3 -I fork/tools/check_doc_links.py
     # Fails when upstream renames or drops a make target that fork/dev runs. A fixed CUDA_HOME
     # keeps the Makefile from probing for nvcc on hosts without CUDA.
     run make -n CUDA_HOME=/usr/local/cuda wheel-dev serve-build build-all quantizer serve-stt-build \
@@ -191,6 +194,7 @@ case "$command" in
     exp-train) exp_train "$@" ;;
     fmt) fmt ;;
     check) check ;;
+    map) run python3 -I fork/tools/gen_maps.py --write ;;
     *)
         usage >&2
         exit 2
