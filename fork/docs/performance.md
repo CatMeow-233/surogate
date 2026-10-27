@@ -49,9 +49,9 @@ nsys stats --report cuda_gpu_mem_size_sum train-trace.nsys-rep
 
 ```bash
 source .venv/bin/activate
-cmake -S csrc/src/testing/host/openmp -B build/host-openmp -G Ninja
-cmake --build build/host-openmp --parallel 2
-ctest --test-dir build/host-openmp --output-on-failure
+cmake -S fork/native/openmp-contract -B build/fork-openmp -G Ninja
+cmake --build build/fork-openmp --parallel 2
+ctest --test-dir build/fork-openmp --output-on-failure
 ```
 
 它检查训练用的 OpenMP 辅助函数能让一个真实的双 worker 主机库生效，并得到精确的整数输出。运行时的线程数限制可能导致显式跳过。该测试不编译 CUDA 训练库，也不验证 AdamW 数值。

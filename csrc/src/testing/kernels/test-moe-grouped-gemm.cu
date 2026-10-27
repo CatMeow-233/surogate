@@ -23,7 +23,7 @@
 #include "recipes/recipe.h"
 #include "recipes/recipe_factory.h"
 #include "runtime/core/matmul_context.h"
-#include "runtime/ops/moe_weight_grad_policy.h"
+#include "surogate_fork/moe_weight_grad_policy.h"
 
 cudnnHandle_t create_cudnn_handle();  // runtime/attention/attention_cudnn.cpp
 void destroy_cudnn_handle(cudnnHandle_t handle) noexcept;

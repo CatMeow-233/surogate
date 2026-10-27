@@ -14,7 +14,7 @@
 #include "runtime/dsl/tensor_role.h"
 #include "runtime/executor/op_registry.h"
 #include "runtime/executor/graph_executor_utils.h"
-#include "runtime/ops/moe_weight_grad_policy.h"
+#include "surogate_fork/moe_weight_grad_policy.h"
 #include "kernels/kernels.h"
 #include "recipes/recipe.h"
 #include "utilities/dtype.h"

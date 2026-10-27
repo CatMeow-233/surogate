@@ -17,15 +17,12 @@ last_synced = "282f99012a78c888725b8c3d8f9000749eca4e66"   # 2026-10-23
 # Fork-only paths: the merge base has no history for them.
 prefixes = [
     "fork/",
-    "csrc/src/testing/host/",
 ]
 files = [
     "AGENTS.md",
     ".github/workflows/experimental-release.yml",
     "docs/experimental/training.md",   # redirect stub: the 0.1.0a1-a3 wheels publish this URL
     "docs/upstream-notes/README.md",
-    "csrc/cmake/training_openmp.cmake",
-    "csrc/src/runtime/ops/moe_weight_grad_policy.h",
     "tests/grpo/test_batch_distribution.py",
     "tests/grpo/test_inprocess_micro_batches.py",
     "tests/grpo/test_microbatch_preparation.py",
@@ -135,7 +132,7 @@ files = [
     "csrc/src/runtime/ops/moe_grouped_gemm.cpp",
     "csrc/src/testing/kernels/test-moe-grouped-gemm.cu",
 ]
-fork_files = ["csrc/src/runtime/ops/moe_weight_grad_policy.h"]
+fork_files = ["fork/native/include/surogate_fork/moe_weight_grad_policy.h"]
 tests = ["csrc/src/testing/kernels/test-moe-grouped-gemm.cu"]
 conflict_history = [
     "2026-10-27 reverse replay from b5af2f8e, conflict blocks at 90/30/14 days: moe_grouped_gemm.cpp 2/0/0",
@@ -162,14 +159,17 @@ id = "T5"
 title = "OpenMP for CPU training kernels"
 commits = ["9a6018f2"]
 switch = "always on (links OpenMP::OpenMP_CXX into surogate-common)"
+# csrc/CMakeLists.txt carries only the two-line hook into fork_native.cmake,
+# which also adds the fork include root that T3 uses.
 files = ["csrc/CMakeLists.txt"]
 fork_files = [
-    "csrc/cmake/training_openmp.cmake",
-    "csrc/src/testing/host/openmp/CMakeLists.txt",
-    "csrc/src/testing/host/openmp/check.cpp",
-    "csrc/src/testing/host/openmp/probe.cpp",
+    "fork/native/cmake/fork_native.cmake",
+    "fork/native/cmake/training_openmp.cmake",
+    "fork/native/openmp-contract/CMakeLists.txt",
+    "fork/native/openmp-contract/check.cpp",
+    "fork/native/openmp-contract/probe.cpp",
 ]
-tests = ["csrc/src/testing/host/openmp/check.cpp"]
+tests = ["fork/native/openmp-contract/check.cpp"]
 conflict_history = [
     "2026-10-27 reverse replay from b5af2f8e, conflict blocks at 90/30/14 days: none",
 ]

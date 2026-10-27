@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-include(${CMAKE_CURRENT_SOURCE_DIR}/../../../../cmake/training_openmp.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/training_openmp.cmake)
 add_library(training-openmp-probe SHARED probe.cpp)
 surogate_enable_training_openmp(training-openmp-probe)
 
