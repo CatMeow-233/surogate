@@ -8,7 +8,7 @@
 fork/dev sync --dry-run    # 只报告，不改动任何东西
 fork/dev sync              # 合并到同步分支，归位笔记，刷新 ledger 和地图，检查，推送分支并开 PR
 fork/dev sync --continue   # 解决冲突或修复检查失败并提交之后，从归位步骤继续
-fork/dev sync --finish     # PR 的必需检查全部通过后，把 main 快进到同步分支并推送
+fork/dev sync --finish     # PR 的四个必需检查通过后，把 main 快进到同步分支并推送
 ```
 
 退出码：0 完成；2 需要手动解决冲突；3 预检失败；4 检查失败；1 其他错误（例如某条 git 命令失败）。
@@ -69,7 +69,7 @@ fork 的工具不修改 GitHub 设置，以下各项由仓库所有者完成。
    gh api -X PUT repos/CatMeow-233/surogate/branches/main/protection --input protect.json
    ```
 
-   `upstream-cpu-lane` 暂不设为必需：它在工作流中是 `continue-on-error: true`。`fork/tools/known_failures.txt` 是在没有 GPU 的容器中生成的；等 CI 上两次相同的运行确认它（或按 CI 上传的 JUnit 结果重新生成）之后，去掉 `continue-on-error` 并把它加入必需检查。
+   `fork/dev sync --finish` 用 `gh pr checks` 检查同样的四个 job（`fork/tools/sync_upstream.py` 中的 `REQUIRED_CHECKS`），所以设置分支保护之前也能完成同步；修改必需检查时两处一起改。`upstream-cpu-lane` 暂不设为必需：它在工作流中是 `continue-on-error: true`。`fork/tools/known_failures.txt` 是在没有 GPU 的容器中生成的；等 CI 上两次相同的运行确认它（或按 CI 上传的 JUnit 结果重新生成）之后，去掉 `continue-on-error` 并把它加入必需检查。
 
 fork CI（`.github/workflows/fork-ci.yml`）在每个分支的每次推送时运行，各 job 执行的都是 `fork/dev` 命令：`check` 运行 `fork/dev check`（先获取上游 `main`），`experimental` 运行 `fork/dev test experimental` 和 `fork/dev release experimental`（只构建，不发布），`fork-tests` 运行 `fork/dev test patches`，`openmp-contract` 运行 `fork/dev test openmp`，`upstream-cpu-lane` 运行 `fork/tools/test_cpu.sh` 并上传 JUnit 结果。
 
@@ -77,16 +77,16 @@ fork CI（`.github/workflows/fork-ci.yml`）在每个分支的每次推送时运
 
 | 步骤 | 内容 | 失败时 |
 |---|---|---|
-| 1. 预检 | 当前分支是 `main`，工作区干净，并且与 `origin/main` 一致（先执行 `git fetch --no-tags origin main`）；upstream 推送地址已禁用；rerere 已开启，`merge.directoryRenames` 未设置；`check_divergence.py --strict` 通过；`origin` 上没有 `v*` 或 `jackalope-v*` tag。`--dry-run` 不要求在 `main` 上，也不访问 `origin`；`--local` 不访问 `origin`。 | 退出码 3，列出每一项问题 |
-| 2. 获取 | `git fetch --no-tags upstream main:refs/remotes/upstream/main`。给出 `--to <提交>` 时不获取，直接合并该提交（只同步到上游某个较早的提交时，先手动获取上游，再 `fork/dev sync --to <sha>`）。 | 退出码 1 |
-| 3. 报告 | 新提交数；用 `git merge-tree` 预演的冲突路径及其所属 ledger 条目；触及 ledger 中文件的上游提交，按 topic 分组；上游新增的根目录 `.md` 及其去向；`csrc/src` 与 `surogate/` 下新增的顶层目录。`--dry-run` 到此结束。报告同时写入 `.git/fork-sync-report.md`，作为 PR 正文。 | — |
+| 1. 预检 | 当前分支是 `main`，工作区干净，并且与 `origin/main` 一致（先执行 `git fetch --no-tags origin main`）；upstream 推送地址已禁用；rerere 已开启，`merge.directoryRenames` 未设置；`check_divergence.py --strict` 通过；`origin` 上没有 `v*` 或 `jackalope-v*` tag；`gh api` 读到的工作流状态中，上游的 `wheel.yml`、`docker.yml`、`jackalope.yml` 都不是 `active`（`jackalope.yml` 在推送到 `main` 时就会发布 Release）。`--dry-run` 不要求在 `main` 上，也不访问 `origin` 和 GitHub；`--local` 同样不访问。 | 退出码 3，列出每一项问题 |
+| 2. 获取 | `git fetch --no-tags upstream main:refs/remotes/upstream/main`。给出 `--to <提交>` 时不获取，直接合并该提交；它必须是已获取的 `upstream/main` 的祖先，否则退出码 3（只同步到上游某个较早的提交时，先手动获取上游，再 `fork/dev sync --to <sha>`）。 | 退出码 1 |
+| 3. 报告 | 新提交数；用 `git merge-tree` 预演的冲突路径及其所属 ledger 条目；触及 ledger 中文件的上游提交，按 topic 分组；上游新增的根目录 `.md` 及其去向；`csrc/src` 与 `surogate/` 下新增的顶层目录；上游新增的工作流（检查它的触发条件，会发布的就在 GitHub 上禁用）。`--dry-run` 到此结束；否则报告写入 `.git/fork-sync-report.md`，作为 PR 正文的开头。 | — |
 | 4. 分支与合并 | `git switch -c sync/<yyyymmdd>-<sha 前 8 位>`，然后 `git merge --no-ff -m "sync: merge upstream/main <sha> (<n> commits)"`。 | — |
 | 5. 自动解决 | 只自动处理一种冲突：上游删除了一个已移到 `docs/upstream-notes/` 的笔记（索引中有 base 与 ours 两个 stage，没有上游 stage）。脚本 `git rm` 该文件，并删除 ledger 中对应的 `[[relocation]]`。另外检查 `[owned]` 中每个路径所在的上游目录在合并后是否还存在（见“目录重命名”）。 | 其他冲突或目录消失时停下：退出码 2，列出文件及其 ledger topic |
 | 6. 归位提交 | 提交 “sync: re-home upstream root notes”。本次合并新增到根目录的 `.md` 文件，如果匹配 ledger `[root_rehome]` 的 `patterns`、不匹配 `never`，且文件名没有出现在 `tooling_refs` 所列的文件中（出现即说明工具按路径引用它），就 `git mv` 到 `docs/upstream-notes/` 并登记 `[[relocation]]`；其余的只报告，由你决定。归位是单独的提交，合并提交保持纯合并；下一次同步时 merge base 已含根目录路径，上游对该文件的修改会跟随重命名合入。 | — |
 | 7. 刷新提交 | 提交 “sync: refresh ledger and maps”：`[sync].last_synced` 设为合并的上游提交；`gen_maps.py --write` 重新生成地图；`check_doc_links.py --update-baseline` 把上游文档中新出现的失效链接加入基线、删去上游已修复的条目，变化逐条写在提交说明里。 | — |
-| 8. 检查 | `fork/dev check`；不带 `--fast` 时还运行 `fork/dev test patches`、`fork/dev test experimental` 和 `fork/dev test cpu`。 | 退出码 4 |
-| 9. 发布 | `git push -u origin <同步分支>`，`gh pr create -R CatMeow-233/surogate --base main`，PR 正文是第 3 步的报告加上同步分支的提交列表。`--local` 跳过此步。 | 退出码 1 |
-| 10. 完成 | PR 的必需检查通过后运行 `fork/dev sync --finish`：先用 `gh pr checks --required` 确认，再 `git switch main`、`git merge --ff-only <同步分支>`、`git push origin main`。 | 检查未全部通过时退出码 4 |
+| 8. 检查 | `fork/dev check`；不带 `--fast` 时还运行 `fork/dev test patches`、`fork/dev test experimental` 和 `fork/dev test cpu`，它们需要准备好的 `.venv`（或 `FORK_PY`）、uv，以及 download.pytorch.org（无法访问时设 `FORK_TORCH_INDEX=pypi`），见 [fork/README.md 的“首次准备环境”](../README.md#首次准备环境)。 | 退出码 4 |
+| 9. 发布 | `git push -u origin <同步分支>`；PR 还没有打开时 `gh pr create -R CatMeow-233/surogate --base main`，正文（`.git/fork-sync-pr.md`）是第 3 步的报告加上同步分支的提交列表；PR 已经打开时（例如 `--continue` 之后）推送就更新了它，不再新建。`--local` 跳过此步。 | 退出码 1 |
+| 10. 完成 | PR 的检查通过后运行 `fork/dev sync --finish`：先用 `gh pr checks` 确认 `check`、`experimental`、`fork-tests`、`openmp-contract` 都已通过，再 `git switch main`、`git merge --ff-only <同步分支>`、`git push origin main`。 | 检查未全部通过时退出码 4，列出未通过的 job |
 | 11. GPU 复测 | 报告中出现 T1–T5 或 T6–T8 的上游提交时，在 GPU 主机上运行 `fork/dev test gpu`，并在该 topic 的 `conflict_history` 末尾记一行（日期、上游 sha、结果）。 | — |
 
 `--continue` 在同步分支上重新执行第 6–9 步，已经完成的部分会跳过，所以修复之后可以反复运行。`--local` 与 `--fast` 用于演练：前者不访问 `origin`、不推送也不开 PR（之后用 `fork/dev sync --finish --local` 在本地快进），后者跳过第 8 步中的测试套件。
@@ -99,7 +99,7 @@ git switch main
 git branch -D sync/<yyyymmdd>-<sha>
 ```
 
-在移动更多上游路径（新增 `[[relocation]]`）之前：用 `git log --diff-filter=R -M --since='60 days ago' upstream/main -- <目录>` 确认上游近期没有重命名，用 `git grep` 确认没有代码按字符串引用该路径，再按下文的演练方法重放一遍。
+在移动更多上游路径（新增 `[[relocation]]`）之前：用 `git log --diff-filter=R -M --since='60 days ago' upstream/main -- <目录>` 确认上游近期没有重命名，用 `git grep` 确认没有代码按字符串引用该路径，再按下文的正向演练方法演练一遍。
 
 ## 冲突处理手册
 
@@ -112,20 +112,20 @@ git log --oneline HEAD..MERGE_HEAD -- <文件>                # 上游改了什�
 
 解决后运行该 topic 的测试，在 ledger 中该 topic 的 `conflict_history` 末尾记一行（日期、上游 sha、冲突位置、做法），然后 `git add`、`git commit --no-edit`、`fork/dev sync --continue`。如果上游已经实现了同样的改动，就删去 fork 的版本，并把该文件从 topic 的 `files` 中移除（文件不再是 M 时，`check_divergence.py --strict` 会报告过期条目）。
 
-各 topic 的文件、提交和测试以 [ledger](../patches/ledger.toml) 为准（表格形式见 [patches/README.md](../patches/README.md)）。下面的“回放”是 90/30/14 天窗口内上游修改与 fork 改动重叠的冲突块数（见“测量依据”）。
+各 topic 的文件、提交和测试以 [ledger](../patches/ledger.toml) 为准（表格形式见 [patches/README.md](../patches/README.md)）。下面的“反向回放”是把 fork 与上游 90、30、14 天前的提交做三方合并预演时的冲突块数（见“测量依据”）。
 
 ### T1 dispatch-PP 批量读取边界张量
 
 - 文件：`csrc/src/binding/py_train.cpp`、`csrc/src/runtime/executor/graph_executor.{h,cpp}`、`csrc/src/runtime/executor/graph_executor_utils.{h,cpp}`。
 - 改动：graph executor 增加 `read_named_bytes_batch()`；`py_train.cpp` 的 dispatch-PP 函数中 5 处成对的 `read_named_bytes()` 调用改为一次批量调用。
-- 回放：`py_train.cpp` 1/0/0。
+- 反向回放：`py_train.cpp` 1/0/0。
 - 解决：保留上游代码，再把相邻成对读取边界张量的两次 `read_named_bytes()` 合并为一次 `read_named_bytes_batch()`。上游修改 `read_named_bytes()` 的签名或语义时，同步修改批量版本。
 - 测试：`fork/native/tests/test-fork-dispatch-pp-host-copy.cpp`（Catch2 标签 `[dispatch-pp]`，编译进 `dsl-run-state-tests`），在 GPU 主机上运行 `fork/dev test native`。
 
 ### T2 LoRA 融合输入梯度（`SUROGATE_FUSE_LORA_DX=1`，默认关闭）
 
 - 文件：`csrc/src/runtime/lora/lora_model_utils.h`（约 150 行新增，位于文件中部）、`csrc/src/runtime/lora/lora_slice_dispatch.h`。
-- 回放：无冲突。
+- 反向回放：无冲突。
 - 解决：开关关闭时走的路径必须与上游一致。上游改写 LoRA 反向分发时，先采用上游版本，再把融合分支接回开关判断之后；不满足融合条件时仍回退到上游的逐切片实现。
 - 测试：`fork/native/tests/test-fork-lora-fused-dx.cu`（`[fused-dx]`，在 `integration-tests` 中）；性能验证方法见 [performance.md](performance.md)。
 
@@ -133,7 +133,7 @@ git log --oneline HEAD..MERGE_HEAD -- <文件>                # 上游改了什�
 
 - 文件：`csrc/src/runtime/ops/moe_grouped_gemm.cpp`。
 - 改动：包含 `fork/native/include/surogate_fork/moe_weight_grad_policy.h`（写作 `#include "surogate_fork/moe_weight_grad_policy.h"`）；基础专家权重梯度只在 `moe_weight_grad_needs_zero()` 判定需要时清零；backward 不再分配未使用的 FP8 输入量化缓冲。
-- 回放：2/0/0。
+- 反向回放：2/0/0。
 - 解决：保留上游，重新加上 include 行和清零条件。只有在上游 backward 仍不使用 `ctx.inp_quant` 时才删去那段缓冲分配。
 - 测试：`fork/native/tests/test-fork-moe-grouped-gemm.cu`（`[wgrad-zero]`）。
 
@@ -141,20 +141,20 @@ git log --oneline HEAD..MERGE_HEAD -- <文件>                # 上游改了什�
 
 - 文件：`csrc/src/recipes/fp8_hybrid/fp8_hybrid_recipe.cpp`、`csrc/src/runtime/ops/matmul.cpp`。
 - 改动：已缓存转置权重时，FP8 backward 不再在线量化一份未转置的权重；matmul backward 不再为跳过的权重梯度分配临时张量，传给 recipe 的 `dweight` 可以为空。
-- 回放：`matmul.cpp` 1/0/0。
+- 反向回放：`matmul.cpp` 1/0/0。
 - 解决：保留上游，重新应用这两处。如果上游的 recipe 不再接受空的 `dweight`，就恢复上游的临时张量写法，并在 `conflict_history` 中记录。
 - 测试：`fork/native/tests/test-fork-fp8-quant.cpp`（`[recipe]`）。
 
 ### T5 OpenMP 与原生挂接点
 
 - 文件：`csrc/CMakeLists.txt` 中的两行挂接（`include(.../fork_native.cmake)` 和 `surogate_fork_configure_common(surogate-common)`），紧跟在 `surogate-common` 的 `target_link_libraries` 之后。约定见 [native/README.md](../native/README.md)。
-- 回放：无冲突。该文件 90 天内有 147 次上游提交，但挂接点所在区域没有改动。
+- 反向回放：无冲突。该文件 90 天内有 147 次上游提交，但挂接点所在区域没有改动。
 - 解决：上游移动这一区域时，把两行放回 `surogate-common` 定义之后。上游改名 `surogate-common` 时，同时修改挂接行的参数。上游自己为训练库链接 OpenMP 时，从 `fork/native/cmake/fork_native.cmake` 删去 `surogate_enable_training_openmp()` 调用，并更新 T5。
 - 测试：`fork/dev test openmp`；GPU 主机上 `fork/dev test native`（确认 fork 的测试仍编进上游目标）。
 
 ### T6–T8 GRPO
 
-三个 topic 共用 `surogate/grpo/trainer.py`。回放：`trainer.py` 6/0/0，`packer.py` 1/0/0，`data.py` 与 `batch.py` 无冲突。90 天窗口中 `trainer.py` 的 6 处是：T8 的 `_find_sample_boundaries`；`_log_step` 的指标字典（fork 只在其中保留 `**getattr(self, "_fork_cycle_metrics", {})` 一行）；`train()` 中 T6 的 3 处计时点；1 处 `.ravel()`。fork 的逻辑放在 `surogate/_fork`，上游文件中只保留调用它的几行；fork 的 import 写在函数内部，不要移到模块顶部的 import 区，上游经常修改那里。
+三个 topic 共用 `surogate/grpo/trainer.py`。反向回放：`trainer.py` 6/0/0，`packer.py` 1/0/0，`data.py` 与 `batch.py` 无冲突。90 天窗口中 `trainer.py` 的 6 处是：T8 的 `_find_sample_boundaries`；`_log_step` 的指标字典（fork 只在其中保留 `**getattr(self, "_fork_cycle_metrics", {})` 一行）；`train()` 中 T6 的 3 处计时点；1 处 `.ravel()`。fork 的逻辑放在 `surogate/_fork`，上游文件中只保留调用它的几行；fork 的 import 写在函数内部，不要移到模块顶部的 import 区，上游经常修改那里。
 
 - T6 周期计时（`trainer.py`、`packer.py`）：`train()` 记录 publish、pack、batch_wait、batch_receive 各阶段的耗时；每次调用 `_log_step` 前设置 `self._fork_cycle_metrics`，并调用 `surogate/_fork/grpo_cycle_timing.py` 中的 `log_cycle_summary()` 打印单独一行；`packer.py` 的等待循环只在没有批次时 sleep。上游改写主循环时以上游为准，再把计时点放回对应阶段。测试：`fork/patches/tests/grpo/test_trainer_cycle_timing.py`、`fork/patches/tests/grpo/test_packer_wait.py`。
 - T7 进程内 micro-batch 传递（`data.py`、`packer.py`、`trainer.py`）：`GRPODataLoader` 的关键字参数 `micro_batch_receiver`（注解写成字符串，不导入该名字），`packer.py` 中 `BasePacker`、`SinglePacker` 与 `setup_grpo_packer` 的关键字参数 `micro_batch_sender`，以及 `trainer.py` 的 `_setup_data` 中对 `surogate/_fork/grpo_handoff.py` 的局部导入。不要为注解在 `data.py` 的 import 区加导入：整理前唯一一处 1/1/1 冲突就在那里。测试：`fork/patches/tests/grpo/test_inprocess_micro_batches.py`。
@@ -186,7 +186,8 @@ git log --oneline HEAD..MERGE_HEAD -- <文件>                # 上游改了什�
 ### 检查失败（退出码 4）
 
 - `gen_maps.py` 报告 “unclassified directory”、“unclassified subpackage” 或 “unclassified markdown file”：在 `fork/tools/gen_maps.py` 的 `CSRC_ENGINES`、`PY_ROLES` 或 `DOC_RULES` 中补一条规则，再运行 `fork/dev map`。
-- `check_doc_links.py` 报告 fork 文档中的问题：`文件:行号` 超出了文件长度，或引用的上游路径已不存在。按上游的新内容更新 fork 文档。上游文档中新出现的失效链接已由刷新提交加入基线。
+- `gen_maps.py` 报告 “not found; upstream moved or deleted it” 或 “no COMMAND_MAPPING”：上游移动或改写了脚本按固定路径解析的文件（例如 `surogate/cli/main.py`、`csrc/CMakeLists.txt`）。把 `fork/tools/gen_maps.py` 中的路径或解析方式改成上游的新写法，再运行 `fork/dev map`。
+- `check_doc_links.py` 报告 fork 文档中的问题：引用的上游路径已不存在。按上游的新内容更新 fork 文档。上游文档中新出现的失效链接已由刷新提交加入基线。
 - `check_divergence.py --strict` 报告 “is not modified (M)”：上游已经包含了该改动，从 topic 中删去该文件。报告 “not owned” 或 “outside the ledger”：合并结果带入了未登记的差异（通常是解决冲突时留下的改动），登记它或撤销它。
 - `make -n` 探测失败：上游改名或删除了 `fork/dev` 调用的 make 目标，更新 `fork/dev` 和 [build-and-release.md](build-and-release.md)。
 - 测试失败：如果上游测试在上游提交本身也失败，就把它加入 `fork/tools/known_failures.txt` 并注明该 sha；由 fork 造成的失败必须先修复，同步才能继续。
@@ -195,32 +196,11 @@ git log --oneline HEAD..MERGE_HEAD -- <文件>                # 上游改了什�
 
 ## 测量依据
 
-### 冲突面（反向回放）
+整理 fork 时用两种方法测量了冲突面：把 fork 与上游 90、30、14 天前的提交做三方合并预演（反向回放），以及从 `558ab695`（2026-09-11）起逐个同步上游的 295 次 first-parent 合入（正向演练，全部没有手动冲突，两个新的根目录笔记被自动归位）。结论：每周同步一次，预计不会遇到内容冲突；拖到 90 天才同步，预计要手动解决约 11 个冲突块。各 topic 的数字记在 ledger 的 `conflict_history` 中，表格见 [patches/README.md](../patches/README.md)。
 
-把 fork 的当前状态与上游 90、30、14 天前的提交（固定为 `14ad7e86`、`14b9069a`、`9a717fb2`）做三方合并预演（`git merge-tree`，以 `282f9901` 为 base），得到的是该窗口内上游修改与 fork 改动重叠的冲突块数：
+### 正向演练方法
 
-| 文件 | 整理前（`b5af2f8e`） | 整理后 |
-|---|---|---|
-| `surogate/grpo/trainer.py` | 8/2/0 | 6/0/0 |
-| `surogate/grpo/data.py` | 1/1/1 | 0/0/0 |
-| `surogate/grpo/packer.py` | 1/0/0 | 1/0/0 |
-| `csrc/src/binding/py_train.cpp` | 1/0/0 | 1/0/0 |
-| `csrc/src/runtime/ops/matmul.cpp` | 1/0/0 | 1/0/0 |
-| `csrc/src/runtime/ops/moe_grouped_gemm.cpp` | 2/0/0 | 2/0/0 |
-
-整理后，按每周（以及每两周）一次同步，预计没有内容冲突；拖到 90 天才同步，预计要手动解决约 11 处。fork 改过的上游文件从 22 个减到 16 个，位于上游目录中的 fork 文件从 10 个减到 0 个。
-
-### 正向演练
-
-在一个共享克隆中，从 `558ab695`（2026-09-11）开始：先执行当时已经存在的笔记操作（移动 `TODO.md`、`TODOv2.md`、`glm-dsa-kernels.md`，删除 `RELEASE_v1.4.0.md`），复制 fork 自有的全部文件，ledger 的 `last_synced` 设为起点并去掉 topic（fork 对上游文件的改动是在更晚的上游上写的，放到起点上本身就会冲突）。然后对 `558ab695..282f9901` 的 295 个 first-parent 合入逐个运行 `sync_upstream.py --local --fast --to <合入>` 和 `--finish --local`，最后在 `282f9901` 之上加 5 个人造的上游提交。结果：
-
-- 295 次同步全部没有冲突，没有一次需要手动处理；每次约 6 秒。
-- `DESIGN-kv-admission.md` 在 2026-10-19 的合入 `18ef8bcb`、`DESIGN-host-kv-tier.md` 在 2026-10-23 的合入 `282f9901` 被归位到 `docs/upstream-notes/`。每次同步后根目录的 markdown 都只有 `AGENTS.md` 和 `README.md`。
-- 每次同步后 `check_divergence.py --strict` 都通过。
-- 每次同步都在第 8 步的 `fork/dev check` 处以退出码 4 结束，这是演练的设置造成的：复制过去的 fork 文档描述的是今天的代码（行号、后来才加入的脚本），而演练中没有 T1–T9 的改动。到最后一个合入时只剩两项：`fork/README.md` 引用的服务端 CMake 段落行号范围到第 2023 行，而没有 T5 两行挂接的 `csrc/CMakeLists.txt` 只有 2021 行；上游 2026-10-16 在 `docs/` 下加入的 `grpo_routing_replay.md` 没有 `DOC_RULES` 规则（真实的 fork 已把它移到 `docs/upstream-notes/`）。后者正是新文档分类检查应有的反应。
-- 人造提交：(a) 修改 `TODO.md`：没有冲突，修改落在 `docs/upstream-notes/TODO.md`。(b) 删除 `TODO.md`：1 个 rename/delete 冲突，自动解决，文件和对应的 `[[relocation]]` 一起删除。(c) 根目录新增 `CHANGELOG.md`：在 never 列表中，不移动，报告。(d) 根目录新增 `DESIGN-x.md` 并在 `Makefile` 中引用：不移动，报告 “named in Makefile”。(e) 把 `surogate/` 改名为 `python/surogate/`：git 没有报告任何冲突，`surogate/_fork` 留在了旧位置；同步脚本的目录检查在报告和合并后都指出了它，并以退出码 2 停下（见“目录重命名”）。
-
-重放方法（例如在新增 `[[relocation]]` 之前）：
+新增 `[[relocation]]` 或修改同步脚本之前，在一个共享克隆中重演一段上游历史：
 
 ```bash
 git clone -q --shared . ../rehearse && cd ../rehearse
@@ -237,3 +217,5 @@ for L in $(git rev-list --first-parent --reverse <起点>..upstream/main); do
     python3 -I fork/tools/check_divergence.py --strict || break
 done
 ```
+
+复制到起点上的 fork 文档描述的是今天的代码，所以演练中第 8 步的 `fork/dev check` 可能以退出码 4 结束（例如引用了起点上还不存在的文件）；循环把它当作可以继续的结果，只在需要手动解决冲突时停下。

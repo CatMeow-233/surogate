@@ -3,23 +3,25 @@
 
 A sync runs these steps and stops at the first one that needs the owner:
   1. preflight: clean tree on main, equal to origin/main; upstream push URL disabled; rerere on;
-     merge.directoryRenames unset; check_divergence --strict passes; no v* tags on origin
+     merge.directoryRenames unset; check_divergence --strict passes; no v* tags on origin; the
+     upstream release workflows are disabled on the fork
   2. fetch upstream main
   3. report: new commits, conflicts mapped to ledger topics, upstream commits touching ledgered
-     files, new root notes, new top-level directories (--dry-run stops here)
+     files, new root notes, new top-level directories, new workflows (--dry-run stops here)
   4. branch sync/<yyyymmdd>-<sha> and merge with --no-ff (never rebase)
   5. resolve the one known conflict (upstream deleted a relocated note); stop on any other, and
      when an upstream directory rename would leave a fork-owned subdirectory behind
   6. commit "sync: re-home upstream root notes" (see [root_rehome] in the ledger)
   7. commit "sync: refresh ledger and maps" ([sync].last_synced, gen_maps, doc-link baseline)
   8. fork/dev check, then the patch, experimental and CPU test suites
-  9. push the branch and open a PR; --finish fast-forwards main once its checks pass
+  9. push the branch and open a PR (or update the open one); --finish fast-forwards main once the
+     PR's REQUIRED_CHECKS pass
 
 Usage: fork/dev sync [--dry-run | --continue | --finish] [--to REV] [--local] [--fast]
   --dry-run   steps 1-3 only; changes nothing (main and origin are not required)
   --continue  after committing a conflict resolution or a fix on the sync branch: steps 6-9
   --finish    on the sync branch, after the PR's required checks pass: fast-forward main, push it
-  --to REV    merge REV, an already fetched upstream commit, instead of fetching upstream main
+  --to REV    merge REV, an ancestor of the fetched upstream/main, instead of fetching upstream main
   --local     no origin checks, no push, no PR (rehearsals)
   --fast      skip the test suites in step 8 (rehearsals)
 Exit status: 0 done, 2 manual conflict, 3 preflight failure, 4 check failure, 1 other errors.
@@ -27,6 +29,7 @@ Exit status: 0 done, 2 manual conflict, 3 preflight failure, 4 check failure, 1 
 
 import argparse
 import datetime
+import json
 import re
 import subprocess
 import sys
@@ -40,6 +43,13 @@ BASELINE = "fork/tools/doc_links_baseline.txt"
 GENERATED = ["fork/patches/README.md", "fork/docs/maps"]
 REPO = "CatMeow-233/surogate"
 PUSH_DISABLED = "DISABLED-see-AGENTS.md"
+# Upstream workflows that publish releases or images (jackalope.yml on any push to main that
+# touches jackalope/**); the owner disables them on the fork.
+UPSTREAM_WORKFLOWS = (".github/workflows/wheel.yml", ".github/workflows/docker.yml", ".github/workflows/jackalope.yml")
+# fork-ci jobs that must pass on the sync PR before --finish; the same list as main's branch
+# protection in fork/docs/sync.md, checked here so that --finish also works without it.
+REQUIRED_CHECKS = ("check", "experimental", "fork-tests", "openmp-contract")
+NOTES_PLAYBOOK = 'fork/docs/sync.md, section "移动过的上游笔记与删除的文件"'
 
 
 def git(*args, ok=(0,)):
@@ -49,10 +59,16 @@ def git(*args, ok=(0,)):
     return result.stdout.strip()
 
 
-def run(*cmd):
-    """Print a command, run it from the repository root and return its exit status."""
+def run(*cmd, capture=False):
+    """Print a command and run it from the repository root; return its exit status, or the
+    CompletedProcess with text output when capture is set."""
     print("+", " ".join(cmd), flush=True)
-    return subprocess.run(cmd, cwd=ROOT).returncode
+    result = subprocess.run(cmd, cwd=ROOT, capture_output=capture, text=True)
+    return result if capture else result.returncode
+
+
+def is_ancestor(commit, rev):
+    return subprocess.run(["git", "-C", str(ROOT), "merge-base", "--is-ancestor", commit, rev]).returncode == 0
 
 
 def ledger():
@@ -73,6 +89,10 @@ def label(path, book):
     if any(path == d["path"] for d in book.get("deletion", [])):
         return "[[deletion]]"
     return "not in the ledger"
+
+
+def is_note(path, book):
+    return label(path, book) in ("[[relocation]]", "[[deletion]]")
 
 
 def unmerged(lines):
@@ -135,21 +155,22 @@ def new_root_notes(old, new):
 
 def report(target, book):
     """Lines describing the merge of target into HEAD, and the merge's conflicted paths."""
-    if git("merge-base", "HEAD", target) == target:
+    base = git("merge-base", "HEAD", target)
+    if base == target:
         return [f"upstream {target[:12]}: up to date, 0 conflicts"], {}
     count = git("rev-list", "--count", f"HEAD..{target}")
     out = git("merge-tree", "--write-tree", "--messages", "HEAD", target, ok=(0, 1))
     info, _, messages = out.partition("\n\n")
     conflicts = unmerged(info.splitlines()[1:])
     manual = [p for p, s in conflicts.items() if not upstream_deleted_note(p, s, book)]
-    lost = stranded(git("merge-base", "HEAD", target), target, book)
+    lost = stranded(base, target, book)
     lines = [
         f"upstream {target[:12]}: {count} new commits, {len(conflicts)} conflicted paths, "
         f"{len(manual) + len(lost)} to resolve by hand"
     ]
     for path in sorted(conflicts):
         how = "by hand" if path in manual else "automatic: upstream deleted the note"
-        lines.append(f"  {path} [{label(path, book)}] {how}")
+        lines.append(f"  {path}: {label(path, book)}, {how}")
     lines += [f"  {m}" for m in messages.splitlines() if m.startswith("CONFLICT")]
     lines += [f"  {entry}" for entry in lost]
 
@@ -163,7 +184,7 @@ def report(target, book):
             touched += [f"  {name}:"] + [f"    {entry}" for entry in log.splitlines()]
     lines += ["upstream commits that touch ledgered files:"] + (touched or ["  none"])
 
-    notes = new_root_notes(git("merge-base", "HEAD", target), target)
+    notes = new_root_notes(base, target)
     lines.append("new root notes:" + ("" if notes else " none"))
     for name in notes:
         reason = keep_reason(name, target, book)
@@ -175,6 +196,9 @@ def report(target, book):
         )
         for path in sorted(new - old):
             lines.append(f"new directory {path}: classify it in {table} in fork/tools/gen_maps.py")
+    workflows = git("diff", "--no-renames", "--name-only", "--diff-filter=A", base, target, "--", ".github/workflows")
+    for path in workflows.splitlines():
+        lines.append(f"new upstream workflow {path}: check its triggers; disable it on the fork if it publishes")
     return lines, conflicts
 
 
@@ -210,13 +234,15 @@ def set_last_synced(text, line):
     return text
 
 
-def print_topics(paths, book):
+def topic_lines(paths, book):
+    lines = []
     for t in book.get("topic", []):
         if set(paths) & set(t.get("files", []) + t.get("fork_files", [])):
-            print(f"  {t['id']} {t['title']} (switch: {t.get('switch', '')})")
-            print(f"     files: {', '.join(t.get('files', []))}")
-            print(f"     tests: {', '.join(t.get('tests', []))}")
-            print(f"     last conflict: {(t.get('conflict_history') or ['none'])[-1]}")
+            lines.append(f"  {t['id']} {t['title']} (switch: {t.get('switch', '')})")
+            lines.append(f"     files: {', '.join(t.get('files', []))}")
+            lines.append(f"     tests: {', '.join(t.get('tests', []))}")
+            lines.append(f"     last conflict: {(t.get('conflict_history') or ['none'])[-1]}")
+    return lines
 
 
 def merge(target, book):
@@ -237,11 +263,14 @@ def merge(target, book):
     lost = stranded(base, target, book)
     if manual or lost:
         print("\nTo resolve by hand:")
-        print("".join(f"  {path} [{label(path, book)}]\n" for path in manual), end="")
+        print("".join(f"  {path}: {label(path, book)}\n" for path in manual), end="")
         print("".join(f"  {entry}\n" for entry in lost), end="")
-        if manual:
+        topics = topic_lines(manual, book)
+        if topics:
             print("Ledger topics of these files (fork/docs/sync.md has a playbook per topic):")
-            print_topics(manual, book)
+            print("\n".join(topics))
+        if any(is_note(path, book) for path in manual):
+            print(f"Relocated or deleted upstream notes: see {NOTES_PLAYBOOK}.")
         print(
             "\nResolve them (rerere may have replayed an earlier resolution; review it), `git add` them and\n"
             "commit (`git commit --no-edit` finishes a conflicted merge), then run `fork/dev sync --continue`."
@@ -306,8 +335,8 @@ def checks(fast):
         sys.exit(4)
 
 
-def report_file():
-    return ROOT / git("rev-parse", "--git-path", "fork-sync-report.md")
+def report_file(name="fork-sync-report.md"):
+    return ROOT / git("rev-parse", "--git-path", name)
 
 
 def after_merge(branch, target, args, book):
@@ -318,18 +347,24 @@ def after_merge(branch, target, args, book):
     if args.local:
         print(f"{branch}: checks passed; not pushed (--local). Next: fork/dev sync --finish --local")
         return 0
-    path = report_file()
-    commits = git("log", "--first-parent", "--format=- %h %s", f"{merge_commit}^1..HEAD")
-    body = (path.read_text(encoding="utf-8") if path.exists() else "") + "\nCommits:\n" + commits + "\n"
-    path.write_text(body, encoding="utf-8")
     if run("git", "push", "-u", "origin", branch) != 0:
         sys.exit("push failed")
-    title = f"sync: upstream {target[:12]}"
-    if run(
-        "gh", "pr", "create", "-R", REPO, "--base", "main", "--head", branch, "--title", title, "--body-file", str(path)
-    ):
-        sys.exit("gh pr create failed; open the PR by hand")
-    print("When the PR's required checks pass: fork/dev sync --finish")
+    state = run("gh", "pr", "view", branch, "-R", REPO, "--json", "state", "--jq", ".state", capture=True)
+    if state.stdout.strip() == "OPEN":
+        print(f"The PR for {branch} is already open; the push above updated it.")
+    else:
+        # The PR body is the step-3 report plus the branch's commits, rebuilt on every run.
+        step3 = report_file()
+        commits = git("log", "--first-parent", "--format=- %h %s", f"{merge_commit}^1..HEAD")
+        body = report_file("fork-sync-pr.md")
+        body.write_text(
+            (step3.read_text(encoding="utf-8") if step3.exists() else "") + "\nCommits:\n" + commits + "\n",
+            encoding="utf-8",
+        )
+        create = ["gh", "pr", "create", "-R", REPO, "--base", "main", "--head", branch]
+        if run(*create, "--title", f"sync: upstream {target[:12]}", "--body-file", str(body)):
+            sys.exit("gh pr create failed; open the PR by hand")
+    print(f"When the PR's checks {', '.join(REQUIRED_CHECKS)} pass: fork/dev sync --finish")
     return 0
 
 
@@ -351,6 +386,17 @@ def preflight(args):
             problems.append("main differs from origin/main; push or reset it first")
         if git("ls-remote", "--tags", "origin", "v*", "jackalope-v*"):
             problems.append("origin has v* or jackalope-v* tags, which start upstream release workflows; delete them")
+        jq = '.workflows[] | "\\(.path)\\t\\(.state)"'
+        listing = run("gh", "api", f"repos/{REPO}/actions/workflows", "--jq", jq, capture=True)
+        states = dict(line.split("\t", 1) for line in listing.stdout.splitlines() if "\t" in line)
+        active = [path for path in UPSTREAM_WORKFLOWS if states.get(path) == "active"]
+        if listing.returncode != 0:
+            problems.append(f"cannot read the workflow states of {REPO} with gh: {listing.stderr.strip()}")
+        elif active:
+            problems.append(
+                f"upstream workflows still enabled on {REPO}: {', '.join(active)}; "
+                "run the owner actions in fork/docs/sync.md"
+            )
     if run("python3", "-I", "fork/tools/check_divergence.py", "--strict") != 0:
         problems.append("check_divergence --strict fails")
     if problems:
@@ -358,12 +404,27 @@ def preflight(args):
         sys.exit(3)
 
 
+def checks_passed(branch):
+    """True when every job in REQUIRED_CHECKS passed on the PR; works without branch protection."""
+    result = run("gh", "pr", "checks", branch, "-R", REPO, "--json", "name,bucket", capture=True)
+    try:
+        buckets = {check["name"]: check["bucket"] for check in json.loads(result.stdout)}
+    except ValueError:
+        print((result.stderr or result.stdout).strip() or "gh pr checks returned no check list")
+        return False
+    pending = [
+        f"{name}: {buckets.get(name, 'not reported')}" for name in REQUIRED_CHECKS if buckets.get(name) != "pass"
+    ]
+    print("".join(f"  {line}\n" for line in pending), end="")
+    return not pending
+
+
 def finish(local):
     branch = git("branch", "--show-current")
     if not branch.startswith("sync/") or git("status", "--porcelain"):
         sys.exit("--finish runs on a clean sync/* branch")
-    if not local and run("gh", "pr", "checks", branch, "-R", REPO, "--required") != 0:
-        print("The PR's required checks have not all passed yet.")
+    if not local and not checks_passed(branch):
+        print("The PR's checks have not all passed yet.")
         return 4
     for cmd in [["git", "switch", "main"], ["git", "merge", "--ff-only", branch]] + (
         [] if local else [["git", "push", "origin", "main"]]
@@ -379,7 +440,7 @@ def main():
     mode.add_argument("--dry-run", action="store_true", help="report only")
     mode.add_argument("--continue", dest="resume", action="store_true", help="resume after a commit on the sync branch")
     mode.add_argument("--finish", action="store_true", help="fast-forward main to the sync branch")
-    parser.add_argument("--to", metavar="REV", help="merge this local commit instead of fetching upstream main")
+    parser.add_argument("--to", metavar="REV", help="merge this fetched upstream commit instead of upstream main")
     parser.add_argument("--local", action="store_true", help="no origin checks, push or PR")
     parser.add_argument("--fast", action="store_true", help="skip the test suites")
     args = parser.parse_args()
@@ -397,6 +458,9 @@ def main():
     preflight(args)
     if args.to:
         target = git("rev-parse", "--verify", f"{args.to}^{{commit}}")
+        if not is_ancestor(target, "refs/remotes/upstream/main"):
+            print(f"--to {args.to}: not an ancestor of upstream/main; name an already fetched upstream commit")
+            return 3
     else:
         if run("git", "fetch", "--no-tags", "upstream", "main:refs/remotes/upstream/main") != 0:
             sys.exit("fetching upstream main failed")
