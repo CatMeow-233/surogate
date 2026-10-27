@@ -97,6 +97,9 @@ def test_help_and_validation_do_not_import_torch_or_native_runtime(tmp_path, val
     arguments = [str(path), "--validate-only"] if validate_only else ["--help"]
     code = """
 import runpy, sys
+sys.path.insert(0, sys.argv.pop(1))
+from _experimental_checkout import use_checkout_portion
+use_checkout_portion(sys.argv.pop(1))
 sys.argv = ['experimental-train', *sys.argv[1:]]
 try:
     runpy.run_module('surogate.experimental.train', run_name='__main__')
@@ -108,11 +111,14 @@ assert 'torch' not in sys.modules
 assert 'surogate._surogate' not in sys.modules
 assert 'surogate.train.trainer' not in sys.modules
 """
-    root = Path(__file__).resolve().parents[2]
+    # An inherited PYTHONPATH (for example a regular `surogate`) is kept: the bootstrap must handle it.
+    tests = Path(__file__).resolve().parent
+    src = tests.parent / "src"
+    pythonpath = os.pathsep.join(filter(None, [str(src), os.environ.get("PYTHONPATH")]))
     result = subprocess.run(
-        [sys.executable, "-c", code, *arguments],
+        [sys.executable, "-c", code, str(tests), str(src), *arguments],
         cwd=tmp_path,
-        env={**os.environ, "PYTHONPATH": str(root)},
+        env={**os.environ, "PYTHONPATH": pythonpath},
         text=True,
         capture_output=True,
         timeout=30,

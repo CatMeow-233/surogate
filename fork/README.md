@@ -10,7 +10,7 @@
 | 服务 | `csrc/src/serve`（CMake 段落 `csrc/CMakeLists.txt:885-2023`），绑定 `csrc/src/binding/py_serve*.cpp` | `surogate/serve` | 扩展模块 `_surogate_serve`：`NB_MODULE` 位于 `csrc/src/binding/py_serve.cpp:234` |
 | 共享 | `csrc/src/tokenizer`，`csrc/src/serve/core/unified_memory.h` | | |
 | CLI | | `surogate/cli` | 命令 `surogate` = `surogate.cli.main:cli_main`（`pyproject.toml:92`） |
-| 实验训练 | 无 | `surogate/experimental`；测试 `tests/experimental`，文档 `docs/experimental`，示例 `examples/experimental`，打包 `packaging/experimental` 与 `scripts/build_experimental_release.py` | `python -m surogate.experimental.train`，发布工作流 `.github/workflows/experimental-release.yml` |
+| 实验训练 | 无 | 独立项目 `fork/experimental`：代码 `fork/experimental/src/surogate/experimental`，测试 `fork/experimental/tests`，文档 `fork/experimental/docs`，示例 `fork/experimental/examples`，打包 `fork/experimental/pyproject.toml` 与 `fork/experimental/build_release.py` | `python -m surogate.experimental.train`，发布工作流 `.github/workflows/experimental-release.yml` |
 
 ## Fork 改了什么
 

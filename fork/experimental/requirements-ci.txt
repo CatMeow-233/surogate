@@ -1,0 +1,6 @@
+transformers==5.20.2
+peft==0.21.2
+numpy==2.5.4
+pyyaml==6.0.3
+pytest==9.1.1
+setuptools-scm==10.3.4

@@ -17,7 +17,7 @@ def test_experimental_tag_does_not_change_native_scm_version(tmp_path: Path, nat
     pytest.importorskip("setuptools_scm")
     if shutil.which("git") is None:
         pytest.skip("git is required for the release-version fixture")
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[3]
     options = tomllib.loads((root / "pyproject.toml").read_text())["tool"]["setuptools_scm"]
     configuration = "[project]\nname = 'release-version-fixture'\ndynamic = ['version']\n[tool.setuptools_scm]\n"
     configuration += "".join(f"{key} = {json.dumps(value)}\n" for key, value in options.items())

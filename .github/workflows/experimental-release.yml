@@ -30,15 +30,15 @@ jobs:
           python -m pip install 'uv==0.12.23'
           uv --no-config venv --python 3.12 .venv-experimental-release
           uv --no-config pip install --python .venv-experimental-release/bin/python 'torch==2.11.0+cpu' --index-url https://download.pytorch.org/whl/cpu
-          uv --no-config pip install --python .venv-experimental-release/bin/python 'transformers==5.20.2' 'peft==0.21.2' 'numpy==2.5.4' 'pyyaml==6.0.3' 'pytest==9.1.1' 'setuptools-scm==10.3.4'
+          uv --no-config pip install --python .venv-experimental-release/bin/python -r fork/experimental/requirements-ci.txt
       - name: Run experimental CPU tests
-        run: .venv-experimental-release/bin/python -m pytest -q tests/experimental --no-gpu
+        run: cd fork/experimental && ../../.venv-experimental-release/bin/python -m pytest -q tests
       - name: Build the standalone wheel, sdist, and examples
         run: |
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
-            python scripts/build_experimental_release.py --tag "$RELEASE_TAG"
+            python fork/experimental/build_release.py --tag "$RELEASE_TAG"
           else
-            python scripts/build_experimental_release.py
+            python fork/experimental/build_release.py
           fi
       - name: Check the installed package outside the checkout
         run: |
@@ -94,7 +94,7 @@ jobs:
           tag_name: ${{ github.ref_name }}
           target_commitish: ${{ github.sha }}
           name: Surogate experimental trainer ${{ github.ref_name }}
-          body_path: packaging/experimental/RELEASE_NOTES.md
+          body_path: fork/experimental/RELEASE_NOTES.md
           prerelease: true
           make_latest: false
           fail_on_unmatched_files: true

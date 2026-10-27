@@ -16,8 +16,8 @@ import zipfile
 from email.parser import Parser
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-METADATA = ROOT / "packaging" / "experimental"
+ROOT = Path(__file__).resolve().parents[2]
+METADATA = Path(__file__).resolve().parent
 
 
 def check_archives(wheel: Path, sdist: Path, version: str) -> None:
@@ -51,19 +51,18 @@ def check_archives(wheel: Path, sdist: Path, version: str) -> None:
 
 
 def examples_archive(destination: Path) -> None:
-    examples = ROOT / "examples" / "experimental"
-    paths = [
-        ROOT / "docs" / "experimental" / "training.md",
-        *sorted(examples.glob("*.yaml")),
-        *sorted(examples.glob("*.jsonl")),
-    ]
+    examples = METADATA / "examples"
+    guide = METADATA / "docs" / "training.md"
+    example_files = [*sorted(examples.glob("*.yaml")), *sorted(examples.glob("*.jsonl"))]
     required = {examples / "smoke.yaml", examples / "smoke.tokens.jsonl"}
-    if not required.issubset(paths) or not all(path.is_file() for path in paths):
+    if not required.issubset(example_files) or not all(path.is_file() for path in [guide, *example_files]):
         raise RuntimeError("experimental guide and example files must exist before building")
+    # Archive names keep the published layout of earlier releases, not the checkout layout.
     with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.write(METADATA / "README.md", "README.md")
-        for path in paths:
-            archive.write(path, path.relative_to(ROOT).as_posix())
+        archive.write(guide, "docs/experimental/training.md")
+        for path in example_files:
+            archive.write(path, f"examples/experimental/{path.name}")
 
 
 def source_commit() -> str | None:
@@ -97,7 +96,7 @@ def build(output: Path, tag: str | None) -> list[Path]:
         raise ValueError(f"release tag must match the package version: {expected_tag}")
     if shutil.which("uv") is None:
         raise RuntimeError("uv is required to build the experimental release")
-    source = ROOT / "surogate" / "experimental"
+    source = METADATA / "src" / "surogate" / "experimental"
     if not (source / "train" / "__main__.py").is_file():
         raise RuntimeError("experimental trainer CLI is missing")
 
