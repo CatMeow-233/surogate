@@ -48,6 +48,8 @@ Commands
   fmt                               clang-format the lines changed since upstream, ruff format fork code
   check                             ledger, generated maps, doc links and make targets
   map                               regenerate fork/docs/maps/*.md and fork/patches/README.md
+  sync [--dry-run|--continue|--finish]
+                                    merge upstream/main on a sync branch, check it, open the PR (fork/docs/sync.md)
 EOF
 }
 
@@ -62,14 +64,15 @@ setup() {
     run git fetch --no-tags upstream main
     cat <<'EOF'
 
-GitHub settings for CatMeow-233/surogate (owner actions; fork/dev does not change them):
+GitHub settings for CatMeow-233/surogate (owner actions, see fork/docs/sync.md; fork/dev does not change them):
   1. Workflows "Build Wheels", "Build Docker Images" and "jackalope" are disabled;
-     "Experimental Trainer Release" stays active.
+     "Experimental Trainer Release" and "Fork CI" stay active.
        gh workflow disable "Build Wheels" -R CatMeow-233/surogate   (same for the other two)
   2. Squash and rebase merging are off, merge commits on:
        gh repo edit CatMeow-233/surogate --enable-squash-merge=false --enable-rebase-merge=false --enable-merge-commit
   3. Repository description: "Fork of invergent-ai/surogate. Maintainers: start at fork/README.md"
-  4. Once fork CI is green: main requires the checks check, experimental, fork-tests, openmp-contract.
+  4. Once fork CI is green: main requires the checks check, experimental, fork-tests, openmp-contract
+     (the gh api command is in fork/docs/sync.md).
 EOF
     if gh auth status >/dev/null 2>&1; then
         echo
@@ -195,6 +198,7 @@ case "$command" in
     fmt) fmt ;;
     check) check ;;
     map) run python3 -I fork/tools/gen_maps.py --write ;;
+    sync) run python3 -I fork/tools/sync_upstream.py "$@" ;;
     *)
         usage >&2
         exit 2

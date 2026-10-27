@@ -18,8 +18,9 @@
 | GPU 主机上的测试 | `fork/dev test native`、`fork/dev test gpu` |
 | 从检出目录运行实验训练器 | `fork/dev exp-train <配置>` |
 | 构建实验包的发布产物 | `fork/dev release experimental --tag experimental-v<版本>` |
+| 同步上游（每周一次） | `fork/dev sync --dry-run` 查看报告，`fork/dev sync` 合并并开 PR，见 [docs/sync.md](docs/sync.md) |
 
-每条命令对应的产物、构建目录和发布方式见 [docs/build-and-release.md](docs/build-and-release.md)。
+每条命令对应的产物、构建目录和发布方式见 [docs/build-and-release.md](docs/build-and-release.md)。fork CI（`.github/workflows/fork-ci.yml`）在每次推送时运行同样的 `fork/dev` 命令。
 
 ## 代码在哪里
 
@@ -73,6 +74,7 @@ GRPO 补丁（T6–T8）调用的 fork 代码位于 `surogate/_fork`，上游文
 
 ## 文档
 
+- [docs/sync.md](docs/sync.md)：同步上游的步骤、GitHub 设置清单（仓库所有者操作）、按 topic 的冲突处理方法，以及冲突面的测量依据。
 - [docs/build-and-release.md](docs/build-and-release.md)：每个产物的构建命令、输出位置和发布工作流，版本号和依赖版本固定在哪里，以及 `fork/dev` 的测试命令。
 - [patches/README.md](patches/README.md)：ledger 的表格形式，包括每个 topic 的文件、测试和冲突记录。
 - [docs/performance.md](docs/performance.md)：fork 的性能改动、测量方法和开关，包括 LoRA 融合输入梯度和 GRPO 周期计时指标。

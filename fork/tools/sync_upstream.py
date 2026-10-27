@@ -1,0 +1,417 @@
+#!/usr/bin/env python3
+"""Merge upstream/main into the fork on a sync branch; fork/docs/sync.md describes the procedure.
+
+A sync runs these steps and stops at the first one that needs the owner:
+  1. preflight: clean tree on main, equal to origin/main; upstream push URL disabled; rerere on;
+     merge.directoryRenames unset; check_divergence --strict passes; no v* tags on origin
+  2. fetch upstream main
+  3. report: new commits, conflicts mapped to ledger topics, upstream commits touching ledgered
+     files, new root notes, new top-level directories (--dry-run stops here)
+  4. branch sync/<yyyymmdd>-<sha> and merge with --no-ff (never rebase)
+  5. resolve the one known conflict (upstream deleted a relocated note); stop on any other, and
+     when an upstream directory rename would leave a fork-owned subdirectory behind
+  6. commit "sync: re-home upstream root notes" (see [root_rehome] in the ledger)
+  7. commit "sync: refresh ledger and maps" ([sync].last_synced, gen_maps, doc-link baseline)
+  8. fork/dev check, then the patch, experimental and CPU test suites
+  9. push the branch and open a PR; --finish fast-forwards main once its checks pass
+
+Usage: fork/dev sync [--dry-run | --continue | --finish] [--to REV] [--local] [--fast]
+  --dry-run   steps 1-3 only; changes nothing (main and origin are not required)
+  --continue  after committing a conflict resolution or a fix on the sync branch: steps 6-9
+  --finish    on the sync branch, after the PR's required checks pass: fast-forward main, push it
+  --to REV    merge REV, an already fetched upstream commit, instead of fetching upstream main
+  --local     no origin checks, no push, no PR (rehearsals)
+  --fast      skip the test suites in step 8 (rehearsals)
+Exit status: 0 done, 2 manual conflict, 3 preflight failure, 4 check failure, 1 other errors.
+"""
+
+import argparse
+import datetime
+import re
+import subprocess
+import sys
+import tomllib
+from fnmatch import fnmatchcase
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+LEDGER = "fork/patches/ledger.toml"
+BASELINE = "fork/tools/doc_links_baseline.txt"
+GENERATED = ["fork/patches/README.md", "fork/docs/maps"]
+REPO = "CatMeow-233/surogate"
+PUSH_DISABLED = "DISABLED-see-AGENTS.md"
+
+
+def git(*args, ok=(0,)):
+    result = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True)
+    if result.returncode not in ok:
+        sys.exit(f"git {' '.join(args)} failed:\n{result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+def run(*cmd):
+    """Print a command, run it from the repository root and return its exit status."""
+    print("+", " ".join(cmd), flush=True)
+    return subprocess.run(cmd, cwd=ROOT).returncode
+
+
+def ledger():
+    return tomllib.loads((ROOT / LEDGER).read_text(encoding="utf-8"))
+
+
+def files_at(rev):
+    return set(git("ls-tree", "-r", "--name-only", "-z", rev).split("\0")) - {""}
+
+
+def label(path, book):
+    """The ledger entries a path belongs to, for conflict reports."""
+    ids = [t["id"] for t in book.get("topic", []) if path in t.get("files", []) + t.get("fork_files", [])]
+    if ids:
+        return ", ".join(ids)
+    if any(path in (r["from"], r["to"]) for r in book.get("relocation", [])):
+        return "[[relocation]]"
+    if any(path == d["path"] for d in book.get("deletion", [])):
+        return "[[deletion]]"
+    return "not in the ledger"
+
+
+def unmerged(lines):
+    """Map each conflicted path to its index stages, from `<mode> <oid> <stage>\\t<path>` lines."""
+    stages = {}
+    for line in lines:
+        info, _, path = line.partition("\t")
+        stages.setdefault(path, set()).add(int(info.split()[2]))
+    return stages
+
+
+def upstream_deleted_note(path, stages, book):
+    """True for a relocated note that upstream deleted: base and our stage, no upstream stage."""
+    return stages == {1, 2} and any(path == r["to"] for r in book.get("relocation", []))
+
+
+def keep_reason(name, rev, book):
+    """Why a new root note stays at the root, or None when it is re-homed."""
+    rule = book.get("root_rehome", {})
+    if any(fnmatchcase(name, p) for p in rule.get("never", [])):
+        return "on the [root_rehome] never list"
+    if not any(fnmatchcase(name, p) for p in rule.get("patterns", [])):
+        return "matches no [root_rehome] pattern; decide by hand"
+    # `**/x` also matches x at the root, as in .gitignore.
+    tooling = [
+        f
+        for f in sorted(files_at(rev))
+        if any(fnmatchcase(f, p) or (p.startswith("**/") and fnmatchcase(f, p[3:])) for p in rule["tooling_refs"])
+    ]
+    refs = git("grep", "-l", "-F", "-e", name, rev, "--", *tooling, ok=(0, 1)).splitlines() if tooling else []
+    if refs:
+        return "named in " + ", ".join(r.removeprefix(f"{rev}:") for r in refs)
+    if rule["dest"] + name in files_at("HEAD"):
+        return f"{rule['dest']}{name} already exists"
+    return None
+
+
+def stranded(base, target, book):
+    """Fork-owned paths whose enclosing upstream directory is gone at target.
+
+    git applies an upstream directory rename to files the fork added directly in that directory,
+    but not to a subdirectory that only the fork has (surogate/_fork/, docs/upstream-notes/):
+    such a path would silently stay at the old location, so it is reported instead.
+    """
+    old, new = (set(git("ls-tree", "-r", "-d", "--name-only", rev).splitlines()) for rev in (base, target))
+    owned = book.get("owned", {})
+    found = []
+    for path in owned.get("prefixes", []) + owned.get("files", []):
+        parts = path.rstrip("/").split("/")[:-1]
+        parent = next((d for d in ("/".join(parts[:i]) for i in range(len(parts), 0, -1)) if d in old), None)
+        if parent and parent not in new:
+            found.append(f"{path}: upstream no longer has {parent}/; move it to the new location by hand")
+    return found
+
+
+def new_root_notes(old, new):
+    added = git("diff", "--no-renames", "--name-only", "--diff-filter=A", old, new).splitlines()
+    return [f for f in added if "/" not in f and f.endswith(".md")]
+
+
+def report(target, book):
+    """Lines describing the merge of target into HEAD, and the merge's conflicted paths."""
+    if git("merge-base", "HEAD", target) == target:
+        return [f"upstream {target[:12]}: up to date, 0 conflicts"], {}
+    count = git("rev-list", "--count", f"HEAD..{target}")
+    out = git("merge-tree", "--write-tree", "--messages", "HEAD", target, ok=(0, 1))
+    info, _, messages = out.partition("\n\n")
+    conflicts = unmerged(info.splitlines()[1:])
+    manual = [p for p, s in conflicts.items() if not upstream_deleted_note(p, s, book)]
+    lost = stranded(git("merge-base", "HEAD", target), target, book)
+    lines = [
+        f"upstream {target[:12]}: {count} new commits, {len(conflicts)} conflicted paths, "
+        f"{len(manual) + len(lost)} to resolve by hand"
+    ]
+    for path in sorted(conflicts):
+        how = "by hand" if path in manual else "automatic: upstream deleted the note"
+        lines.append(f"  {path} [{label(path, book)}] {how}")
+    lines += [f"  {m}" for m in messages.splitlines() if m.startswith("CONFLICT")]
+    lines += [f"  {entry}" for entry in lost]
+
+    groups = [(f"{t['id']} {t['title']}", t.get("files", [])) for t in book.get("topic", [])]
+    notes = [r["from"] for r in book.get("relocation", [])] + [d["path"] for d in book.get("deletion", [])]
+    groups.append(("relocated or deleted upstream notes", notes))
+    touched = []
+    for name, paths in groups:
+        log = git("log", "--format=%h %as %s", f"HEAD..{target}", "--", *paths) if paths else ""
+        if log:
+            touched += [f"  {name}:"] + [f"    {entry}" for entry in log.splitlines()]
+    lines += ["upstream commits that touch ledgered files:"] + (touched or ["  none"])
+
+    notes = new_root_notes(git("merge-base", "HEAD", target), target)
+    lines.append("new root notes:" + ("" if notes else " none"))
+    for name in notes:
+        reason = keep_reason(name, target, book)
+        lines.append(f"  {name}: " + (f"kept at the root, {reason}" if reason else "re-homed"))
+
+    for prefix, table in (("csrc/src/", "CSRC_ENGINES"), ("surogate/", "PY_ROLES")):
+        old, new = (
+            set(git("ls-tree", "-d", "--name-only", rev, "--", prefix).splitlines()) for rev in ("HEAD", target)
+        )
+        for path in sorted(new - old):
+            lines.append(f"new directory {path}: classify it in {table} in fork/tools/gen_maps.py")
+    return lines, conflicts
+
+
+def edit_ledger(edit, *args):
+    """Apply edit(text, *args) to the ledger's text and check that the result still parses."""
+    path = ROOT / LEDGER
+    text = edit(path.read_text(encoding="utf-8"), *args)
+    tomllib.loads(text)
+    path.write_text(text, encoding="utf-8")
+
+
+def drop_relocation(text, to):
+    entry = re.compile(r'\[\[relocation\]\]\nfrom = "[^"\n]*"\nto = "' + re.escape(to) + r'"\n\n?')
+    text, n = entry.subn("", text)
+    if n != 1:
+        sys.exit(f"cannot find the [[relocation]] entry for {to} in {LEDGER}; edit it by hand")
+    return text
+
+
+def add_relocation(text, old, new):
+    entry = f'[[relocation]]\nfrom = "{old}"\nto = "{new}"\n'
+    entries = list(re.finditer(r'\[\[relocation\]\]\nfrom = "[^"\n]*"\nto = "[^"\n]*"\n', text))
+    if not entries:
+        return text.rstrip("\n") + "\n\n" + entry
+    end = entries[-1].end()
+    return text[:end] + "\n" + entry + text[end:]
+
+
+def set_last_synced(text, line):
+    text, n = re.subn(r"^last_synced = .*$", lambda _: line, text, count=1, flags=re.M)
+    if n != 1:
+        sys.exit(f"cannot find [sync].last_synced in {LEDGER}")
+    return text
+
+
+def print_topics(paths, book):
+    for t in book.get("topic", []):
+        if set(paths) & set(t.get("files", []) + t.get("fork_files", [])):
+            print(f"  {t['id']} {t['title']} (switch: {t.get('switch', '')})")
+            print(f"     files: {', '.join(t.get('files', []))}")
+            print(f"     tests: {', '.join(t.get('tests', []))}")
+            print(f"     last conflict: {(t.get('conflict_history') or ['none'])[-1]}")
+
+
+def merge(target, book):
+    base = git("merge-base", "HEAD", target)
+    count = git("rev-list", "--count", f"HEAD..{target}")
+    status = run("git", "merge", "--no-ff", "-m", f"sync: merge upstream/main {target[:12]} ({count} commits)", target)
+    conflicts = unmerged(git("ls-files", "-u").splitlines())
+    if status != 0 and not conflicts:
+        sys.exit("git merge failed; see its output above")
+    manual = []
+    for path, stages in sorted(conflicts.items()):
+        if upstream_deleted_note(path, stages, book):
+            run("git", "rm", "-q", "--", path)
+            edit_ledger(drop_relocation, path)
+            run("git", "add", "--", LEDGER)
+        else:
+            manual.append(path)
+    lost = stranded(base, target, book)
+    if manual or lost:
+        print("\nTo resolve by hand:")
+        print("".join(f"  {path} [{label(path, book)}]\n" for path in manual), end="")
+        print("".join(f"  {entry}\n" for entry in lost), end="")
+        if manual:
+            print("Ledger topics of these files (fork/docs/sync.md has a playbook per topic):")
+            print_topics(manual, book)
+        print(
+            "\nResolve them (rerere may have replayed an earlier resolution; review it), `git add` them and\n"
+            "commit (`git commit --no-edit` finishes a conflicted merge), then run `fork/dev sync --continue`."
+        )
+        sys.exit(2)
+    if conflicts:
+        run("git", "commit", "-q", "--no-edit")
+
+
+def rehome(merge_commit, book):
+    rule = book.get("root_rehome", {})
+    moved, lines = [], []
+    root = files_at("HEAD")
+    for name in new_root_notes(f"{merge_commit}^1", merge_commit):
+        if name not in root:
+            continue  # re-homed by an earlier run
+        reason = keep_reason(name, "HEAD", book)
+        if reason:
+            lines.append(f"  {name}: kept at the root, {reason}")
+            continue
+        dest = rule["dest"] + name
+        run("git", "mv", "--", name, dest)
+        edit_ledger(add_relocation, name, dest)
+        moved.append(f"{name} -> {dest}")
+    if moved:
+        run("git", "add", "--", LEDGER)
+        body = "".join(f"{m}\n" for m in moved)
+        run("git", "commit", "-q", "-m", "sync: re-home upstream root notes", "-m", body.rstrip("\n"))
+        lines = [f"  {m}" for m in moved] + lines
+    print("new root notes:\n" + "\n".join(lines) if lines else "new root notes: none")
+
+
+def refresh(target):
+    date = git("log", "-1", "--format=%cs", target)
+    edit_ledger(set_last_synced, f'last_synced = "{target}"   # {date}')
+    run("python3", "-I", "fork/tools/gen_maps.py", "--write")  # unclassified paths fail the checks below
+    before = set((ROOT / BASELINE).read_text(encoding="utf-8").splitlines())
+    run("python3", "-I", "fork/tools/check_doc_links.py", "--update-baseline")
+    after = set((ROOT / BASELINE).read_text(encoding="utf-8").splitlines())
+    run("git", "add", "--", LEDGER, BASELINE, *GENERATED)
+    if git("diff", "--cached", "--name-only") == "":
+        return
+    body = [f"[sync].last_synced is now {target} ({date}); maps regenerated."]
+    for title, entries in (
+        ("New broken links in upstream docs, added to the baseline:", after - before),
+        ("Links fixed upstream, removed from the baseline:", before - after),
+    ):
+        if entries:
+            body += ["", title] + [f"  {e.replace(chr(9), ' -> ')}" for e in sorted(entries)]
+    run("git", "commit", "-q", "-m", "sync: refresh ledger and maps", "-m", "\n".join(body))
+
+
+def checks(fast):
+    suites = [["fork/dev", "check"]]
+    if not fast:
+        suites += [["fork/dev", "test", "patches"], ["fork/dev", "test", "experimental"], ["fork/dev", "test", "cpu"]]
+    failed = [" ".join(cmd) for cmd in suites if run(*cmd) != 0]
+    if failed:
+        print(f"\nFailed: {', '.join(failed)}.")
+        print("Fix the cause on this branch and commit. An upstream test failure that also fails at")
+        print("upstream/main goes into fork/tools/known_failures.txt. Then run `fork/dev sync --continue`.")
+        sys.exit(4)
+
+
+def report_file():
+    return ROOT / git("rev-parse", "--git-path", "fork-sync-report.md")
+
+
+def after_merge(branch, target, args, book):
+    merge_commit = git("rev-list", "--first-parent", "--merges", "-n", "1", "HEAD")
+    rehome(merge_commit, book)
+    refresh(target)
+    checks(args.fast)
+    if args.local:
+        print(f"{branch}: checks passed; not pushed (--local). Next: fork/dev sync --finish --local")
+        return 0
+    path = report_file()
+    commits = git("log", "--first-parent", "--format=- %h %s", f"{merge_commit}^1..HEAD")
+    body = (path.read_text(encoding="utf-8") if path.exists() else "") + "\nCommits:\n" + commits + "\n"
+    path.write_text(body, encoding="utf-8")
+    if run("git", "push", "-u", "origin", branch) != 0:
+        sys.exit("push failed")
+    title = f"sync: upstream {target[:12]}"
+    if run(
+        "gh", "pr", "create", "-R", REPO, "--base", "main", "--head", branch, "--title", title, "--body-file", str(path)
+    ):
+        sys.exit("gh pr create failed; open the PR by hand")
+    print("When the PR's required checks pass: fork/dev sync --finish")
+    return 0
+
+
+def preflight(args):
+    problems = []
+    if git("status", "--porcelain"):
+        problems.append("the working tree is not clean")
+    if not args.dry_run and git("branch", "--show-current") != "main":
+        problems.append("the current branch is not main")
+    if git("remote", "get-url", "--push", "upstream", ok=(0, 2)) != PUSH_DISABLED:
+        problems.append(f"the upstream push URL is not {PUSH_DISABLED}; run fork/dev setup")
+    if git("config", "--type=bool", "--get", "rerere.enabled", ok=(0, 1)) != "true":
+        problems.append("rerere.enabled is not true; run fork/dev setup")
+    if git("config", "--get", "merge.directoryRenames", ok=(0, 1)) not in ("", "conflict"):
+        problems.append("merge.directoryRenames is set; unset it so directory renames stay conflicts")
+    if not (args.dry_run or args.local):
+        run("git", "fetch", "--no-tags", "origin", "main")
+        if git("rev-parse", "HEAD") != git("rev-parse", "refs/remotes/origin/main"):
+            problems.append("main differs from origin/main; push or reset it first")
+        if git("ls-remote", "--tags", "origin", "v*", "jackalope-v*"):
+            problems.append("origin has v* or jackalope-v* tags, which start upstream release workflows; delete them")
+    if run("python3", "-I", "fork/tools/check_divergence.py", "--strict") != 0:
+        problems.append("check_divergence --strict fails")
+    if problems:
+        print("Preflight failed:\n" + "".join(f"  {p}\n" for p in problems), end="")
+        sys.exit(3)
+
+
+def finish(local):
+    branch = git("branch", "--show-current")
+    if not branch.startswith("sync/") or git("status", "--porcelain"):
+        sys.exit("--finish runs on a clean sync/* branch")
+    if not local and run("gh", "pr", "checks", branch, "-R", REPO, "--required") != 0:
+        print("The PR's required checks have not all passed yet.")
+        return 4
+    for cmd in [["git", "switch", "main"], ["git", "merge", "--ff-only", branch]] + (
+        [] if local else [["git", "push", "origin", "main"]]
+    ):
+        if run(*cmd) != 0:
+            sys.exit(f"{' '.join(cmd)} failed")
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="report only")
+    mode.add_argument("--continue", dest="resume", action="store_true", help="resume after a commit on the sync branch")
+    mode.add_argument("--finish", action="store_true", help="fast-forward main to the sync branch")
+    parser.add_argument("--to", metavar="REV", help="merge this local commit instead of fetching upstream main")
+    parser.add_argument("--local", action="store_true", help="no origin checks, push or PR")
+    parser.add_argument("--fast", action="store_true", help="skip the test suites")
+    args = parser.parse_args()
+    book = ledger()
+
+    if args.finish:
+        return finish(args.local)
+    if args.resume:
+        branch = git("branch", "--show-current")
+        if not branch.startswith("sync/") or git("status", "--porcelain") or git("ls-files", "-u"):
+            sys.exit("--continue runs on a sync/* branch with the merge committed and a clean tree")
+        merge_commit = git("rev-list", "--first-parent", "--merges", "-n", "1", "HEAD")
+        return after_merge(branch, git("rev-parse", f"{merge_commit}^2"), args, book)
+
+    preflight(args)
+    if args.to:
+        target = git("rev-parse", "--verify", f"{args.to}^{{commit}}")
+    else:
+        if run("git", "fetch", "--no-tags", "upstream", "main:refs/remotes/upstream/main") != 0:
+            sys.exit("fetching upstream main failed")
+        target = git("rev-parse", "refs/remotes/upstream/main")
+    lines, _ = report(target, book)
+    print("\n".join(lines))
+    if args.dry_run or lines[0].endswith("up to date, 0 conflicts"):
+        return 0
+    report_file().write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+    branch = f"sync/{datetime.date.today():%Y%m%d}-{target[:8]}"
+    if run("git", "switch", "-c", branch) != 0:
+        sys.exit(f"cannot create {branch}")
+    merge(target, book)
+    return after_merge(branch, target, args, book)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

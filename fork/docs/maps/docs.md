@@ -6,7 +6,7 @@
 
 | 类 | 含义 | 文件数 |
 |---|---|---|
-| F | fork 自有文档 | 17 |
+| F | fork 自有文档 | 18 |
 | N | 上游工程笔记：日志、跟踪清单、设计稿、测量记录 | 26 |
 | P | 来源与授权说明（vendored 代码、NOTICE） | 5 |
 | U | 上游用户与开发者文档 | 72 |
@@ -23,6 +23,7 @@
 - `fork/docs/maps/python.md`
 - `fork/docs/maps/tests.md`
 - `fork/docs/performance.md`
+- `fork/docs/sync.md`
 - `fork/docs/upstream-errata.md`
 - `fork/experimental/README.md`
 - `fork/experimental/RELEASE_NOTES.md`
