@@ -8,9 +8,10 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
+from surogate._fork.grpo_handoff import InProcessMicroBatchBuffer
 from surogate.grpo import data as data_module
 from surogate.grpo import packer as packer_module
-from surogate.grpo.data import GRPODataLoader, InProcessMicroBatchBuffer
+from surogate.grpo.data import GRPODataLoader
 from surogate.grpo.packer import SinglePacker, setup_grpo_packer
 from surogate.grpo.transport import filesystem as filesystem_module
 from surogate.grpo.transport import setup_training_batch_sender

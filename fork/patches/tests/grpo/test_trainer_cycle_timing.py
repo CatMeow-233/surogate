@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
+from surogate._fork import grpo_cycle_timing
 from surogate.train.metrics_writer import MetricsWriter
 
 
@@ -117,6 +118,8 @@ def test_cycle_records_stage_boundaries_and_excludes_checkpointing(
         return clock.advance(24, {"norm": 1.0})
 
     trainer._dispatch_pp_step = dispatch_step
+    cycle_log = Mock()
+    monkeypatch.setattr(grpo_cycle_timing, "logger", cycle_log)
     metrics_path = tmp_path / "metrics.jsonl"
     with MetricsWriter(str(metrics_path)) as writer:
         trainer.metrics_writer = writer
@@ -132,6 +135,10 @@ def test_cycle_records_stage_boundaries_and_excludes_checkpointing(
     # Existing metrics still describe only the 11+13 seconds of training.
     assert row["train/duration_ms"] == 24000
     assert row["train/tokens_per_second"] == pytest.approx(2 / 24)
+    # The cycle timings are printed as their own line on the logged step.
+    cycle_log.info.assert_called_once_with(
+        "step=1 cycle=41.000s publish=2.000s pack=3.000s batch_wait=5.000s receive=7.000s"
+    )
     # The 19-second checkpoint and terminal publications happen after the
     # measured cycle; omitting them from cycle duration is intentional.
     assert clock.seconds > row["train/cycle_duration_ms"] / 1000 + 19

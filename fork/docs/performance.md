@@ -118,7 +118,7 @@ SUROGATE_FUSE_LORA_DX=1 <training-command>
 
 ## GRPO 周期计时
 
-GRPO 在现有训练指标之外，还记录获取和发布的耗时。trainer 每隔 `logging_steps` 打印并写出这些指标。
+GRPO 在现有训练指标之外，还记录获取和发布的耗时。trainer 每隔 `logging_steps` 打印并写出这些指标：写出的指标与该步其他训练指标在同一条记录中；打印的是单独一行 `step=<n> cycle=<秒>s publish=<秒>s pack=<秒>s batch_wait=<秒>s receive=<秒>s`，位于该步常规日志行之前。日志行由 `surogate/_fork/grpo_cycle_timing.py` 生成。
 
 | 指标 | 说明 |
 | --- | --- |

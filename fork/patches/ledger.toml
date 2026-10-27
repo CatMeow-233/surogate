@@ -17,6 +17,7 @@ last_synced = "282f99012a78c888725b8c3d8f9000749eca4e66"   # 2026-10-23
 # Fork-only paths: the merge base has no history for them.
 prefixes = [
     "fork/",
+    "surogate/_fork/",   # code the GRPO patches import; ships in the native wheel
 ]
 files = [
     "AGENTS.md",
@@ -171,17 +172,22 @@ id = "T6"
 title = "GRPO cycle timing metrics"
 commits = ["c00ab62d"]   # shared with T4
 switch = "always on"
+# trainer.py keeps the timing points, one line in the metrics row and, before
+# each _log_step call, the cycle metrics plus a local import of the log helper.
+# Fork modules are imported inside these hunks, so trainer.py's import block
+# and _log_step stay upstream's.
 files = [
     "surogate/grpo/trainer.py",
     "surogate/grpo/packer.py",
 ]
-fork_files = []
+fork_files = ["surogate/_fork/grpo_cycle_timing.py"]
 tests = [
     "fork/patches/tests/grpo/test_trainer_cycle_timing.py",
     "fork/patches/tests/grpo/test_packer_wait.py",
 ]
 conflict_history = [
     "2026-10-27 reverse replay from b5af2f8e, conflict blocks at 90/30/14 days: trainer.py 8/2/0 and packer.py 1/0/0 (both shared by T6-T8)",
+    "2026-10-27 reverse replay after moving the GRPO patch logic into surogate/_fork, conflict blocks at 90/30/14 days: trainer.py 6/0/0 and packer.py 1/0/0",
 ]
 
 [[topic]]
@@ -189,15 +195,19 @@ id = "T7"
 title = "in-process GRPO micro-batch handoff"
 commits = ["7bf5c47f"]
 switch = "always on in the single-process GRPO trainer"
+# data.py keeps only the micro_batch_receiver keyword. Its annotation is a
+# string and the name is not imported, because upstream edits the line above
+# data.py's transport import (the 1/1/1 conflict below was there).
 files = [
     "surogate/grpo/data.py",
     "surogate/grpo/packer.py",
     "surogate/grpo/trainer.py",
 ]
-fork_files = []
+fork_files = ["surogate/_fork/grpo_handoff.py"]
 tests = ["fork/patches/tests/grpo/test_inprocess_micro_batches.py"]
 conflict_history = [
     "2026-10-27 reverse replay from b5af2f8e, conflict blocks at 90/30/14 days: data.py 1/1/1; trainer.py and packer.py see T6",
+    "2026-10-27 reverse replay after moving the GRPO patch logic into surogate/_fork, conflict blocks at 90/30/14 days: data.py 0/0/0",
 ]
 
 [[topic]]

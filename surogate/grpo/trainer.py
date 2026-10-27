@@ -20,7 +20,7 @@ import numpy as np
 
 from surogate import _surogate
 from surogate.grpo.config import GRPOTrainConfig
-from surogate.grpo.data import GRPODataLoader, InProcessMicroBatchBuffer
+from surogate.grpo.data import GRPODataLoader
 from surogate.grpo.loss import compute_grpo_per_token_grads, shift_to_target, unshift_to_logical
 from surogate.grpo.routing_replay import moe_layer_ids, trainer_rows
 from surogate.grpo.turn_stats import TurnAccumulator
@@ -298,14 +298,9 @@ class GRPOTrainer:
                 shutil.copy(src, dst_path / filename)
 
     def _log_step(self, *, step, orch_step, step_metrics, result, lr, n_mb,
-                  expected_loss_scale, step_time, turn_acc, cycle_metrics=None) -> None:
+                  expected_loss_scale, step_time, turn_acc) -> None:
         """Turn diagnostics + step logging + metrics; shared by the native,
-        diagnostic and dispatch-PP micro-step paths so all three report identically.
-
-        Cycle timings span publication of the preceding update through this
-        optimizer update, including batch acquisition, excluding logging and
-        checkpointing. The existing train duration/throughput keep their scope.
-        """
+        diagnostic and dispatch-PP micro-step paths so all three report identically."""
         config = self.config
         # 5b. Turn-resolved diagnostics
         turn_summary: dict[str, float] = {}
@@ -329,15 +324,6 @@ class GRPOTrainer:
 
         # 6. Logging
         if step % config.logging_steps == 0:
-            cycle_summary = ""
-            if cycle_metrics is not None:
-                cycle_summary = (
-                    f" cycle={cycle_metrics['train/cycle_duration_ms'] / 1000:.3f}s"
-                    f" publish={cycle_metrics['train/publish_duration_ms'] / 1000:.3f}s"
-                    f" pack={cycle_metrics['train/pack_duration_ms'] / 1000:.3f}s"
-                    f" batch_wait={cycle_metrics['train/batch_wait_duration_ms'] / 1000:.3f}s"
-                    f" receive={cycle_metrics['train/batch_receive_duration_ms'] / 1000:.3f}s"
-                )
             logger.info(
                 f"step={step} loss={step_metrics.get('policy_loss', 0):.4f} "
                 f"grad_norm={result['norm']:.4f} lr={lr:.2e} "
@@ -346,7 +332,7 @@ class GRPOTrainer:
                 f"tokens={step_metrics.get('total_tokens', 0)} "
                 f"micro_batches={n_mb} "
                 f"expected={expected_loss_scale} "
-                f"time={step_time:.2f}s{cycle_summary}"
+                f"time={step_time:.2f}s"
             )
 
             if self.metrics_writer is not None:
@@ -373,7 +359,7 @@ class GRPOTrainer:
                         "train/duration_ms": duration_ms,
                         "train/tokens_per_second": tps,
                         "train/orch_step": float(orch_step),
-                        **(cycle_metrics or {}),
+                        **getattr(self, "_fork_cycle_metrics", {}),
                         **turn_summary,
                         **self._r3_step_summary,
                     },
@@ -679,6 +665,7 @@ class GRPOTrainer:
         # The packer and loader run serially in this process. Keep the external
         # orchestrator transport, but hand packed batches directly to rank zero
         # instead of serializing them through a second filesystem/ZMQ channel.
+        from surogate._fork.grpo_handoff import InProcessMicroBatchBuffer
         micro_batch_buffer = InProcessMicroBatchBuffer(Path(config.output_dir), start_step)
 
         # Setup packer on master (packs TrainingBatch -> MicroBatch)
@@ -840,6 +827,9 @@ class GRPOTrainer:
                 step_metrics = dict(self._diag_metrics or {})
                 step_time = time.time() - step_start
                 cycle_metrics["train/cycle_duration_ms"] = (time.perf_counter() - cycle_start) * 1000.0
+                self._fork_cycle_metrics = cycle_metrics
+                from surogate._fork.grpo_cycle_timing import log_cycle_summary
+                log_cycle_summary(step, config.logging_steps, cycle_metrics)
                 self._log_step(
                     step=step,
                     orch_step=orch_step,
@@ -850,7 +840,6 @@ class GRPOTrainer:
                     expected_loss_scale=expected_loss_scale,
                     step_time=step_time,
                     turn_acc=turn_acc,
-                    cycle_metrics=cycle_metrics,
                 )
                 if config.save_steps > 0 and step > 0 and step % config.save_steps == 0 and config.checkpoint_dir:
                     logger.info(f"Saving checkpoint at step {step}...")
@@ -1028,12 +1017,14 @@ class GRPOTrainer:
 
             step_time = time.time() - step_start
             cycle_metrics["train/cycle_duration_ms"] = (time.perf_counter() - cycle_start) * 1000.0
+            self._fork_cycle_metrics = cycle_metrics
+            from surogate._fork.grpo_cycle_timing import log_cycle_summary
+            log_cycle_summary(step, config.logging_steps, cycle_metrics)
 
             self._log_step(
                 step=step, orch_step=orch_step, step_metrics=step_metrics, result=result, lr=lr,
                 n_mb=n_mb, expected_loss_scale=expected_loss_scale,
                 step_time=step_time, turn_acc=turn_acc,
-                cycle_metrics=cycle_metrics,
             )
 
             # 7. Checkpointing

@@ -28,7 +28,7 @@ python3 -I fork/tools/check_divergence.py --strict
 
 未登记的改动会使其以退出码 1 失败并列出路径；`--strict` 还会报告过期条目（topic 文件已与上游一致、登记路径已不存在等）。实现见 [tools/check_divergence.py](tools/check_divergence.py)。
 
-GRPO 补丁（T6–T8）的 CPU 测试位于 `fork/patches/tests/grpo`，用 `python -m pytest -q fork/patches/tests` 运行；`tests/` 与上游逐字节一致。
+GRPO 补丁（T6–T8）调用的 fork 代码位于 `surogate/_fork`（随原生 wheel 发布），上游文件中只保留调用它的几行。这些补丁的 CPU 测试位于 `fork/patches/tests/grpo`，用 `python -m pytest -q fork/patches/tests` 运行；`tests/` 与上游逐字节一致。
 
 ## 文档
 
