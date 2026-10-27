@@ -1,0 +1,196 @@
+# Fork ledger: the single record of how this fork differs from upstream.
+#
+# fork/tools/check_divergence.py compares it with
+# `git diff -M --name-status $(git merge-base HEAD upstream/main) HEAD`:
+#   A (added)     must be under an [owned] prefix or listed in [owned].files
+#   M (modified)  must be listed in the files of some [[topic]]
+#   D (deleted)   must be listed in [[deletion]]
+#   R (renamed)   must match a [[relocation]] from/to pair at 100% similarity
+# A commit that adds such a path, or edits another upstream file, updates this
+# ledger in the same commit.
+
+[sync]
+upstream = "https://github.com/invergent-ai/surogate.git"
+last_synced = "282f99012a78c888725b8c3d8f9000749eca4e66"   # 2026-10-23
+
+[owned]
+# Fork-only paths: the merge base has no history for them.
+prefixes = [
+    "fork/",
+    "surogate/experimental/",
+    "tests/experimental/",
+    "docs/experimental/",
+    "examples/experimental/",
+    "packaging/",
+    "csrc/src/testing/host/",
+]
+files = [
+    "AGENTS.md",
+    ".github/workflows/experimental-release.yml",
+    "scripts/build_experimental_release.py",
+    "csrc/cmake/training_openmp.cmake",
+    "csrc/src/runtime/ops/moe_weight_grad_policy.h",
+    "tests/grpo/test_batch_distribution.py",
+    "tests/grpo/test_inprocess_micro_batches.py",
+    "tests/grpo/test_microbatch_preparation.py",
+    "tests/grpo/test_packer_wait.py",
+    "tests/grpo/test_trainer_cycle_timing.py",
+]
+
+# [root_rehome], [[relocation]] (from, to) and [[deletion]] (path, evidence)
+# are added when upstream notes are moved out of the repository root.
+
+# Topics: one per fork change to upstream files.
+#   files       upstream paths the topic edits (status M)
+#   fork_files  fork-owned paths that belong to the topic
+#   tests       where the topic's tests live
+#   conflict_history  measured or real merge conflicts, newest last
+
+[[topic]]
+id = "T1"
+title = "dispatch-PP batched boundary reads"
+commits = ["a28dfc33"]
+switch = "always on"
+files = [
+    "csrc/src/binding/py_train.cpp",
+    "csrc/src/runtime/executor/graph_executor.h",
+    "csrc/src/runtime/executor/graph_executor.cpp",
+    "csrc/src/runtime/executor/graph_executor_utils.h",
+    "csrc/src/runtime/executor/graph_executor_utils.cpp",
+    "csrc/src/testing/runtime/test-run-state-arena.cpp",
+]
+fork_files = []
+tests = ["csrc/src/testing/runtime/test-run-state-arena.cpp"]
+conflict_history = [
+    "2026-10-27 reverse replay from b5af2f8e, conflict blocks at 90/30/14 days: py_train.cpp 1/0/0",
+]
+
+[[topic]]
+id = "T2"
+title = "opt-in fused LoRA input-gradient accumulation"
+commits = ["bc6b1dbc"]
+switch = "SUROGATE_FUSE_LORA_DX=1 (default off)"
+files = [
+    "csrc/src/runtime/lora/lora_model_utils.h",
+    "csrc/src/runtime/lora/lora_slice_dispatch.h",
+    "csrc/src/testing/kernels/test-qwen35-shared.cu",
+    "docs/guides/performance.md",
+]
+fork_files = []
+tests = ["csrc/src/testing/kernels/test-qwen35-shared.cu"]
+conflict_history = [
+    "2026-10-27 reverse replay from b5af2f8e, conflict blocks at 90/30/14 days: none",
+]
+
+[[topic]]
+id = "T3"
+title = "MoE backward scratch and conditional zero-fill"
+commits = ["df81e9f7"]
+switch = "always on"
+files = [
+    "csrc/src/runtime/ops/moe_grouped_gemm.cpp",
+    "csrc/src/testing/kernels/test-moe-grouped-gemm.cu",
+]
+fork_files = ["csrc/src/runtime/ops/moe_weight_grad_policy.h"]
+tests = ["csrc/src/testing/kernels/test-moe-grouped-gemm.cu"]
+conflict_history = [
+    "2026-10-27 reverse replay from b5af2f8e, conflict blocks at 90/30/14 days: moe_grouped_gemm.cpp 2/0/0",
+]
+
+[[topic]]
+id = "T4"
+title = "FP8 and matmul temporaries"
+commits = ["c00ab62d"]   # shared with T6
+switch = "always on"
+files = [
+    "csrc/src/recipes/fp8_hybrid/fp8_hybrid_recipe.cpp",
+    "csrc/src/runtime/ops/matmul.cpp",
+    "csrc/src/testing/kernels/test-fp8-quant.cpp",
+]
+fork_files = []
+tests = ["csrc/src/testing/kernels/test-fp8-quant.cpp"]
+conflict_history = [
+    "2026-10-27 reverse replay from b5af2f8e, conflict blocks at 90/30/14 days: matmul.cpp 1/0/0",
+]
+
+[[topic]]
+id = "T5"
+title = "OpenMP for CPU training kernels"
+commits = ["9a6018f2"]
+switch = "always on (links OpenMP::OpenMP_CXX into surogate-common)"
+files = ["csrc/CMakeLists.txt"]
+fork_files = [
+    "csrc/cmake/training_openmp.cmake",
+    "csrc/src/testing/host/openmp/CMakeLists.txt",
+    "csrc/src/testing/host/openmp/check.cpp",
+    "csrc/src/testing/host/openmp/probe.cpp",
+]
+tests = ["csrc/src/testing/host/openmp/check.cpp"]
+conflict_history = [
+    "2026-10-27 reverse replay from b5af2f8e, conflict blocks at 90/30/14 days: none",
+]
+
+[[topic]]
+id = "T6"
+title = "GRPO cycle timing metrics"
+commits = ["c00ab62d"]   # shared with T4
+switch = "always on"
+files = [
+    "surogate/grpo/trainer.py",
+    "surogate/grpo/packer.py",
+    "docs/guides/metrics.md",
+]
+fork_files = []
+tests = [
+    "tests/grpo/test_trainer_cycle_timing.py",
+    "tests/grpo/test_packer_wait.py",
+]
+conflict_history = [
+    "2026-10-27 reverse replay from b5af2f8e, conflict blocks at 90/30/14 days: trainer.py 8/2/0 and packer.py 1/0/0 (both shared by T6-T8)",
+]
+
+[[topic]]
+id = "T7"
+title = "in-process GRPO micro-batch handoff"
+commits = ["7bf5c47f"]
+switch = "always on in the single-process GRPO trainer"
+files = [
+    "surogate/grpo/data.py",
+    "surogate/grpo/packer.py",
+    "surogate/grpo/trainer.py",
+]
+fork_files = []
+tests = ["tests/grpo/test_inprocess_micro_batches.py"]
+conflict_history = [
+    "2026-10-27 reverse replay from b5af2f8e, conflict blocks at 90/30/14 days: data.py 1/1/1; trainer.py and packer.py see T6",
+]
+
+[[topic]]
+id = "T8"
+title = "vectorized GRPO batch preparation"
+commits = ["8113ec69"]
+switch = "always on"
+files = [
+    "surogate/grpo/batch.py",
+    "surogate/grpo/trainer.py",
+]
+fork_files = []
+tests = [
+    "tests/grpo/test_batch_distribution.py",
+    "tests/grpo/test_microbatch_preparation.py",
+]
+conflict_history = [
+    "2026-10-27 reverse replay from b5af2f8e, conflict blocks at 90/30/14 days: batch.py 0/0/0; trainer.py see T6",
+]
+
+[[topic]]
+id = "T9"
+title = "setuptools_scm ignores experimental-v* tags"
+commits = ["5341277f"]
+switch = "always on (git_describe_command --match v[0-9]*)"
+files = ["pyproject.toml"]
+fork_files = []
+tests = ["tests/experimental/test_release_version.py"]
+conflict_history = [
+    "2026-10-27 reverse replay from b5af2f8e, conflict blocks at 90/30/14 days: none",
+]
