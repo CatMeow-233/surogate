@@ -1,0 +1,49 @@
+# Python dependencies of the CPU test lane (fork/tools/test_cpu.sh), without torch: install
+# torch 2.11.0 first, from https://download.pytorch.org/whl/cpu (torch==2.11.0+cpu) or PyPI.
+# Runtime dependencies from the root pyproject.toml [project.dependencies]:
+transformers>=5.5.0
+huggingface-hub>=1.4.1
+sentencepiece>=0.2.0
+hf-transfer>=0.1.9
+datasets>=4.3.0
+addict
+peft
+json_repair
+unique-namer
+nanobind
+binpacking
+rich>=13.0.0
+psutil
+matplotlib
+qwen-vl-utils==0.0.14
+ray>=2.5.0
+verifiers==0.3.0
+wandb==0.25.1
+jaxtyping
+aiolimiter
+openai==2.32.0
+msgspec
+pyzmq
+tenacity
+pyyaml
+numpy
+pandas
+httpx
+pydantic
+safetensors
+compressed-tensors
+gguf
+# Imported by tests or by surogate modules but not declared:
+pytest
+pytest-timeout
+pytest-asyncio
+requests
+websockets
+soundfile
+pillow
+tokenizers
+loguru
+aiohttp
+plotly
+tqdm
+filelock

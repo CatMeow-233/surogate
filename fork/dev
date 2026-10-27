@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+# Front door for fork maintenance: build, test, release, format and check.
+# Run `fork/dev help` for the commands; fork/docs/build-and-release.md has the details.
+# Every command is printed before it runs. Paths are relative to the repository root.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+EXP_VENV=fork/.venv-experimental
+EXP_PY=$EXP_VENV/bin/python
+
+run() {
+    echo "+ $*" >&2
+    "$@"
+}
+
+die() {
+    echo "fork/dev: $*" >&2
+    exit 2
+}
+
+usage() {
+    cat <<'EOF'
+fork/dev: maintenance commands for CatMeow-233/surogate (run from any directory).
+
+Artefacts (details: fork/docs/build-and-release.md)
+  artefact                      fork/dev command         output                               published by (on the fork)
+  trainer extension _surogate   build train              surogate/_surogate*.so               native wheel (disabled)
+  serving engine + libsinfer    build serve              csrc/build-serve/, surogate/*.so     native wheel (disabled)
+  STT / TTS engines             build stt | build tts    csrc/build-stt/, csrc/build-tts/     native wheel (disabled)
+  quantizer llama-quantize      build quantizer          surogate/serve/_llama_cpp/bin/       native wheel (disabled)
+  native wheel, Docker, jackalope  (none: upstream workflows, disabled on the fork)
+  surogate-experimental         release experimental     build/experimental-release/artifacts experimental-release.yml on experimental-v* tags
+
+Commands
+  help                              this text
+  setup                             local git config for syncing, plus the GitHub settings checklist
+  build train|serve|all|quantizer|stt|tts
+                                    make wheel-dev | serve-build | build-all | quantizer | serve-stt-build | serve-tts-build
+  test cpu                          fork/tools/test_cpu.sh (FORK_PY=python with the CPU lane installed)
+  test experimental                 experimental tests in fork/.venv-experimental (FORK_TORCH_INDEX=pypi without download.pytorch.org)
+  test patches                      CPU tests of the GRPO patches (FORK_PY, default .venv/bin/python)
+  test openmp                       OpenMP contract test in build/fork-openmp
+  test native                       fork and upstream C++ test executables (GPU host)
+  test gpu                          test native, then make test-py, serve-check and grpo-test (GPU host)
+  release experimental [--tag experimental-vX]
+                                    build the surogate-experimental wheel, sdist and examples zip
+  exp-train <config.yaml> [args]    run the experimental trainer from the checkout
+  fmt                               clang-format the lines changed since upstream, ruff format fork code
+  check                             ledger check and make-target probe
+EOF
+}
+
+setup() {
+    git remote get-url upstream >/dev/null 2>&1 \
+        || run git remote add upstream https://github.com/invergent-ai/surogate.git
+    run git remote set-url --push upstream DISABLED-see-AGENTS.md
+    run git config rerere.enabled true
+    run git config rerere.autoUpdate false
+    # Unset means git's default "conflict": an upstream directory rename stays visible.
+    run git config --unset merge.directoryRenames || true
+    run git fetch --no-tags upstream main
+    cat <<'EOF'
+
+GitHub settings for CatMeow-233/surogate (owner actions; fork/dev does not change them):
+  1. Workflows "Build Wheels", "Build Docker Images" and "jackalope" are disabled;
+     "Experimental Trainer Release" stays active.
+       gh workflow disable "Build Wheels" -R CatMeow-233/surogate   (same for the other two)
+  2. Squash and rebase merging are off, merge commits on:
+       gh repo edit CatMeow-233/surogate --enable-squash-merge=false --enable-rebase-merge=false --enable-merge-commit
+  3. Repository description: "Fork of invergent-ai/surogate. Maintainers: start at fork/README.md"
+  4. Once fork CI is green: main requires the checks check, experimental, fork-tests, openmp-contract.
+EOF
+    if gh auth status >/dev/null 2>&1; then
+        echo
+        echo "Current settings:"
+        run gh api repos/CatMeow-233/surogate --jq \
+            '"squash merge allowed: \(.allow_squash_merge)\nrebase merge allowed: \(.allow_rebase_merge)\ndescription: \(.description)"'
+        run gh api repos/CatMeow-233/surogate/actions/workflows --jq '.workflows[] | "\(.state)\t\(.name)"'
+    else
+        echo "gh is not authenticated: check the settings above on github.com."
+    fi
+}
+
+build() {
+    case "${1:-}" in
+        train) run make wheel-dev ;;   # target _surogate only, not the serving engine
+        serve) run make serve-build ;;
+        all) run make build-all ;;
+        quantizer) run make quantizer ;;
+        stt) run make serve-stt-build ;;
+        tts) run make serve-tts-build ;;
+        *) die "usage: fork/dev build train|serve|all|quantizer|stt|tts" ;;
+    esac
+}
+
+# Create the isolated experimental venv if needed and install its pinned dependencies.
+# --no-config keeps the root pyproject's [tool.uv] settings out of this venv.
+exp_venv() {
+    [ -x "$EXP_PY" ] || run uv --no-config venv --python 3.12 "$EXP_VENV"
+    if [ "${FORK_TORCH_INDEX:-}" = pypi ]; then
+        run uv --no-config pip install --python "$EXP_PY" torch==2.11.0
+    else
+        run uv --no-config pip install --python "$EXP_PY" torch==2.11.0+cpu \
+            --index-url "${FORK_TORCH_INDEX:-https://download.pytorch.org/whl/cpu}"
+    fi
+    run uv --no-config pip install --python "$EXP_PY" -r fork/experimental/requirements-ci.txt
+}
+
+native_tests() {
+    run make configure   # the Makefile's CUDA, ccache and NCCL flags, in csrc/build
+    run cmake -S csrc -B csrc/build -DBUILD_TESTS=ON
+    run cmake --build csrc/build --parallel "$(nproc)" \
+        --target dsl-weight-loader-tests dsl-run-state-tests integration-tests
+    run ctest --test-dir csrc/build --output-on-failure \
+        -R '^(dsl-weight-loader-tests|dsl-run-state-tests|integration-tests)$'
+}
+
+test_suite() {
+    case "${1:-}" in
+        cpu) run fork/tools/test_cpu.sh ;;
+        experimental)
+            exp_venv
+            cd fork/experimental
+            run ../.venv-experimental/bin/python -m pytest -q -p no:cacheprovider tests
+            ;;
+        patches) run "${FORK_PY:-.venv/bin/python}" -m pytest -q -p no:cacheprovider fork/patches/tests ;;
+        openmp)
+            run cmake -S fork/native/openmp-contract -B build/fork-openmp
+            run cmake --build build/fork-openmp
+            run ctest --test-dir build/fork-openmp --output-on-failure
+            ;;
+        native) native_tests ;;
+        gpu)
+            native_tests
+            run make test-py
+            run make serve-check
+            run make grpo-test
+            ;;
+        *) die "usage: fork/dev test cpu|experimental|patches|openmp|native|gpu" ;;
+    esac
+}
+
+release() {
+    [ "${1:-}" = experimental ] || die "usage: fork/dev release experimental [--tag experimental-vX]"
+    shift
+    run python3 fork/experimental/build_release.py "$@"
+}
+
+exp_train() {
+    [ $# -ge 1 ] || die "usage: fork/dev exp-train <config.yaml> [args]"
+    exp_venv
+    local path="fork/experimental/src${PYTHONPATH:+:$PYTHONPATH}"
+    # A regular `surogate` package anywhere on the path hides the experimental namespace
+    # portion. -P keeps the repository root, which holds the native package, off sys.path.
+    local rc=0
+    run env PYTHONPATH="$path" "$EXP_PY" -P -c \
+        "import importlib.util as u, sys; s = u.find_spec('surogate'); sys.exit(0 if s.origin is None else 3)" \
+        || rc=$?
+    if [ "$rc" -eq 3 ]; then
+        echo "fork/dev: a regular 'surogate' package is importable (from PYTHONPATH or $EXP_VENV)" \
+            "and would hide surogate.experimental; remove it and retry." >&2
+        exit 3
+    fi
+    [ "$rc" -eq 0 ] || exit "$rc"
+    run env PYTHONPATH="$path" "$EXP_PY" -P -m surogate.experimental.train "$@"
+}
+
+fmt() {
+    # Changed lines only, so vendored code and untouched upstream code keep their format.
+    # git clang-format exits 1 when it has reformatted something.
+    run git clang-format "$(git merge-base HEAD upstream/main)" -- csrc fork/native || [ $? -eq 1 ]
+    run ruff format fork surogate/_fork
+}
+
+check() {
+    run python3 -I fork/tools/check_divergence.py --strict
+    # Fails when upstream renames or drops a make target that fork/dev runs. A fixed CUDA_HOME
+    # keeps the Makefile from probing for nvcc on hosts without CUDA.
+    run make -n CUDA_HOME=/usr/local/cuda wheel-dev serve-build build-all quantizer serve-stt-build \
+        serve-tts-build configure test-py serve-check grpo-test >/dev/null
+}
+
+command=${1:-help}
+[ $# -eq 0 ] || shift
+case "$command" in
+    help | -h | --help) usage ;;
+    setup) setup ;;
+    build) build "$@" ;;
+    test) test_suite "$@" ;;
+    release) release "$@" ;;
+    exp-train) exp_train "$@" ;;
+    fmt) fmt ;;
+    check) check ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac

@@ -32,6 +32,7 @@ GRPO 补丁（T6–T8）调用的 fork 代码位于 `surogate/_fork`（随原生
 
 ## 文档
 
+- [docs/build-and-release.md](docs/build-and-release.md)：每个产物的构建命令、输出位置和发布工作流，版本号和依赖版本固定在哪里，以及 `fork/dev` 的测试命令。日常操作从 `fork/dev help` 开始。
 - [docs/performance.md](docs/performance.md)：fork 的性能改动、测量方法和开关，包括 LoRA 融合输入梯度和 GRPO 周期计时指标。
 - [native/README.md](native/README.md)：fork 原生代码（C++ 与 CMake）的目录、`csrc/CMakeLists.txt` 中两行挂接点的约定，以及 OpenMP 接线测试的运行方法。
 - [docs/upstream-errata.md](docs/upstream-errata.md)：上游已知的失效引用、过时配置和测试缺陷；fork 不修改这些上游文件，只记录绕行方法。

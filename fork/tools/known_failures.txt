@@ -1,0 +1,40 @@
+# Upstream CPU-lane failures accepted by fork/tools/test_cpu.sh.
+# One pytest node id per line: <nodeid>  # <reason>; first seen at upstream <sha>
+# Only failures that also fail at that upstream commit belong here; a failure the fork causes
+# must be fixed instead. test_cpu.sh reports entries that no longer fail as stale.
+# Measured with two identical runs of test_cpu.sh (Python 3.12, torch 2.11.0, no GPU, no built extension).
+csrc/src/testing/serve/targets/qwen3_5/test_reference_ops.py::test_t1_gdn_matches_sequential_oracle  # gated_delta_net differs bitwise from the sequential bf16 oracle on CPU torch; first seen at upstream 282f9901
+csrc/src/testing/serve/targets/qwen3_5/test_verify.py::test_structure_rejects_identity_signature_and_offset_drift  # expected 'identity' in the error, got "unknown weights profile 'wrong'"; first seen at upstream 282f9901
+tests/distill/test_allocator_startup_logging.py  # collection error: imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/distill/test_candidate_loss.py  # collection error: imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/distill/test_candidate_proper_validation.py  # collection error: imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/distill/test_capture.py  # collection error: imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/distill/test_capture_api.py  # collection error: imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/distill/test_config.py  # collection error: imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/distill/test_qwen35_9b_candidate_smoke.py  # collection error: imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/dpo/test_config.py  # collection error: imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/dpo/test_preference_loader.py  # collection error: imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/dpo/test_reference_free.py  # collection error: imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/dpo/test_step_dpo_binding.py  # collection error: imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/grpo/test_cispo_loss.py  # collection error: imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/grpo/test_config.py  # collection error: imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/grpo/test_dispatch_pp_routing.py  # collection error: imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/grpo/test_engine_guards.py  # collection error: imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/grpo/test_inference_config.py::test_a_split_run_with_routing_replay_captures_on_the_rollout_server  # imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/grpo/test_native_colocate.py::test_policy_parity_is_selected_before_allocating_the_trainer[config0-True]  # imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/grpo/test_native_colocate.py::test_policy_parity_is_selected_before_allocating_the_trainer[config1-True]  # imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/grpo/test_native_colocate.py::test_policy_parity_is_selected_before_allocating_the_trainer[config2-False]  # imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/grpo/test_native_colocate.py::test_policy_parity_is_selected_before_allocating_the_trainer[config3-False]  # imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/grpo/test_native_colocate.py::test_policy_parity_is_selected_before_allocating_the_trainer[config4-False]  # imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/grpo/test_native_colocate.py::test_policy_parity_is_selected_before_allocating_the_trainer[config5-False]  # imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/grpo/test_native_formula.py  # collection error: imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/grpo/test_native_parity.py  # collection error: imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/grpo/test_reap_process_group.py  # collection error: imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/grpo/test_turn_stats.py::TestDiagnosticLayoutRoundTrip::test_multiple_packed_samples  # imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/grpo/test_turn_stats.py::TestDiagnosticLayoutRoundTrip::test_raw_buffer_without_unshift_is_detectably_wrong  # imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/grpo/test_turn_stats.py::TestDiagnosticLayoutRoundTrip::test_single_sample  # imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/serve/test_cli.py::test_native_option_inventory[server]  # surogate/cli/serve.py does not list newer native server options (--kv-admission, --overlong-max-tokens, ...); first seen at upstream 282f9901
+tests/train/dispatch_pp/test_config.py  # collection error: imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/train/test_microbatch_stream.py  # collection error: imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/train/test_padded_truncation.py  # collection error: imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/train/test_row_packing.py::test_this_build_restarts_linear_attention_at_document_boundaries  # needs the built _surogate extension (linear_attention_doc_boundaries() is False without it); first seen at upstream 282f9901
