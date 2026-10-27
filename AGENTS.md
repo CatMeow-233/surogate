@@ -7,7 +7,7 @@ Maintainers: start at [fork/README.md](fork/README.md). 维护者请从 [fork/RE
 本仓库是上游 `invergent-ai/surogate` 的 fork。上游代码保持原有布局，fork 的内容与改动遵守以下规则：
 
 1. fork 自有文件放在 `fork/` 下，例外只能是 `fork/patches/ledger.toml` 的 `[owned]` 中列出的路径。
-2. 对上游文件的每一处修改都属于 ledger 中的一个 topic（`[[topic]]`）；增删此类修改的提交同时更新 ledger。提交前运行 `python3 -I fork/tools/check_divergence.py --strict`。
+2. 对上游文件的每一处修改都属于 ledger 中的一个 topic（`[[topic]]`）；增删此类修改的提交同时更新 ledger。提交前运行 `fork/dev map` 和 `fork/dev check`（fork CI 的 `check` job 运行同样的检查）。
 3. 同步上游只用 `fork/dev sync`：merge，不 rebase，也不用 GitHub 的 “Sync fork”。
 4. 实验代码只在 `fork/` 下的隔离虚拟环境 `.venv-experimental` 中运行；不要在仓库根目录执行 `uv run` 或 `uv sync`。
 

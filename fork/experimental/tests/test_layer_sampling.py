@@ -3,13 +3,11 @@
 import copy
 import json
 import random
-from types import SimpleNamespace
 
 import pytest
 import torch
-from torch import nn
-
 from surogate.experimental.train.layers import LayerSampler
+from torch import nn
 
 
 class _Model(nn.Module):

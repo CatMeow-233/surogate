@@ -4,10 +4,10 @@
 
 ## 已改为本地保存的 design 笔记
 
-上游在 `e15524d1`（2026-08-31，“chore: design notes are local-only”）删除了仓库中剩余的 design 笔记（另有几篇在更早的提交中删除），并在 `.gitignore:41` 忽略该目录。代码、构建文件和上游工程笔记中仍有 66 处引用，分布在 44 个文件中，指向 12 个不同的笔记；`docs/` 下的用户文档不引用它们。列出全部引用：
+上游在 `e15524d1`（2026-08-31，“chore: design notes are local-only”）删除了仓库中剩余的 design 笔记（另有几篇在更早的提交中删除），并在 `.gitignore:41` 忽略该目录。代码、构建文件和上游工程笔记中仍有 66 处引用，分布在 44 个文件中，指向 12 个不同的笔记；`docs/` 下的用户文档不引用它们。列出全部引用（排除 fork 自己的文档，例如本页）：
 
 ```bash
-git grep -nE 'design/[A-Za-z0-9_.-]+\.md'
+git grep -nE 'design/[A-Za-z0-9_.-]+\.md' -- ':!fork'
 ```
 
 其中 11 个可以从历史中取回（行尾注释为引用次数），`MODELS.md` 从未被跟踪：
@@ -29,10 +29,10 @@ git show e15524d1^:design/NVFP4_ROUTED_EXPERTS.md        # 1
 
 ## 被忽略的 study 目录
 
-`.gitignore:20` 忽略 study 目录，上游历史中从未跟踪过其中的文件。除 `.gitignore` 和 `.dockerignore` 外，仍有 38 处引用，分布在 17 个文件中，无法在仓库内解析：
+`.gitignore:20` 忽略 study 目录，上游历史中从未跟踪过其中的文件。除 `.gitignore` 和 `.dockerignore` 外，仍有 38 处引用，分布在 17 个文件中，无法在仓库内解析（同样排除 fork 文档）：
 
 ```bash
-git grep -n 'study/' -- ':!.gitignore' ':!.dockerignore'
+git grep -n 'study/' -- ':!.gitignore' ':!.dockerignore' ':!fork'
 ```
 
 ## 已删除的 NInfer 署名文件

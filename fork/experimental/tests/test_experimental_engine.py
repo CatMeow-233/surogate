@@ -11,8 +11,6 @@ from pathlib import Path
 
 import pytest
 import torch
-from transformers import AutoConfig, AutoModelForCausalLM
-
 from surogate.experimental.train.config import TrainConfig
 from surogate.experimental.train.engine import (
     CHECKPOINT_KIND,
@@ -23,6 +21,7 @@ from surogate.experimental.train.engine import (
     _seed_rng,
     run_training,
 )
+from transformers import AutoConfig, AutoModelForCausalLM
 
 
 @pytest.fixture(autouse=True, scope="module")

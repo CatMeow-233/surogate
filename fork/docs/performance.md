@@ -45,16 +45,7 @@ nsys stats --report cuda_gpu_mem_size_sum train-trace.nsys-rep
 
 安装匹配的编译器运行库，例如 GCC 的 `libgomp` 或 Clang 的 `libomp`。根据主机可用核数、内存带宽和 NUMA 布局选择 `OMP_NUM_THREADS`，不要假定线程越多越快。逐元素的 AdamW 更新保持原有算术；并行的浮点范数归约可能改变最终的舍入位。请在目标主机上验证梯度裁剪与数值容差，以及实际的优化器步耗时。
 
-独立的接线回归测试需要 C++ 编译器和 OpenMP，但不需要 GPU 或 CUDA 头文件：
-
-```bash
-source .venv/bin/activate
-cmake -S fork/native/openmp-contract -B build/fork-openmp -G Ninja
-cmake --build build/fork-openmp --parallel 2
-ctest --test-dir build/fork-openmp --output-on-failure
-```
-
-它检查训练用的 OpenMP 辅助函数能让一个真实的双 worker 主机库生效，并得到精确的整数输出。运行时的线程数限制可能导致显式跳过。该测试不编译 CUDA 训练库，也不验证 AdamW 数值。
+独立的接线回归测试用 `fork/dev test openmp` 运行，需要 C++ 编译器和 OpenMP，但不需要 GPU 或 CUDA 头文件。它检查训练用的 OpenMP 辅助函数能让一个真实的双 worker 主机库生效，并得到精确的整数输出。运行时的线程数限制可能导致显式跳过。该测试不编译 CUDA 训练库，也不验证 AdamW 数值。
 
 ## RTX 5090 32 GB：稠密与 MoE 微调
 
@@ -90,14 +81,13 @@ ctest --test-dir build/fork-openmp --output-on-failure
 
 原生优化需要编译、数值测试、graph replay 检查，以及在目标 GPU 上的端到端测量。仅靠 CPU 测试无法确定 GPU 吞吐量，也无法判断离物理极限有多近。
 
-为目标 GPU 配置好原生测试构建后，先运行这些聚焦的回归测试，再做模型基准（把 `BUILD_DIR` 换成该构建目录）：
+在目标 GPU 主机上先运行 `fork/dev test native`（构建目录 `csrc/build`），再做模型基准。只想重跑与上述优化相关的用例时，按 Catch2 标签过滤：
 
 ```bash
-cmake --build BUILD_DIR --target integration-tests dsl-run-state-tests --parallel 4
-BUILD_DIR/integration-tests '[fp8][recipe]'
-BUILD_DIR/integration-tests '[lora][fused-dx]'
-BUILD_DIR/integration-tests '[moe][gemm][wgrad-zero]'
-BUILD_DIR/dsl-run-state-tests '[dispatch-pp][host-copy]'
+csrc/build/integration-tests '[fp8][recipe]'
+csrc/build/integration-tests '[lora][fused-dx]'
+csrc/build/integration-tests '[moe][gemm][wgrad-zero]'
+csrc/build/dsl-run-state-tests '[dispatch-pp][host-copy]'
 ```
 
 然后用同一个预热后的训练负载，对比启用与不启用 `SUROGATE_FUSE_LORA_DX=1` 的梯度/loss、峰值显存和优化器步耗时。kernel 测试通过本身并不能说明训练变快了。

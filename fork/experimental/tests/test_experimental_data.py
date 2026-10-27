@@ -6,7 +6,6 @@ import json
 import pytest
 import torch
 import torch.nn.functional as F
-
 from surogate.experimental.train.data import BatchStream, JSONLDataset, collate_batch
 
 

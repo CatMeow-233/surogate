@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Check that every committed difference from upstream is recorded in the ledger.
+"""Check that every difference from upstream is recorded in the ledger.
 
-Compares `git diff -M --name-status <base> HEAD`, where <base> is
-`git merge-base HEAD upstream/main`, with fork/patches/ledger.toml:
+Compares `git diff -M --name-status <base>`, where <base> is
+`git merge-base HEAD upstream/main`, with fork/patches/ledger.toml. The diff is
+taken against the working tree, so staged and unstaged edits to tracked files
+count before they are committed; untracked files are not seen until `git add`.
 
   A  must be under an [owned] prefix or listed in [owned].files
   M  must be listed in the files of some [[topic]]
@@ -11,8 +13,8 @@ Compares `git diff -M --name-status <base> HEAD`, where <base> is
 
 Any other change fails. --strict also fails on stale ledger entries: a topic
 file that no longer differs from upstream, an owned path, topic fork file or
-test that does not exist at HEAD, and a relocation or deletion that is not in
-the diff.
+test that is not tracked, and a relocation or deletion that is not in the
+diff.
 
 Usage: python3 -I fork/tools/check_divergence.py [--strict]
 Exit status: 0 when everything is recorded, 1 otherwise.
@@ -36,8 +38,8 @@ def git(*args):
 
 
 def diff_entries(base):
-    """Yield (status, path, new_path) from the -z name-status diff of base..HEAD."""
-    fields = git("diff", "-M", "--name-status", "-z", base, "HEAD").split("\0")[:-1]
+    """Yield (status, path, new_path) from the -z name-status diff of base against the working tree."""
+    fields = git("diff", "-M", "--name-status", "-z", base).split("\0")[:-1]
     i = 0
     while i < len(fields):
         status = fields[i]
@@ -88,7 +90,7 @@ def main():
             errors.append(f"{status} {path}: unsupported change")
 
     if args.strict:
-        tracked = set(git("ls-tree", "-r", "--name-only", "-z", "HEAD").split("\0"))
+        tracked = set(git("ls-files", "-z").split("\0"))
         for topic in topics:
             for path in topic.get("files", []):
                 if path not in modified:

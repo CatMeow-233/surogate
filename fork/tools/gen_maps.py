@@ -3,9 +3,12 @@
 
 Writes fork/docs/maps/{python,native,tests,docs}.md and fork/patches/README.md. The input is
 the tracked tree only (`git ls-files` and the files' contents) and every list is sorted, so
-the output is deterministic. --check regenerates everything in memory and fails when a file
-on disk differs, or when a top-level directory under surogate/ or csrc/src, or a markdown
-file, matches no rule in the classification tables below; add a rule when upstream adds one.
+the output is deterministic. The maps record what exists and where (files, imports, CMake
+targets, classifications), never line numbers or line counts, so editing the body of a file
+does not make them stale. --check regenerates everything in memory and fails when a file on
+disk differs, when a top-level directory under surogate/ or csrc/src, or a markdown file,
+matches no rule in the classification tables below (add a rule when upstream adds one), or
+when a file this script parses by a fixed path is gone (update the path below).
 
 Usage: python3 -I fork/tools/gen_maps.py --write | --check
 """
@@ -126,8 +129,12 @@ def text(path):
     return _text[path]
 
 
-def line_of(path, offset):
-    return text(path).count("\n", 0, offset) + 1
+def required(path):
+    """Text of an upstream file parsed by a fixed path; an error rather than a traceback when it is gone."""
+    if not (ROOT / path).is_file():
+        ERRORS.append(f"{path}: not found; upstream moved or deleted it, update the path in fork/tools/gen_maps.py")
+        return ""
+    return text(path)
 
 
 def cell(value):
@@ -171,20 +178,17 @@ def subpackage(path):
     return path.split("/")[1] if path.count("/") >= 2 else ""
 
 
-STRING_MODULE = re.compile(r"""["'](surogate(?:\.\w+)+)""")
-STRING_PATH = re.compile(r"""["']([\w./-]+\.py)["']""")
 DYNAMIC_IMPORT = re.compile(r"""import_module\(\s*f["']([^"']+)["']""")
+FILE_RELATIVE = re.compile(r"Path\(__file__\)(?:\.resolve\(\))?(?:\.parents\[\d+\]|(?:\.parent){2,})")
 
 
 class PyFile:
-    """One Python file: imports (target, line, lazy), referenced module names and paths, main guard."""
+    """One Python file: imports (target, lazy), f-string dynamic imports, main guard."""
 
     def __init__(self, path):
         src = text(path)
         self.path, self.module, self.imports = path, module_name(path), []
-        self.strings = set(STRING_MODULE.findall(src))
-        self.path_strings = set(STRING_PATH.findall(src))
-        self.dynamic = [(m.group(1), line_of(path, m.start())) for m in DYNAMIC_IMPORT.finditer(src)]
+        self.dynamic = sorted(set(DYNAMIC_IMPORT.findall(src)))
         try:
             tree = ast.parse(src)
         except SyntaxError as error:
@@ -201,14 +205,14 @@ class PyFile:
         """Collect imports from statements only; an import inside a function is lazy."""
         for node in statements:
             if isinstance(node, ast.Import):
-                self.imports += [(alias.name, node.lineno, lazy) for alias in node.names]
+                self.imports += [(alias.name, lazy) for alias in node.names]
             elif isinstance(node, ast.ImportFrom):
                 base = node.module or ""
                 if node.level:
                     parent = package.split(".")[: len(package.split(".")) - node.level + 1]
                     base = ".".join(parent + ([base] if base else []))
-                self.imports.append((base, node.lineno, lazy))
-                self.imports += [(f"{base}.{alias.name}", node.lineno, lazy) for alias in node.names]
+                self.imports.append((base, lazy))
+                self.imports += [(f"{base}.{alias.name}", lazy) for alias in node.names]
             inner = lazy or isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
             for field in ("body", "orelse", "finalbody", "handlers", "cases"):
                 self._visit(getattr(node, field, []), inner, package)
@@ -216,8 +220,7 @@ class PyFile:
 
 def python_map():
     package_files = [f for f in FILES if f.startswith("surogate/") and f.endswith(".py")]
-    # fork/tools is excluded: this script's own strings must not count as references.
-    parsed = {f: PyFile(f) for f in FILES if f.endswith(".py") and not f.startswith("fork/tools/")}
+    parsed = {f: PyFile(f) for f in package_files}
     modules = {module_name(f): f for f in package_files}
 
     def resolve(target):
@@ -236,26 +239,22 @@ def python_map():
     )
 
     # Subpackages.
-    rows, total_files, total_lines = [], 0, 0
     by_sub = defaultdict(list)
     for f in package_files:
         by_sub[subpackage(f)].append(f)
+    rows = []
     for sub in sorted(by_sub):
         if sub not in PY_ROLES:
             ERRORS.append(f"surogate/{sub}: unclassified subpackage; add it to PY_ROLES in fork/tools/gen_maps.py")
-        lines = sum(text(f).count("\n") for f in by_sub[sub])
-        total_files += len(by_sub[sub])
-        total_lines += lines
-        rows.append(
-            [tick(f"surogate/{sub}" if sub else "surogate"), len(by_sub[sub]), lines, PY_ROLES.get(sub, "未分类")]
-        )
-    rows.append(["合计", total_files, total_lines, ""])
-    out += ["## 子包\n\n", table(["子包", ".py 文件", "行数", "作用"], rows), "\n"]
+        rows.append([tick(f"surogate/{sub}" if sub else "surogate"), len(by_sub[sub]), PY_ROLES.get(sub, "未分类")])
+    rows.append(["合计", len(package_files), ""])
+    out += ["## 子包\n\n", table(["子包", ".py 文件", "作用"], rows), "\n"]
 
     # CLI.
     main = "surogate/cli/main.py"
-    tree = ast.parse(text(main))
-    rows = []
+    main_src = required(main)
+    tree = ast.parse(main_src)
+    rows, mapping = [], None
     imported_from = {a.asname or a.name: n.module for n in tree.body if isinstance(n, ast.ImportFrom) for a in n.names}
     for node in tree.body:
         call = node.value if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call) else None
@@ -265,33 +264,33 @@ def python_map():
                 [
                     name.removeprefix("maybe_exec_"),
                     tick(f"{imported_from.get(name)}.{name}"),
-                    f"`{main}:{node.lineno}`",
                     "在 argparse 之前拦截，`os.execv` 替换当前进程",
                 ]
             )
         if isinstance(node, (ast.Assign, ast.AnnAssign)) and "COMMAND_MAPPING" in ast.unparse(node):
-            for key, value in zip(node.value.keys, node.value.values):
-                target = value.value
-                uses = (
-                    sorted(
-                        {
-                            resolve(t).split(".")[1]
-                            for t, _, _ in parsed[modules[target]].imports
-                            if resolve(t) and resolve(t).count(".") >= 1
-                        }
-                        - {"cli", "utils"}
-                    )
-                    if target in modules
-                    else []
-                )
-                rows.append([key.value, tick(target), f"`{main}:{key.lineno}`", "、".join(uses) or "—"])
+            mapping = node.value
+    if not isinstance(mapping, ast.Dict) or not all(isinstance(v, ast.Constant) for v in mapping.keys + mapping.values):
+        if main_src:
+            ERRORS.append(f"{main}: no COMMAND_MAPPING dict of string literals; update the CLI table in gen_maps.py")
+        mapping = ast.Dict(keys=[], values=[])
+    for key, value in zip(mapping.keys, mapping.values):
+        target = value.value
+        uses = (
+            sorted(
+                {resolve(t).split(".")[1] for t, _ in parsed[modules[target]].imports if (resolve(t) or "").count(".")}
+                - {"cli", "utils"}
+            )
+            if target in modules
+            else []
+        )
+        rows.append([key.value, tick(target), "、".join(uses) or "—"])
     out.append("## 命令行入口\n\n")
     out.append(
         "`pyproject.toml` 只定义一个脚本 `surogate = surogate.cli.main:cli_main`。`serve` 与 `jackalope` 在 "
         "`cli/main.py` 的模块级被拦截；其余子命令按 `COMMAND_MAPPING` 用 `runpy` 运行对应模块。"
         "最后一列是该模块导入的其他子包（不含 cli、utils）。\n\n"
     )
-    out += [table(["子命令", "模块", "位置", "导入的子包 / 说明"], rows), "\n"]
+    out += [table(["子命令", "模块", "导入的子包 / 说明"], rows), "\n"]
 
     # python -m entry points.
     runnable = defaultdict(list)
@@ -308,9 +307,9 @@ def python_map():
     out += [table(["子包", "可运行的模块"], rows), "\n"]
 
     # Cross-subpackage imports.
-    edges = defaultdict(lambda: [set(), set()])  # (from, to) -> [importers, module-level importers]
+    edges = {}  # (from, to) -> True when at least one import is at module level
     for f in package_files:
-        for target, _, lazy in parsed[f].imports:
+        for target, lazy in parsed[f].imports:
             resolved = resolve(target) if target.startswith("surogate") else None
             if not resolved:
                 continue
@@ -321,72 +320,31 @@ def python_map():
             )
             src = subpackage(f)
             if src != dst:
-                edges[(src, dst)][0].add(f)
-                if not lazy:
-                    edges[(src, dst)][1].add(f)
+                edges[(src, dst)] = edges.get((src, dst), False) or not lazy
 
     def label(sub):
         return sub or "(包根)"
 
-    rows = [[label(a), label(b), len(v[0]), len(v[1])] for (a, b), v in sorted(edges.items())]
+    rows = [[label(a), label(b), "模块级" if eager else "仅函数内"] for (a, b), eager in sorted(edges.items())]
     cycles = sorted(f"{label(a)} ↔ {label(b)}" for (a, b) in edges if a < b and (b, a) in edges)
     out.append("## 子包之间的导入\n\n")
     out.append(
-        "每行统计从一个子包导入另一个子包的模块数，函数内的延迟导入也计入；最后一列只计模块级导入。"
+        "每行表示前一个子包中至少有一个模块导入后一个子包；“仅函数内”表示所有这类导入都写在函数内部（延迟导入）。"
         "`_surogate` 与 `_surogate_serve` 是原生扩展模块。\n\n"
     )
-    out += [table(["从", "到", "导入模块数", "其中模块级"], rows), "\n"]
+    out += [table(["从", "到", "导入方式"], rows), "\n"]
     out += ["互相导入的子包：" + ("、".join(cycles) or "无") + "。\n\n"]
 
     # Dynamic imports and file-relative paths.
-    rows = [[tick(p), f"`{f}:{line}`"] for f in package_files for p, line in parsed[f].dynamic]
+    rows = [[tick(p), tick(f)] for f in package_files for p in parsed[f].dynamic]
     out += [
         "## 动态导入\n\n",
         "用 f-string 拼出模块名的 `importlib.import_module` 调用，静态导入图看不到这些依赖。\n\n",
     ]
-    out += [table(["模块名模式", "位置"], rows) if rows else "无。\n", "\n"]
-    file_rel = re.compile(r"Path\(__file__\)(?:\.resolve\(\))?(?:\.parents\[\d+\]|(?:\.parent){2,})")
-    rows = [
-        [tick(m.group(0)), f"`{f}:{line_of(f, m.start())}`"] for f in package_files for m in file_rel.finditer(text(f))
-    ]
+    out += [table(["模块名模式", "文件"], rows) if rows else "无。\n", "\n"]
+    rows = [[tick(e), tick(f)] for f in package_files for e in sorted(set(FILE_RELATIVE.findall(text(f))))]
     out += ["## 依赖仓库目录深度的路径\n\n", "按 `__file__` 向上数目录的代码；移动这些文件会改变它们找到的位置。\n\n"]
-    out += [table(["表达式", "位置"], rows) if rows else "无。\n", "\n"]
-
-    # Dead-module candidates.
-    imported = {resolve(t) for p in parsed.values() for t, _, _ in p.imports if t.startswith("surogate")}
-    named = {s.rsplit(".", i)[0] for p in parsed.values() for s in p.strings for i in range(s.count(".") + 1)}
-    path_strings = set().union(*(p.path_strings for p in parsed.values()))
-    config_text = "".join(text(f) for f in FILES if f in ("pyproject.toml", "Makefile") or f.startswith(".github/"))
-    families = [
-        re.compile(
-            re.sub(
-                r"\\\{[^}]*\\\}",
-                "[A-Za-z0-9_]+",
-                re.escape(p.replace("{__package__}", parsed[f].module.rpartition(".")[0])),
-            )
-        )
-        for f in package_files
-        for p, _ in parsed[f].dynamic
-    ]
-    # Scripts run by path are mentioned as <directory>/<file>.py in code comments and docs.
-    corpus = "".join(text(f) for f in FILES if f.endswith((".py", ".md", ".sh")) and not f.startswith("fork/"))
-    rows = []
-    for name, f in sorted(modules.items()):
-        if f.startswith("surogate/_fork/"):
-            continue
-        if f.endswith(("__init__.py", "__main__.py")) or parsed[f].main_guard or name in imported:
-            continue
-        if name in named or name in config_text or any(s.endswith(f) for s in path_strings):
-            continue
-        if any(r.fullmatch(name) for r in families) or "/".join(f.split("/")[-2:]) in corpus:
-            continue
-        rows.append([tick(f), text(f).count("\n")])
-    out.append("## 疑似无人使用的模块\n\n")
-    out.append(
-        "没有任何已跟踪的 Python 文件导入、按字符串引用或按路径加载，也不是 `python -m` 入口的模块。"
-        "只作提示：fork 不删除上游代码。\n\n"
-    )
-    out += [table(["文件", "行数"], rows) if rows else "无。\n"]
+    out += [table(["表达式", "文件"], rows) if rows else "无。\n"]
     return "".join(out), len(package_files)
 
 
@@ -445,20 +403,18 @@ def native_map():
                 if t in ("SHARED", "STATIC", "MODULE", "INTERFACE", "IMPORTED", "ALIAS", "EXCLUDE_FROM_ALL")
             ]
             source = next((t for t in tokens[1:] if re.search(r"\.(cpp|cu|cc|c)$", t)), "")
-            targets.append((name, kind, flags, output_names.get(name, ""), f, line_of(f, m.start()), source))
+            targets.append((name, kind, flags, output_names.get(name, ""), f, source))
     out.append("## CMake 目标\n\n")
     out.append(
         f"已跟踪的 CMakeLists.txt 中每一处 `add_library`、`add_executable`、`nanobind_add_module`，共 {len(targets)} 处"
         "（条件分支中的同名定义各算一处）。标有 `EXCLUDE_FROM_ALL` 的目标只在显式构建或被依赖时才编译。\n\n"
     )
-    rows = [
-        [tick(n), k, " ".join(fl) or "—", tick(o) if o else "—", f"`{f}:{line}`"] for n, k, fl, o, f, line, _ in targets
-    ]
-    out += [table(["目标", "类型", "标志", "OUTPUT_NAME", "位置"], rows), "\n"]
+    rows = [[tick(n), k, " ".join(fl) or "—", tick(o) if o else "—", tick(f)] for n, k, fl, o, f, _ in targets]
+    out += [table(["目标", "类型", "标志", "OUTPUT_NAME", "定义在"], rows), "\n"]
 
     # Entry points.
     rows = []
-    for name, kind, _, output, f, line, source in targets:
+    for name, kind, _, output, f, source in targets:
         product = output or name
         if (
             kind != "库"
@@ -466,12 +422,12 @@ def native_map():
             or name == "sinfer_shared"
         ):
             shown = f"lib{product}.so" if name == "sinfer_shared" else product
-            rows.append([tick(shown), tick(name), tick(source) if source else "—", f"`{f}:{line}`"])
+            rows.append([tick(shown), tick(name), tick(source) if source else "—", tick(f)])
     out += [
         "## 产物入口\n\n",
         "产品名与 CMake 目标名不同的地方由 `OUTPUT_NAME` 决定（例如 `surogate-engine` 的目标是 `sinfer-serve`）。\n\n",
     ]
-    out += [table(["产物", "CMake 目标", "第一个源文件", "位置"], sorted(rows)), "\n"]
+    out += [table(["产物", "CMake 目标", "第一个源文件", "定义在"], sorted(rows)), "\n"]
 
     # Include roots.
     rows = []
@@ -487,36 +443,26 @@ def native_map():
                 elif token not in ("SYSTEM", "BEFORE", "AFTER"):
                     dirs[scope].append(token)
             for scope, values in dirs.items():
-                rows.append(
-                    [tick(tokens[0]), scope or "—", " ".join(tick(v) for v in values), f"`{f}:{line_of(f, m.start())}`"]
-                )
+                rows.append([tick(tokens[0]), scope or "—", " ".join(tick(v) for v in values), tick(f)])
     out += [
         "## 头文件根目录\n\n",
         "测试目录以外的每个 `target_include_directories` 调用。训练代码按 `csrc/src` 写 include，服务代码按 `csrc/src/serve` 写，所以同一个前缀（如 `runtime/`）在两边指向不同目录。\n\n",
     ]
-    out += [table(["目标", "可见性", "目录", "位置"], rows), "\n"]
+    out += [table(["目标", "可见性", "目录", "调用所在文件"], rows), "\n"]
 
     # Seams between training and serving.
     includers = [
-        f"`{f}:{line_of(f, m.start())}`"
+        tick(f)
         for f in FILES
         if f.startswith("csrc/src/")
         and not f.startswith("csrc/src/serve/")
         and f.endswith((".h", ".cpp", ".cu", ".cuh"))
-        for m in re.finditer(r'#\s*include\s*[<"]serve/core/unified_memory\.h[">]', text(f))
+        and re.search(r'#\s*include\s*[<"]serve/core/unified_memory\.h[">]', text(f))
     ]
     cm = "csrc/CMakeLists.txt"
-    lines = [
-        i
-        for i, line in enumerate(text(cm).split("\n"), 1)
-        if "src/tokenizer/" in line and line.strip().endswith((".cpp", ".cpp)"))
-    ]
-    ranges, start = [], None
-    for i, n in enumerate(lines):
-        start = n if start is None else start
-        if i + 1 == len(lines) or lines[i + 1] != n + 1:
-            ranges.append(f"`{cm}:{start}-{n}`" if start != n else f"`{cm}:{n}`")
-            start = None
+    cm_text = required(cm)
+    listed = [line.strip().endswith((".cpp", ".cpp)")) and "src/tokenizer/" in line for line in cm_text.split("\n")]
+    blocks = sum(1 for i, hit in enumerate(listed) if hit and (i == 0 or not listed[i - 1]))
     out.append("## 训练与服务之间的接缝\n\n")
     out.append(
         f"- 训练侧在 `csrc/src/serve` 之外有 {len(includers)} 个文件包含 `serve/core/unified_memory.h`："
@@ -524,18 +470,18 @@ def native_map():
         + "。\n"
     )
     out.append(
-        f"- 分词器源文件在 {len(ranges)} 处被编译："
-        + "、".join(ranges)
-        + "（训练库 `surogate-common` 与服务库 `sinfer_engine`）。\n\n"
+        f"- `{cm}` 中有 {blocks} 处源文件列表包含 `src/tokenizer/` 下的源文件，"
+        "即分词器被编译多次（训练库 `surogate-common` 与服务库 `sinfer_engine`）。\n\n"
     )
 
     # Places a serving model target lives.
+    registry = required("csrc/src/serve/targets/registry.h")
     serve_targets = sorted({f.split("/")[4] for f in FILES if re.match(r"csrc/src/serve/targets/[^/]+/", f)})
     places = [
         ("API 头文件", lambda t: f"csrc/src/serve/api/targets/{t}/package.h" in FILES),
         ("实现目录", lambda t: f"csrc/src/serve/targets/{t}/CMakeLists.txt" in FILES),
-        ("注册表", lambda t: f"api/targets/{t}/package.h" in text("csrc/src/serve/targets/registry.h")),
-        ("CMake 子目录", lambda t: f"${{SERVE_ROOT}}/targets/{t} " in text(cm)),
+        ("注册表", lambda t: f"api/targets/{t}/package.h" in registry),
+        ("CMake 子目录", lambda t: f"${{SERVE_ROOT}}/targets/{t} " in cm_text),
         ("C++ 测试", lambda t: any(f.startswith(f"csrc/src/testing/serve/targets/{t}/") for f in FILES)),
         ("C++ 基准", lambda t: any(f.startswith(f"csrc/src/testing/serve/bench/targets/{t}/") for f in FILES)),
         ("权重转换", lambda t: any(f.startswith(f"surogate/serve/convert/{t}/") for f in FILES)),
@@ -550,40 +496,7 @@ def native_map():
         "`config.h` 由 `surogate/serve/tools/generate` 生成。✓ 表示存在。\n\n"
     )
     rows = [[t] + ["✓" if check(t) else "—" for _, check in places] for t in serve_targets]
-    out += [table(["目标"] + [name for name, _ in places], rows), "\n"]
-
-    # Dead C++ candidates.
-    sources = [
-        f
-        for f in FILES
-        if f.startswith(("csrc/", "fork/native/"))
-        and f.endswith((".h", ".hpp", ".cuh", ".inl", ".cpp", ".cu", ".cc", ".c"))
-    ]
-    included = {Path(m.group(1)).name for f in sources for m in re.finditer(r'#\s*include\s*[<"]([^>"]+)[>"]', text(f))}
-    cmake_text = "".join(text(f) for f in cmake_all)
-    unused = defaultdict(list)
-    for f in sources:
-        name = Path(f).name
-        generated_test = (
-            Path(f).suffix in (".cpp", ".cu", ".cc", ".c")
-            and name.startswith("test_")
-            and Path(f).parent.name in cmake_text
-        )
-        if (
-            f.startswith("csrc/src/")
-            and "/third_party/" not in f
-            and name not in included
-            and name not in cmake_text
-            and not generated_test
-        ):
-            unused[str(Path(f).parent)].append(name)
-    rows = [[tick(d + "/"), len(names), "、".join(tick(n) for n in names)] for d, names in sorted(unused.items())]
-    out.append("## 疑似无人使用的 C++ 文件\n\n")
-    out.append(
-        "文件名既不出现在任何 `#include` 中，也不出现在任何 CMake 文件中（`third_party` 除外；按模式生成名字的测试源文件不计）。"
-        "只作提示：fork 不删除上游代码。\n\n"
-    )
-    out += [table(["目录", "文件数", "文件"], rows) if rows else "无。\n"]
+    out += [table(["目标"] + [name for name, _ in places], rows)]
     return "".join(out), len(targets)
 
 
@@ -594,24 +507,17 @@ def tests_map():
     out = ["# 测试地图\n\n", NOTICE]
     out.append("仓库有三棵测试树，没有一个命令同时运行全部测试。fork 不修改 `tests/`（它与上游逐字节一致）。\n\n")
     rows = [
-        [
-            tick("tests/"),
-            "上游 pytest",
-            "`make test-py`（不含 slow）、`make test-py-slow`、`make serve-test-py`、`make grpo-test`（GPU）；CPU：`fork/dev test cpu`",
-        ],
-        [
-            tick("csrc/src/testing/"),
-            "上游 C++（Catch2/CTest）与服务端 Python",
-            "训练：`fork/dev test native`；服务：`make serve-test`",
-        ],
-        [tick("fork/patches/tests/"), "fork：GRPO 补丁的 CPU 测试", "`fork/dev test patches`"],
-        [tick("fork/experimental/tests/"), "fork：实验训练器", "`fork/dev test experimental`"],
-        [tick("fork/native/tests/"), "fork：编译进上游测试可执行文件的 C++ 用例", "`fork/dev test native`（GPU 主机）"],
-        [tick("fork/native/openmp-contract/"), "fork：OpenMP 接线测试", "`fork/dev test openmp`"],
+        [tick("tests/"), "上游 pytest"],
+        [tick("csrc/src/testing/"), "上游 C++（Catch2/CTest）与服务端 Python"],
+        [tick("fork/patches/tests/"), "fork：GRPO 补丁的 CPU 测试"],
+        [tick("fork/experimental/tests/"), "fork：实验训练器"],
+        [tick("fork/native/tests/"), "fork：编译进上游测试可执行文件的 C++ 用例"],
+        [tick("fork/native/openmp-contract/"), "fork：OpenMP 接线测试"],
     ]
-    out += ["## 测试树与命令\n\n", table(["位置", "内容", "命令"], rows), "\n"]
+    out += ["## 测试树\n\n", table(["位置", "内容"], rows), "\n"]
+    out.append("运行它们的命令见 [build-and-release.md 的“测试命令”](../build-and-release.md#测试命令)。\n\n")
 
-    markers = re.findall(r'addinivalue_line\(\s*"markers",\s*"([^"]+)"', text("tests/conftest.py"))
+    markers = re.findall(r'addinivalue_line\(\s*"markers",\s*"([^"]+)"', required("tests/conftest.py"))
     out.append("## pytest 标记\n\n")
     out.append("定义在 `tests/conftest.py`。`--no-gpu` 跳过 gpu 用例，`--slow` 才运行 slow 用例。\n\n")
     out += ["".join(f"- `{m.split(':')[0]}`：{m.split(':', 1)[1].strip()}\n" for m in markers), "\n"]
@@ -623,25 +529,12 @@ def tests_map():
     rows = []
     for group in sorted(groups):
         files = groups[group]
-        tests = sum(len(re.findall(r"^\s*(?:async\s+)?def test_", text(f), re.M)) for f in files)
         gpu = sum(bool(re.search(r"pytest\.mark\.gpu|pytestmark\s*=.*\bgpu\b", text(f))) for f in files)
         slow = sum(bool(re.search(r"pytest\.mark\.slow|pytestmark\s*=.*\bslow\b", text(f))) for f in files)
-        env = sorted({v for f in files for v in re.findall(r"\bSUROGATE_[A-Z0-9_]+\b", text(f))})
-        rows.append(
-            [
-                tick(group + "/" if group != "tests" else "tests/*.py"),
-                len(files),
-                tests,
-                gpu,
-                slow,
-                " ".join(tick(v) for v in env) or "—",
-            ]
-        )
+        rows.append([tick(group + "/" if group != "tests" else "tests/*.py"), len(files), gpu, slow])
     out.append("## `tests/` 各目录\n\n")
-    out.append(
-        "“测试函数”按 `def test_` 计数（参数化展开前）；gpu、slow 两列是含相应标记的文件数；最后一列是测试读取的 `SUROGATE_*` 环境变量。\n\n"
-    )
-    out += [table(["目录", "测试文件", "测试函数", "gpu", "slow", "环境变量"], rows), "\n"]
+    out.append("gpu、slow 两列是含相应标记的测试文件数。\n\n")
+    out += [table(["目录", "测试文件", "gpu", "slow"], rows), "\n"]
 
     serve_py = [f for f in FILES if f.startswith("csrc/src/testing/serve/") and f.endswith(".py")]
     runners = [
@@ -695,7 +588,7 @@ def docs_map():
 
 def ledger_readme():
     ledger = tomllib.loads(text("fork/patches/ledger.toml"))
-    out = ["# fork 补丁台账\n\n", NOTICE]
+    out = ["# fork 补丁 ledger\n\n", NOTICE]
     out.append(
         "本页由 [ledger.toml](ledger.toml) 生成，ledger 是 fork 与上游差异的唯一记录。"
         "改动 ledger 后运行 `fork/dev map`；`python3 -I fork/tools/check_divergence.py --strict` 检查 ledger 与实际差异一致。\n\n"

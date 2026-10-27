@@ -34,6 +34,9 @@ safetensors
 compressed-tensors
 gguf
 # Imported by tests or by surogate modules but not declared:
+# triton comes with the CUDA torch wheels but not with torch==2.11.0+cpu; keep it at the version
+# PyPI torch 2.11.0 requires on Linux (tests/test_triton_compiler.py runs on CPU).
+triton==3.6.0
 pytest
 pytest-timeout
 pytest-asyncio

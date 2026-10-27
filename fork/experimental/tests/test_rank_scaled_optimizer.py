@@ -9,7 +9,6 @@ import math
 import numpy as np
 import pytest
 import torch
-
 from surogate.experimental.train import optim as optim_module
 from surogate.experimental.train.optim import RankScaledAdamW
 

@@ -42,29 +42,15 @@ git diff -U0 upstream/main -- csrc/CMakeLists.txt   # 只有一个 hunk，恰好
 
 ## 运行 OpenMP 接线测试
 
-在仓库根目录执行（不需要 GPU、CUDA 编译器或 CUDA 头文件）：
-
-```bash
-cmake -S fork/native/openmp-contract -B build/fork-openmp
-cmake --build build/fork-openmp
-ctest --test-dir build/fork-openmp --output-on-failure
-```
-
-测试用 `surogate_enable_training_openmp()` 构建一个主机共享库，检查它确实以两个 worker 运行，并得到与串行参考完全一致的整数结果。如果运行时把线程上限设为 1（例如 `OMP_THREAD_LIMIT=1`），测试以退出码 77 报告跳过，ctest 将其列为 Skipped；`OMP_NUM_THREADS` 不影响结果，因为测试用 `num_threads(2)` 显式请求两个线程。构建目录 `build/fork-openmp` 已被根目录的 `.gitignore` 忽略。
+运行 `fork/dev test openmp`（不需要 GPU、CUDA 编译器或 CUDA 头文件）。测试用 `surogate_enable_training_openmp()` 构建一个主机共享库，检查它确实以两个 worker 运行，并得到与串行参考完全一致的整数结果。如果运行时把线程上限设为 1（例如 `OMP_THREAD_LIMIT=1`），测试以退出码 77 报告跳过，ctest 将其列为 Skipped；`OMP_NUM_THREADS` 不影响结果，因为测试用 `num_threads(2)` 显式请求两个线程。构建目录 `build/fork-openmp` 已被根目录的 `.gitignore` 忽略。
 
 ## 运行 fork 的 C++ 测试
 
 `tests/` 中的用例原先追加在上游测试文件里，现在单独成文件，但仍编译进同一个测试可执行文件，所以测试名和 ctest 条目都没有变化。辅助函数（例如 `require_cuda`、`DeviceTensor`）是上游测试文件中同名函数的副本，放在匿名命名空间里，避免与上游副本冲突。
 
-这些测试需要 CUDA 构建环境，涉及 GPU 的用例在没有 GPU 时跳过。配置时沿用 `make configure` 的参数（CUDA、NCCL 等），再加上 `-DBUILD_TESTS=ON`：
+这些测试需要 CUDA 构建环境，涉及 GPU 的用例在没有 GPU 时跳过。在 GPU 主机上运行 `fork/dev test native`：它沿用 `make configure` 的参数（CUDA、NCCL 等）并加上 `-DBUILD_TESTS=ON` 配置 `csrc/build`，再构建并用 ctest 运行这两个可执行文件（以及 `dsl-weight-loader-tests`）。
 
-```bash
-cmake -S csrc -B csrc/build -DBUILD_TESTS=ON
-cmake --build csrc/build --target dsl-run-state-tests integration-tests
-ctest --test-dir csrc/build -R '^(dsl-run-state-tests|integration-tests)$' --output-on-failure
-```
-
-只运行 fork 的用例（这些标签只出现在 fork 的测试中）：
+之后只运行 fork 的用例（这些标签只出现在 fork 的测试中）：
 
 ```bash
 csrc/build/dsl-run-state-tests '[dispatch-pp]'

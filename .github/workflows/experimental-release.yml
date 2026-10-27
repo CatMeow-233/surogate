@@ -25,26 +25,23 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
-      - name: Install build tool and CPU test dependencies
-        run: |
-          python -m pip install 'uv==0.12.23'
-          uv --no-config venv --python 3.12 .venv-experimental-release
-          uv --no-config pip install --python .venv-experimental-release/bin/python 'torch==2.11.0+cpu' --index-url https://download.pytorch.org/whl/cpu
-          uv --no-config pip install --python .venv-experimental-release/bin/python -r fork/experimental/requirements-ci.txt
+      - run: python -m pip install 'uv==0.12.23'
+      # The same fork/dev commands as fork-ci's experimental job: CPU torch and
+      # requirements-ci.txt in fork/.venv-experimental, tests run from fork/experimental.
       - name: Run experimental CPU tests
-        run: cd fork/experimental && ../../.venv-experimental-release/bin/python -m pytest -q tests
+        run: fork/dev test experimental
       - name: Build the standalone wheel, sdist, and examples
         run: |
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
-            python fork/experimental/build_release.py --tag "$RELEASE_TAG"
+            fork/dev release experimental --tag "$RELEASE_TAG"
           else
-            python fork/experimental/build_release.py
+            fork/dev release experimental
           fi
       - name: Check the installed package outside the checkout
         run: |
-          uv --no-config pip install --python .venv-experimental-release/bin/python --no-deps build/experimental-release/artifacts/*.whl
-          uv --no-config pip check --python .venv-experimental-release/bin/python
-          interpreter="$GITHUB_WORKSPACE/.venv-experimental-release/bin/python"
+          uv --no-config pip install --python fork/.venv-experimental/bin/python --no-deps build/experimental-release/artifacts/*.whl
+          uv --no-config pip check --python fork/.venv-experimental/bin/python
+          interpreter="$GITHUB_WORKSPACE/fork/.venv-experimental/bin/python"
           archive="$GITHUB_WORKSPACE/build/experimental-release/artifacts/experimental-examples.zip"
           cd "$RUNNER_TEMP"
           "$interpreter" -m zipfile -e "$archive" experimental-examples

@@ -7,7 +7,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from surogate.experimental.train.config import TrainConfig, load_config
 
 

@@ -1,7 +1,7 @@
 # Fork ledger: the single record of how this fork differs from upstream.
 #
 # fork/tools/check_divergence.py compares it with
-# `git diff -M --name-status $(git merge-base HEAD upstream/main) HEAD`:
+# `git diff -M --name-status $(git merge-base HEAD upstream/main)` (the working tree):
 #   A (added)     must be under an [owned] prefix or listed in [owned].files
 #   M (modified)  must be listed in the files of some [[topic]]
 #   D (deleted)   must be listed in [[deletion]]

@@ -6,50 +6,50 @@
 
 ## 子包
 
-| 子包 | .py 文件 | 行数 | 作用 |
-|---|---|---|---|
-| `surogate` | 2 | 34 | 包根：`__init__.py` 与 setuptools-scm 生成的 `_version.py` |
-| `surogate/_fork` | 3 | 78 | fork：GRPO 补丁调用的代码，随原生 wheel 发布（ledger T6、T7） |
-| `surogate/cli` | 20 | 2444 | `surogate` 命令及其子命令入口 |
-| `surogate/core` | 38 | 7230 | 共享基础：配置、数据集、模型与分词器加载 |
-| `surogate/debug` | 16 | 4353 | 调试与诊断（`surogate debug`） |
-| `surogate/distill` | 4 | 1059 | 蒸馏数据采集（`surogate distill-capture`） |
-| `surogate/dpo` | 4 | 872 | DPO 训练 |
-| `surogate/dsl` | 92 | 32164 | 模型 DSL：模块定义与到原生 IR 的编译 |
-| `surogate/grpo` | 59 | 13957 | GRPO 强化学习：训练器、编排器、rollout 传输 |
-| `surogate/kernels` | 19 | 5427 | Python 侧 GPU kernel（Triton、CuTe） |
-| `surogate/regression` | 2 | 964 | 回归基线运行器（`make regression-*`） |
-| `surogate/rewards` | 2 | 654 | 奖励函数 |
-| `surogate/serve` | 244 | 49667 | 服务端 Python：`surogate serve` 启动器、权重转换、artifact、维护工具 |
-| `surogate/train` | 24 | 8397 | SFT 与预训练训练循环 |
-| `surogate/transplant` | 2 | 239 | 分词器移植（`surogate transplant-tokenizer`） |
-| `surogate/utils` | 22 | 3452 | 通用工具：日志、系统信息、adapter 合并等 |
-| 合计 | 553 | 130991 |  |
+| 子包 | .py 文件 | 作用 |
+|---|---|---|
+| `surogate` | 2 | 包根：`__init__.py` 与 setuptools-scm 生成的 `_version.py` |
+| `surogate/_fork` | 3 | fork：GRPO 补丁调用的代码，随原生 wheel 发布（ledger T6、T7） |
+| `surogate/cli` | 20 | `surogate` 命令及其子命令入口 |
+| `surogate/core` | 38 | 共享基础：配置、数据集、模型与分词器加载 |
+| `surogate/debug` | 16 | 调试与诊断（`surogate debug`） |
+| `surogate/distill` | 4 | 蒸馏数据采集（`surogate distill-capture`） |
+| `surogate/dpo` | 4 | DPO 训练 |
+| `surogate/dsl` | 92 | 模型 DSL：模块定义与到原生 IR 的编译 |
+| `surogate/grpo` | 59 | GRPO 强化学习：训练器、编排器、rollout 传输 |
+| `surogate/kernels` | 19 | Python 侧 GPU kernel（Triton、CuTe） |
+| `surogate/regression` | 2 | 回归基线运行器（`make regression-*`） |
+| `surogate/rewards` | 2 | 奖励函数 |
+| `surogate/serve` | 244 | 服务端 Python：`surogate serve` 启动器、权重转换、artifact、维护工具 |
+| `surogate/train` | 24 | SFT 与预训练训练循环 |
+| `surogate/transplant` | 2 | 分词器移植（`surogate transplant-tokenizer`） |
+| `surogate/utils` | 22 | 通用工具：日志、系统信息、adapter 合并等 |
+| 合计 | 553 |  |
 
 ## 命令行入口
 
 `pyproject.toml` 只定义一个脚本 `surogate = surogate.cli.main:cli_main`。`serve` 与 `jackalope` 在 `cli/main.py` 的模块级被拦截；其余子命令按 `COMMAND_MAPPING` 用 `runpy` 运行对应模块。最后一列是该模块导入的其他子包（不含 cli、utils）。
 
-| 子命令 | 模块 | 位置 | 导入的子包 / 说明 |
-|---|---|---|---|
-| jackalope | `surogate.cli._jackalope.maybe_exec_jackalope` | `surogate/cli/main.py:34` | 在 argparse 之前拦截，`os.execv` 替换当前进程 |
-| serve | `surogate.cli.serve.maybe_exec_serve` | `surogate/cli/main.py:41` | 在 argparse 之前拦截，`os.execv` 替换当前进程 |
-| sft | `surogate.cli.sft` | `surogate/cli/main.py:50` | core、train |
-| dpo | `surogate.cli.dpo` | `surogate/cli/main.py:51` | core、dpo |
-| pt | `surogate.cli.pt` | `surogate/cli/main.py:52` | core、train |
-| grpo | `surogate.cli.grpo` | `surogate/cli/main.py:53` | core、grpo |
-| grpo-colocate | `surogate.cli.grpo_colocate` | `surogate/cli/main.py:54` | core、grpo |
-| grpo-train | `surogate.cli.grpo_train` | `surogate/cli/main.py:55` | core、grpo |
-| grpo-infer | `surogate.cli.grpo_infer` | `surogate/cli/main.py:56` | core、grpo |
-| grpo-orch | `surogate.cli.grpo_orch` | `surogate/cli/main.py:57` | core、grpo |
-| vf-init | `surogate.cli.vf_init` | `surogate/cli/main.py:58` | — |
-| vf-eval | `surogate.cli.vf_eval` | `surogate/cli/main.py:59` | — |
-| tokenize | `surogate.cli.tokenize_cmd` | `surogate/cli/main.py:60` | core、train |
-| distill-capture | `surogate.cli.distill_capture` | `surogate/cli/main.py:61` | core、distill |
-| transplant-tokenizer | `surogate.cli.transplant` | `surogate/cli/main.py:62` | transplant |
-| merge | `surogate.cli.merge` | `surogate/cli/main.py:63` | — |
-| quantize | `surogate.cli.quantize` | `surogate/cli/main.py:64` | — |
-| debug | `surogate.cli.debug` | `surogate/cli/main.py:65` | debug |
+| 子命令 | 模块 | 导入的子包 / 说明 |
+|---|---|---|
+| jackalope | `surogate.cli._jackalope.maybe_exec_jackalope` | 在 argparse 之前拦截，`os.execv` 替换当前进程 |
+| serve | `surogate.cli.serve.maybe_exec_serve` | 在 argparse 之前拦截，`os.execv` 替换当前进程 |
+| sft | `surogate.cli.sft` | core、train |
+| dpo | `surogate.cli.dpo` | core、dpo |
+| pt | `surogate.cli.pt` | core、train |
+| grpo | `surogate.cli.grpo` | core、grpo |
+| grpo-colocate | `surogate.cli.grpo_colocate` | core、grpo |
+| grpo-train | `surogate.cli.grpo_train` | core、grpo |
+| grpo-infer | `surogate.cli.grpo_infer` | core、grpo |
+| grpo-orch | `surogate.cli.grpo_orch` | core、grpo |
+| vf-init | `surogate.cli.vf_init` | — |
+| vf-eval | `surogate.cli.vf_eval` | — |
+| tokenize | `surogate.cli.tokenize_cmd` | core、train |
+| distill-capture | `surogate.cli.distill_capture` | core、distill |
+| transplant-tokenizer | `surogate.cli.transplant` | transplant |
+| merge | `surogate.cli.merge` | — |
+| quantize | `surogate.cli.quantize` | — |
+| debug | `surogate.cli.debug` | debug |
 
 ## `python -m` 入口
 
@@ -64,71 +64,71 @@
 
 ## 子包之间的导入
 
-每行统计从一个子包导入另一个子包的模块数，函数内的延迟导入也计入；最后一列只计模块级导入。`_surogate` 与 `_surogate_serve` 是原生扩展模块。
+每行表示前一个子包中至少有一个模块导入后一个子包；“仅函数内”表示所有这类导入都写在函数内部（延迟导入）。`_surogate` 与 `_surogate_serve` 是原生扩展模块。
 
-| 从 | 到 | 导入模块数 | 其中模块级 |
-|---|---|---|---|
-| _fork | grpo | 1 | 1 |
-| _fork | utils | 1 | 1 |
-| cli | (包根) | 1 | 0 |
-| cli | core | 10 | 10 |
-| cli | debug | 1 | 0 |
-| cli | distill | 1 | 1 |
-| cli | dpo | 1 | 1 |
-| cli | grpo | 5 | 5 |
-| cli | serve | 1 | 0 |
-| cli | train | 3 | 3 |
-| cli | transplant | 1 | 1 |
-| cli | utils | 17 | 17 |
-| core | (包根) | 1 | 1 |
-| core | _surogate | 1 | 1 |
-| core | utils | 24 | 24 |
-| debug | (包根) | 3 | 0 |
-| debug | _surogate | 3 | 0 |
-| debug | core | 1 | 0 |
-| debug | dsl | 2 | 0 |
-| debug | train | 4 | 0 |
-| debug | utils | 12 | 11 |
-| distill | core | 1 | 1 |
-| distill | train | 1 | 0 |
-| distill | utils | 1 | 1 |
-| dpo | (包根) | 1 | 1 |
-| dpo | _surogate | 1 | 1 |
-| dpo | core | 2 | 2 |
-| dpo | dsl | 1 | 0 |
-| dpo | kernels | 1 | 0 |
-| dpo | train | 1 | 1 |
-| dpo | utils | 3 | 3 |
-| grpo | (包根) | 2 | 1 |
-| grpo | _fork | 1 | 0 |
-| grpo | _surogate | 1 | 1 |
-| grpo | _surogate_serve | 1 | 0 |
-| grpo | core | 25 | 24 |
-| grpo | dsl | 2 | 0 |
-| grpo | kernels | 1 | 0 |
-| grpo | rewards | 1 | 1 |
-| grpo | serve | 1 | 1 |
-| grpo | train | 1 | 1 |
-| grpo | utils | 19 | 19 |
-| rewards | core | 1 | 1 |
-| rewards | grpo | 1 | 1 |
-| serve | (包根) | 1 | 0 |
-| serve | _surogate_serve | 1 | 0 |
-| serve | cli | 1 | 0 |
-| serve | core | 4 | 4 |
-| serve | dsl | 7 | 2 |
-| train | (包根) | 5 | 2 |
-| train | _surogate | 5 | 3 |
-| train | _surogate_serve | 1 | 0 |
-| train | core | 7 | 7 |
-| train | distill | 1 | 0 |
-| train | dsl | 2 | 0 |
-| train | kernels | 2 | 0 |
-| train | serve | 1 | 0 |
-| train | utils | 6 | 6 |
-| transplant | utils | 1 | 1 |
-| utils | (包根) | 1 | 0 |
-| utils | _surogate | 1 | 0 |
+| 从 | 到 | 导入方式 |
+|---|---|---|
+| _fork | grpo | 模块级 |
+| _fork | utils | 模块级 |
+| cli | (包根) | 仅函数内 |
+| cli | core | 模块级 |
+| cli | debug | 仅函数内 |
+| cli | distill | 模块级 |
+| cli | dpo | 模块级 |
+| cli | grpo | 模块级 |
+| cli | serve | 仅函数内 |
+| cli | train | 模块级 |
+| cli | transplant | 模块级 |
+| cli | utils | 模块级 |
+| core | (包根) | 模块级 |
+| core | _surogate | 模块级 |
+| core | utils | 模块级 |
+| debug | (包根) | 仅函数内 |
+| debug | _surogate | 仅函数内 |
+| debug | core | 仅函数内 |
+| debug | dsl | 仅函数内 |
+| debug | train | 仅函数内 |
+| debug | utils | 模块级 |
+| distill | core | 模块级 |
+| distill | train | 仅函数内 |
+| distill | utils | 模块级 |
+| dpo | (包根) | 模块级 |
+| dpo | _surogate | 模块级 |
+| dpo | core | 模块级 |
+| dpo | dsl | 仅函数内 |
+| dpo | kernels | 仅函数内 |
+| dpo | train | 模块级 |
+| dpo | utils | 模块级 |
+| grpo | (包根) | 模块级 |
+| grpo | _fork | 仅函数内 |
+| grpo | _surogate | 模块级 |
+| grpo | _surogate_serve | 仅函数内 |
+| grpo | core | 模块级 |
+| grpo | dsl | 仅函数内 |
+| grpo | kernels | 仅函数内 |
+| grpo | rewards | 模块级 |
+| grpo | serve | 模块级 |
+| grpo | train | 模块级 |
+| grpo | utils | 模块级 |
+| rewards | core | 模块级 |
+| rewards | grpo | 模块级 |
+| serve | (包根) | 仅函数内 |
+| serve | _surogate_serve | 仅函数内 |
+| serve | cli | 仅函数内 |
+| serve | core | 模块级 |
+| serve | dsl | 模块级 |
+| train | (包根) | 模块级 |
+| train | _surogate | 模块级 |
+| train | _surogate_serve | 仅函数内 |
+| train | core | 模块级 |
+| train | distill | 仅函数内 |
+| train | dsl | 仅函数内 |
+| train | kernels | 仅函数内 |
+| train | serve | 仅函数内 |
+| train | utils | 模块级 |
+| transplant | utils | 模块级 |
+| utils | (包根) | 仅函数内 |
+| utils | _surogate | 仅函数内 |
 
 互相导入的子包：_fork ↔ grpo、cli ↔ serve、distill ↔ train、grpo ↔ rewards。
 
@@ -136,86 +136,46 @@
 
 用 f-string 拼出模块名的 `importlib.import_module` 调用，静态导入图看不到这些依赖。
 
-| 模块名模式 | 位置 |
+| 模块名模式 | 文件 |
 |---|---|
-| `{__package__}.exports.{modules[profile]}` | `surogate/serve/convert/qwen3_5/convert.py:562` |
-| `surogate.serve.convert.{target_key}.inventory` | `surogate/serve/ingest.py:589` |
-| `surogate.serve.convert.{target_key}.recipe` | `surogate/serve/ingest.py:591` |
-| `surogate.serve.convert.{target}.inventory` | `surogate/serve/tools/generate/check_contract.py:238` |
-| `surogate.serve.convert.{target}.inventory` | `surogate/serve/tools/probe/repack_plan.py:55` |
-| `surogate.serve.convert.{target}.recipe` | `surogate/serve/tools/probe/repack_plan.py:55` |
-| `surogate.serve.convert.{target}.convert` | `surogate/serve/tools/probe/repack_plan.py:56` |
+| `{__package__}.exports.{modules[profile]}` | `surogate/serve/convert/qwen3_5/convert.py` |
+| `surogate.serve.convert.{target_key}.inventory` | `surogate/serve/ingest.py` |
+| `surogate.serve.convert.{target_key}.recipe` | `surogate/serve/ingest.py` |
+| `surogate.serve.convert.{target}.inventory` | `surogate/serve/tools/generate/check_contract.py` |
+| `surogate.serve.convert.{target}.convert` | `surogate/serve/tools/probe/repack_plan.py` |
+| `surogate.serve.convert.{target}.inventory` | `surogate/serve/tools/probe/repack_plan.py` |
+| `surogate.serve.convert.{target}.recipe` | `surogate/serve/tools/probe/repack_plan.py` |
 
 ## 依赖仓库目录深度的路径
 
 按 `__file__` 向上数目录的代码；移动这些文件会改变它们找到的位置。
 
-| 表达式 | 位置 |
+| 表达式 | 文件 |
 |---|---|
-| `Path(__file__).resolve().parent.parent.parent` | `surogate/cli/serve.py:81` |
-| `Path(__file__).resolve().parent.parent` | `surogate/cli/serve.py:221` |
-| `Path(__file__).resolve().parents[2]` | `surogate/regression/baseline_runner.py:25` |
-| `Path(__file__).resolve().parents[2]` | `surogate/serve/convert/common/draft_head.py:30` |
-| `Path(__file__).resolve().parents[4]` | `surogate/serve/convert/gemma3/convert.py:583` |
-| `Path(__file__).resolve().parents[4]` | `surogate/serve/convert/gemma4/convert.py:212` |
-| `Path(__file__).resolve().parents[4]` | `surogate/serve/convert/gemma4_e/convert.py:212` |
-| `Path(__file__).resolve().parents[4]` | `surogate/serve/convert/gemma4_moe/convert.py:199` |
-| `Path(__file__).resolve().parents[4]` | `surogate/serve/convert/lfm2/convert.py:152` |
-| `Path(__file__).resolve().parents[4]` | `surogate/serve/convert/llama/convert.py:382` |
-| `Path(__file__).resolve().parents[4]` | `surogate/serve/convert/qwen3/convert.py:310` |
-| `Path(__file__).resolve().parents[2]` | `surogate/serve/convert/qwen3_5/convert.py:64` |
-| `Path(__file__).resolve().parents[2]` | `surogate/serve/convert/qwen3_5/draft_head.py:29` |
-| `Path(__file__).resolve().parents[2]` | `surogate/serve/convert/qwen3_5/verify.py:43` |
-| `Path(__file__).resolve().parents[2]` | `surogate/serve/convert/qwen3_5_moe/convert.py:83` |
-| `Path(__file__).resolve().parents[4]` | `surogate/serve/convert/qwen3_moe/convert.py:217` |
-| `Path(__file__).resolve().parents[4]` | `surogate/serve/convert/qwen3_vl/convert.py:72` |
-| `Path(__file__).resolve().parents[4]` | `surogate/serve/convert/spark2_5/convert.py:116` |
-| `Path(__file__).resolve().parent.parent.parent` | `surogate/serve/engine.py:27` |
-| `Path(__file__).resolve().parent.parent.parent` | `surogate/serve/ingest.py:42` |
-| `Path(__file__).resolve().parents[2]` | `surogate/serve/tools/bench/make_bench_corpus.py:304` |
-| `Path(__file__).resolve().parents[2]` | `surogate/serve/tools/bench/run_serve_concurrency.py:23` |
-| `Path(__file__).resolve().parents[2]` | `surogate/serve/tools/bench/run_serve_corpus.py:21` |
-| `Path(__file__).resolve().parents[2]` | `surogate/serve/tools/bench/run_sinfer_bench_matrix.py:30` |
-| `Path(__file__).resolve().parents[4]` | `surogate/serve/tools/generate/check_contract.py:273` |
-| `Path(__file__).resolve().parents[4]` | `surogate/serve/tools/generate/check_roundtrip.py:118` |
-| `Path(__file__).resolve().parents[4]` | `surogate/serve/tools/generate/rejected_text_template_check.py:7` |
-
-## 疑似无人使用的模块
-
-没有任何已跟踪的 Python 文件导入、按字符串引用或按路径加载，也不是 `python -m` 入口的模块。只作提示：fork 不删除上游代码。
-
-| 文件 | 行数 |
-|---|---|
-| `surogate/core/datasets/progress.py` | 50 |
-| `surogate/core/hub/model_info.py` | 247 |
-| `surogate/core/model/loss_scale/loss_scale.py` | 83 |
-| `surogate/debug/_stub.py` | 55 |
-| `surogate/dsl/moe.py` | 108 |
-| `surogate/dsl/norms.py` | 67 |
-| `surogate/dsl/quantization.py` | 145 |
-| `surogate/grpo/orchestrator/env_server/env_server.py` | 34 |
-| `surogate/grpo/orchestrator/envs.py` | 29 |
-| `surogate/kernels/cute/cute_rmsnorm.py` | 235 |
-| `surogate/serve/tools/bench/agentic_long_bench.py` | 343 |
-| `surogate/serve/tools/generate/from_dsl.py` | 279 |
-| `surogate/serve/tools/generate/rejected_text_template.py` | 88 |
-| `surogate/serve/tools/generate/target_spec.py` | 255 |
-| `surogate/serve/tools/parity/gemma4/fixture.py` | 70 |
-| `surogate/serve/tools/parity/gemma4/fixture_e.py` | 89 |
-| `surogate/serve/tools/parity/gemma4/fixture_moe.py` | 116 |
-| `surogate/serve/tools/parity/qwen4exp/check_rows.py` | 47 |
-| `surogate/serve/tools/parity/qwen4exp/compare_dumps.py` | 26 |
-| `surogate/serve/tools/parity/qwen4exp/compare_stage.py` | 23 |
-| `surogate/serve/tools/parity/qwen4exp/gdn_reference.py` | 87 |
-| `surogate/serve/tools/parity/qwen4exp/hc_reference.py` | 43 |
-| `surogate/serve/tools/parity/qwen4exp/mlp_reference.py` | 53 |
-| `surogate/serve/tools/parity/qwen4exp/patch_conv.py` | 46 |
-| `surogate/serve/tools/parity/qwen4exp/ple_reference.py` | 58 |
-| `surogate/serve/tools/parity/qwen4exp/verify_flash_artifact.py` | 157 |
-| `surogate/serve/tools/probe/coherence.py` | 70 |
-| `surogate/serve/tools/probe/tput.py` | 47 |
-| `surogate/serve/tools/probe/ttft.py` | 66 |
-| `surogate/utils/env.py` | 29 |
-| `surogate/utils/hashing.py` | 39 |
-| `surogate/utils/huggingface.py` | 400 |
-| `surogate/utils/net.py` | 21 |
+| `Path(__file__).resolve().parent.parent` | `surogate/cli/serve.py` |
+| `Path(__file__).resolve().parent.parent.parent` | `surogate/cli/serve.py` |
+| `Path(__file__).resolve().parents[2]` | `surogate/regression/baseline_runner.py` |
+| `Path(__file__).resolve().parents[2]` | `surogate/serve/convert/common/draft_head.py` |
+| `Path(__file__).resolve().parents[4]` | `surogate/serve/convert/gemma3/convert.py` |
+| `Path(__file__).resolve().parents[4]` | `surogate/serve/convert/gemma4/convert.py` |
+| `Path(__file__).resolve().parents[4]` | `surogate/serve/convert/gemma4_e/convert.py` |
+| `Path(__file__).resolve().parents[4]` | `surogate/serve/convert/gemma4_moe/convert.py` |
+| `Path(__file__).resolve().parents[4]` | `surogate/serve/convert/lfm2/convert.py` |
+| `Path(__file__).resolve().parents[4]` | `surogate/serve/convert/llama/convert.py` |
+| `Path(__file__).resolve().parents[4]` | `surogate/serve/convert/qwen3/convert.py` |
+| `Path(__file__).resolve().parents[2]` | `surogate/serve/convert/qwen3_5/convert.py` |
+| `Path(__file__).resolve().parents[2]` | `surogate/serve/convert/qwen3_5/draft_head.py` |
+| `Path(__file__).resolve().parents[2]` | `surogate/serve/convert/qwen3_5/verify.py` |
+| `Path(__file__).resolve().parents[2]` | `surogate/serve/convert/qwen3_5_moe/convert.py` |
+| `Path(__file__).resolve().parents[4]` | `surogate/serve/convert/qwen3_moe/convert.py` |
+| `Path(__file__).resolve().parents[4]` | `surogate/serve/convert/qwen3_vl/convert.py` |
+| `Path(__file__).resolve().parents[4]` | `surogate/serve/convert/spark2_5/convert.py` |
+| `Path(__file__).resolve().parent.parent.parent` | `surogate/serve/engine.py` |
+| `Path(__file__).resolve().parent.parent.parent` | `surogate/serve/ingest.py` |
+| `Path(__file__).resolve().parents[2]` | `surogate/serve/tools/bench/make_bench_corpus.py` |
+| `Path(__file__).resolve().parents[2]` | `surogate/serve/tools/bench/run_serve_concurrency.py` |
+| `Path(__file__).resolve().parents[2]` | `surogate/serve/tools/bench/run_serve_corpus.py` |
+| `Path(__file__).resolve().parents[2]` | `surogate/serve/tools/bench/run_sinfer_bench_matrix.py` |
+| `Path(__file__).resolve().parents[4]` | `surogate/serve/tools/generate/check_contract.py` |
+| `Path(__file__).resolve().parents[4]` | `surogate/serve/tools/generate/check_roundtrip.py` |
+| `Path(__file__).resolve().parents[4]` | `surogate/serve/tools/generate/rejected_text_template_check.py` |

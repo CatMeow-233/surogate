@@ -9,8 +9,9 @@ Fork-owned docs (fork/**, AGENTS.md, docs/experimental/**, docs/upstream-notes/R
 checked strictly: every broken link fails, and so does a repository path that does not exist,
 whether it is written in backticks or used in a fenced code block. A path counts as a
 repository path when its first component is a tracked top-level entry or it resolves next to
-the doc; git-ignored paths (build outputs, venvs) are allowed. `path:N` and `path:N-M` must stay
-within the file.
+the doc; git-ignored paths (build outputs, venvs) are allowed. In `path:N` only the path is
+checked: line numbers drift with every upstream edit, so fork docs name symbols instead, and a
+doc that keeps line numbers states the upstream commit they refer to.
 
 Upstream docs fail only on broken links that are not listed in fork/tools/doc_links_baseline.txt.
 A sync refresh commit runs --update-baseline after reviewing the new entries.
@@ -53,17 +54,11 @@ def git_lines(*args):
 TRACKED = set(git_lines("ls-files"))
 DIRS = {"/".join(p.split("/")[:i]) for p in TRACKED for i in range(1, p.count("/") + 1)}
 TOP = {p.split("/")[0] for p in TRACKED}
-_line_counts, _anchors = {}, {}
+_anchors = {}
 
 
 def exists(path):
     return path in TRACKED or path in DIRS or path == "."
-
-
-def line_count(path):
-    if path not in _line_counts:
-        _line_counts[path] = (ROOT / path).read_bytes().count(b"\n")
-    return _line_counts[path]
 
 
 def slug(heading):
@@ -120,21 +115,15 @@ def repo_path_problem(doc, token, doc_relative=True):
 
     Paths resolve from the repository root and, when doc_relative, from the doc's directory.
     """
-    token = re.sub(r"::.*$", "", token)  # pytest node ids
-    line_ref = LINE_REF.search(token)
-    if line_ref:
-        token = token[: line_ref.start()]
+    token = LINE_REF.sub("", re.sub(r"::.*$", "", token))  # pytest node ids, `path:N`
     for path in expand(token.removeprefix("./")):
         candidates = [os.path.normpath(path)]
         if doc_relative:
             candidates.append(os.path.normpath(os.path.join(os.path.dirname(doc), path)))
         hits = [c for c in candidates if exists(c) or ("*" in c and any(fnmatch.fnmatch(t, c) for t in TRACKED))]
-        if not hits:
-            if path.split("/")[0] in TOP or (doc_relative and path.startswith("..")):
-                return f"missing {path}"
-            continue  # not a repository path, e.g. a path inside a build output or an archive
-        if line_ref and hits[0] in TRACKED and int(line_ref.group(2) or line_ref.group(1)) > line_count(hits[0]):
-            return f"{path} has {line_count(hits[0])} lines, fewer than {line_ref.group(0)[1:]}"
+        if not hits and (path.split("/")[0] in TOP or (doc_relative and path.startswith(".."))):
+            return f"missing {path}"
+        # Otherwise not a repository path, e.g. a path inside a build output or an archive.
     return None
 
 
