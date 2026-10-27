@@ -99,10 +99,9 @@ files = [
     "csrc/src/runtime/executor/graph_executor.cpp",
     "csrc/src/runtime/executor/graph_executor_utils.h",
     "csrc/src/runtime/executor/graph_executor_utils.cpp",
-    "csrc/src/testing/runtime/test-run-state-arena.cpp",
 ]
-fork_files = []
-tests = ["csrc/src/testing/runtime/test-run-state-arena.cpp"]
+fork_files = ["fork/native/tests/test-fork-dispatch-pp-host-copy.cpp"]
+tests = ["fork/native/tests/test-fork-dispatch-pp-host-copy.cpp"]
 conflict_history = [
     "2026-10-27 reverse replay from b5af2f8e, conflict blocks at 90/30/14 days: py_train.cpp 1/0/0",
 ]
@@ -115,10 +114,9 @@ switch = "SUROGATE_FUSE_LORA_DX=1 (default off)"
 files = [
     "csrc/src/runtime/lora/lora_model_utils.h",
     "csrc/src/runtime/lora/lora_slice_dispatch.h",
-    "csrc/src/testing/kernels/test-qwen35-shared.cu",
 ]
-fork_files = []
-tests = ["csrc/src/testing/kernels/test-qwen35-shared.cu"]
+fork_files = ["fork/native/tests/test-fork-lora-fused-dx.cu"]
+tests = ["fork/native/tests/test-fork-lora-fused-dx.cu"]
 conflict_history = [
     "2026-10-27 reverse replay from b5af2f8e, conflict blocks at 90/30/14 days: none",
 ]
@@ -128,12 +126,12 @@ id = "T3"
 title = "MoE backward scratch and conditional zero-fill"
 commits = ["df81e9f7"]
 switch = "always on"
-files = [
-    "csrc/src/runtime/ops/moe_grouped_gemm.cpp",
-    "csrc/src/testing/kernels/test-moe-grouped-gemm.cu",
+files = ["csrc/src/runtime/ops/moe_grouped_gemm.cpp"]
+fork_files = [
+    "fork/native/include/surogate_fork/moe_weight_grad_policy.h",
+    "fork/native/tests/test-fork-moe-grouped-gemm.cu",
 ]
-fork_files = ["fork/native/include/surogate_fork/moe_weight_grad_policy.h"]
-tests = ["csrc/src/testing/kernels/test-moe-grouped-gemm.cu"]
+tests = ["fork/native/tests/test-fork-moe-grouped-gemm.cu"]
 conflict_history = [
     "2026-10-27 reverse replay from b5af2f8e, conflict blocks at 90/30/14 days: moe_grouped_gemm.cpp 2/0/0",
 ]
@@ -146,10 +144,9 @@ switch = "always on"
 files = [
     "csrc/src/recipes/fp8_hybrid/fp8_hybrid_recipe.cpp",
     "csrc/src/runtime/ops/matmul.cpp",
-    "csrc/src/testing/kernels/test-fp8-quant.cpp",
 ]
-fork_files = []
-tests = ["csrc/src/testing/kernels/test-fp8-quant.cpp"]
+fork_files = ["fork/native/tests/test-fork-fp8-quant.cpp"]
+tests = ["fork/native/tests/test-fork-fp8-quant.cpp"]
 conflict_history = [
     "2026-10-27 reverse replay from b5af2f8e, conflict blocks at 90/30/14 days: matmul.cpp 1/0/0",
 ]
@@ -160,7 +157,7 @@ title = "OpenMP for CPU training kernels"
 commits = ["9a6018f2"]
 switch = "always on (links OpenMP::OpenMP_CXX into surogate-common)"
 # csrc/CMakeLists.txt carries only the two-line hook into fork_native.cmake,
-# which also adds the fork include root that T3 uses.
+# which also adds the fork include root (T3) and attaches the T1-T4 tests.
 files = ["csrc/CMakeLists.txt"]
 fork_files = [
     "fork/native/cmake/fork_native.cmake",
