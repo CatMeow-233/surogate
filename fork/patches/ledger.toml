@@ -23,11 +23,6 @@ files = [
     ".github/workflows/experimental-release.yml",
     "docs/experimental/training.md",   # redirect stub: the 0.1.0a1-a3 wheels publish this URL
     "docs/upstream-notes/README.md",
-    "tests/grpo/test_batch_distribution.py",
-    "tests/grpo/test_inprocess_micro_batches.py",
-    "tests/grpo/test_microbatch_preparation.py",
-    "tests/grpo/test_packer_wait.py",
-    "tests/grpo/test_trainer_cycle_timing.py",
 ]
 
 # Upstream notes that land in the repository root are moved to `dest` at each
@@ -182,8 +177,8 @@ files = [
 ]
 fork_files = []
 tests = [
-    "tests/grpo/test_trainer_cycle_timing.py",
-    "tests/grpo/test_packer_wait.py",
+    "fork/patches/tests/grpo/test_trainer_cycle_timing.py",
+    "fork/patches/tests/grpo/test_packer_wait.py",
 ]
 conflict_history = [
     "2026-10-27 reverse replay from b5af2f8e, conflict blocks at 90/30/14 days: trainer.py 8/2/0 and packer.py 1/0/0 (both shared by T6-T8)",
@@ -200,7 +195,7 @@ files = [
     "surogate/grpo/trainer.py",
 ]
 fork_files = []
-tests = ["tests/grpo/test_inprocess_micro_batches.py"]
+tests = ["fork/patches/tests/grpo/test_inprocess_micro_batches.py"]
 conflict_history = [
     "2026-10-27 reverse replay from b5af2f8e, conflict blocks at 90/30/14 days: data.py 1/1/1; trainer.py and packer.py see T6",
 ]
@@ -216,8 +211,8 @@ files = [
 ]
 fork_files = []
 tests = [
-    "tests/grpo/test_batch_distribution.py",
-    "tests/grpo/test_microbatch_preparation.py",
+    "fork/patches/tests/grpo/test_batch_distribution.py",
+    "fork/patches/tests/grpo/test_microbatch_preparation.py",
 ]
 conflict_history = [
     "2026-10-27 reverse replay from b5af2f8e, conflict blocks at 90/30/14 days: batch.py 0/0/0; trainer.py see T6",

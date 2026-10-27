@@ -16,7 +16,6 @@ from surogate.grpo.transport import filesystem as filesystem_module
 from surogate.grpo.transport import setup_training_batch_sender
 from surogate.grpo.transport import zmq as zmq_module
 from surogate.grpo.transport.types import TrainingBatch, TrainingSample
-from tests.grpo.test_trainer_cycle_timing import trainer_module  # noqa: F401
 
 
 def _samples(step, *, optional_fields=True):

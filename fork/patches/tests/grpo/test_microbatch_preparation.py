@@ -5,8 +5,6 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from tests.grpo.test_trainer_cycle_timing import trainer_module  # noqa: F401
-
 
 @pytest.mark.parametrize("dtype", [np.int32, np.int64])
 @pytest.mark.parametrize(
