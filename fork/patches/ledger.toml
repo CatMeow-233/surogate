@@ -23,6 +23,7 @@ files = [
     "AGENTS.md",
     ".github/workflows/experimental-release.yml",
     "docs/experimental/training.md",   # redirect stub: the 0.1.0a1-a3 wheels publish this URL
+    "docs/upstream-notes/README.md",
     "csrc/cmake/training_openmp.cmake",
     "csrc/src/runtime/ops/moe_weight_grad_policy.h",
     "tests/grpo/test_batch_distribution.py",
@@ -32,8 +33,57 @@ files = [
     "tests/grpo/test_trainer_cycle_timing.py",
 ]
 
-# [root_rehome], [[relocation]] (from, to) and [[deletion]] (path, evidence)
-# are added when upstream notes are moved out of the repository root.
+# Upstream notes that land in the repository root are moved to `dest` at each
+# sync: a root *.md matching `patterns` and not `never` is moved with git mv
+# and recorded as a [[relocation]]. A candidate whose basename appears in any
+# `tooling_refs` file is reported instead, because tooling refers to it by path.
+[root_rehome]
+dest = "docs/upstream-notes/"
+patterns = ["TODO*.md", "DESIGN-*.md", "RELEASE_*.md", "*PLAN*.md", "REFACTOR*.md", "NOTES*.md"]
+never = [
+    "README*", "AGENTS.md", "CLAUDE.md", "CONTRIBUTING*", "SECURITY*", "CODE_OF_CONDUCT*",
+    "SUPPORT*", "CHANGELOG*", "LICENSE*", "NOTICE*", "GOVERNANCE*",
+]
+tooling_refs = [
+    ".github/**", "Makefile", "pyproject.toml", "**/CMakeLists.txt", "**/*.cmake", "*.sh",
+    "Dockerfile*", ".pre-commit-config.yaml", ".gitignore", ".dockerignore", "jackalope/package.json",
+]
+
+# Upstream files moved unchanged (R100). Code cites these notes by bare name
+# only, so no reference needs an edit.
+[[relocation]]
+from = "TODO.md"
+to = "docs/upstream-notes/TODO.md"
+
+[[relocation]]
+from = "TODOv2.md"
+to = "docs/upstream-notes/TODOv2.md"
+
+[[relocation]]
+from = "DESIGN-host-kv-tier.md"
+to = "docs/upstream-notes/DESIGN-host-kv-tier.md"
+
+[[relocation]]
+from = "DESIGN-kv-admission.md"
+to = "docs/upstream-notes/DESIGN-kv-admission.md"
+
+[[relocation]]
+from = "docs/grpo_routing_replay.md"
+to = "docs/upstream-notes/grpo_routing_replay.md"
+
+[[relocation]]
+from = "docs/reference/glm-dsa-kernels.md"
+to = "docs/upstream-notes/glm-dsa-kernels.md"
+
+# Upstream files the fork deletes.
+[[deletion]]
+path = "RELEASE_v1.4.0.md"
+evidence = """\
+Dead v1.4.0 release handoff: one upstream commit, f7980a9e (2026-07-25), the \
+commit the v1.4.0 tag points at, and never edited since. Nothing refers to it: \
+`git grep RELEASE_v1.4.0 upstream/main` finds no hit. Upstream now writes release notes with git-cliff \
+(.github/workflows/wheel.yml:321-328) and is at v1.5.9. \
+Recovery: git show f7980a9e:RELEASE_v1.4.0.md"""
 
 # Topics: one per fork change to upstream files.
 #   files       upstream paths the topic edits (status M)
