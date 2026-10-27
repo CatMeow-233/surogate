@@ -69,7 +69,6 @@ files = [
     "csrc/src/runtime/lora/lora_model_utils.h",
     "csrc/src/runtime/lora/lora_slice_dispatch.h",
     "csrc/src/testing/kernels/test-qwen35-shared.cu",
-    "docs/guides/performance.md",
 ]
 fork_files = []
 tests = ["csrc/src/testing/kernels/test-qwen35-shared.cu"]
@@ -133,7 +132,6 @@ switch = "always on"
 files = [
     "surogate/grpo/trainer.py",
     "surogate/grpo/packer.py",
-    "docs/guides/metrics.md",
 ]
 fork_files = []
 tests = [
