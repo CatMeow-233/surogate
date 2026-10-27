@@ -52,7 +52,7 @@ accumulation, optimizer-in-backward, layer sampling, and checkpoint compatibilit
 ## Build this distribution from a checkout
 
 ```bash
-python scripts/build_experimental_release.py
+python fork/experimental/build_release.py
 ```
 
 The builder stages only the experimental namespace and its package metadata in

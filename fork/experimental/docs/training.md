@@ -41,8 +41,10 @@ model.
 The wheel contains only the experimental namespace. It does not ship native CUDA
 binaries or turn the earlier native performance changes into a new binary build.
 The existing native training installation and its release artifacts are separate.
-When running from this checkout, use the development environment directly rather
-than `uv run`, which can trigger the original project's CUDA build.
+From a checkout use `fork/dev test experimental` and `fork/dev exp-train <config>`.
+They run in an isolated virtual environment, `.venv-experimental` under `fork/`,
+because an installed native `surogate` hides this namespace. Never use
+`uv run`/`uv sync` at the repository root.
 
 ## Experiments
 
@@ -133,7 +135,7 @@ parameters updated, so recovery uses the preceding complete checkpoint.
 
 ## RTX 5090 starting configurations
 
-The examples archive and `examples/experimental/` provide:
+The examples archive and `fork/experimental/examples/` provide:
 
 | File | Purpose |
 | --- | --- |

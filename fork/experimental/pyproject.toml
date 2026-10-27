@@ -25,12 +25,12 @@ classifiers = [
 
 [project.urls]
 Repository = "https://github.com/CatMeow-233/surogate"
-Documentation = "https://github.com/CatMeow-233/surogate/blob/main/docs/experimental/training.md"
+Documentation = "https://github.com/CatMeow-233/surogate/blob/main/fork/experimental/docs/training.md"
 
 [project.scripts]
 surogate-experimental-train = "surogate.experimental.train.__main__:main"
 
 [tool.setuptools.packages.find]
-where = ["."]
+where = ["src"]
 include = ["surogate.experimental*"]
 namespaces = true

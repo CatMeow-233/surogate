@@ -22,6 +22,7 @@ prefixes = [
 files = [
     "AGENTS.md",
     ".github/workflows/experimental-release.yml",
+    "docs/experimental/training.md",   # redirect stub: the 0.1.0a1-a3 wheels publish this URL
     "csrc/cmake/training_openmp.cmake",
     "csrc/src/runtime/ops/moe_weight_grad_policy.h",
     "tests/grpo/test_batch_distribution.py",

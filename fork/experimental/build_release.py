@@ -108,7 +108,7 @@ def build(output: Path, tag: str | None) -> list[Path]:
         staging.mkdir()
         shutil.copytree(
             source,
-            staging / "surogate" / "experimental",
+            staging / "src" / "surogate" / "experimental",
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo", ".pytest_cache"),
         )
         for filename in ("pyproject.toml", "README.md"):
