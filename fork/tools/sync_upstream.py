@@ -199,6 +199,8 @@ def report(target, book):
     workflows = git("diff", "--no-renames", "--name-only", "--diff-filter=A", base, target, "--", ".github/workflows")
     for path in workflows.splitlines():
         lines.append(f"new upstream workflow {path}: check its triggers; disable it on the fork if it publishes")
+    if git("diff", "--name-only", base, target, "--", ".github/workflows/wheel.yml"):
+        lines.append("upstream changed .github/workflows/wheel.yml: port the change into fork/native/release/build-wheel.sh")
     return lines, conflicts
 
 

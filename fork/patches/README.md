@@ -41,6 +41,7 @@
 - 文件 `AGENTS.md`
 - 文件 `.github/workflows/experimental-release.yml`
 - 文件 `.github/workflows/fork-ci.yml`
+- 文件 `.github/workflows/native-release.yml`
 - 文件 `docs/experimental/training.md`
 - 文件 `docs/upstream-notes/README.md`
 

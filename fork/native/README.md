@@ -11,6 +11,7 @@
 | [include/surogate_fork/](include/surogate_fork/) | fork 头文件，源码中写作 `#include "surogate_fork/<文件名>"` | T3 |
 | [openmp-contract/](openmp-contract/) | 独立的 OpenMP 接线回归测试，只需主机 C++ 编译器和 OpenMP | T5 |
 | [tests/](tests/) | fork 的 C++ 测试用例，编译进上游的 `dsl-run-state-tests`（T1）和 `integration-tests`（T2–T4） | T1–T4 |
+| [release/build-wheel.sh](release/build-wheel.sh) | 在 CUDA 构建镜像中构建 fork 的原生 wheel，由 `.github/workflows/native-release.yml` 调用，见 [发布原生版本](../docs/build-and-release.md#发布原生版本) | — |
 
 各 topic 的提交、开关和冲突历史见 [ledger](../patches/ledger.toml)。
 

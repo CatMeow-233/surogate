@@ -23,6 +23,7 @@ files = [
     "AGENTS.md",
     ".github/workflows/experimental-release.yml",
     ".github/workflows/fork-ci.yml",
+    ".github/workflows/native-release.yml",
     "docs/experimental/training.md",   # redirect stub: the 0.1.0a1-a3 wheels publish this URL
     "docs/upstream-notes/README.md",
 ]

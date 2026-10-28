@@ -18,6 +18,7 @@
 | Docker 镜像（训练加服务、语音） | 无 | `docker build -f Dockerfile.cu130` / `Dockerfile-speech.cu130`（从已发布的 wheel 安装，不复制仓库文件） | — | 镜像 | `docker.yml` | “Build Wheels” 在 `v*` tag 上成功后（`workflow_run`） | `ghcr.io/invergent-ai/surogate` | 禁用 |
 | jackalope 终端界面二进制 | 无 | 在 `jackalope/` 下用 bun 构建（见 `.github/workflows/jackalope.yml`） | `jackalope/dist` | 5 个平台的二进制 | `jackalope.yml` | 推送到 `main` 且改动 `jackalope/**`，或 `jackalope-v*` tag | invergent-ai 的 GitHub Release（`jackalope-latest` 或 `jackalope-v*`） | 禁用 |
 | `surogate-experimental`（纯 Python wheel、sdist、示例 zip） | `fork/dev release experimental [--tag experimental-vX]` | `python3 fork/experimental/build_release.py` | 临时目录 | `build/experimental-release/artifacts`：wheel、sdist、`experimental-examples.zip`、`README.md`、`build-info.json`、`SHA256SUMS` | `.github/workflows/experimental-release.yml` | `experimental-v*` tag（手动触发时只构建和检查，不发布） | `CatMeow-233/surogate` 的预发布 Release | **启用** |
+| fork 原生 wheel `surogate-<版本>+cu130-cp312-abi3-manylinux_2_39_x86_64`（训练加服务，GPU 代码只含 sm_120a） | 无（推送 `native-v*` tag） | `fork/native/release/build-wheel.sh`，在 `nvidia/cuda:13.1.1-cudnn-devel-ubuntu24.04` 容器中运行 | `build/cu130` | `wheelhouse/`：wheel、`build-info.json`、`SHA256SUMS` | `.github/workflows/native-release.yml` | `native-v*` tag（手动触发时只构建，不发布） | `CatMeow-233/surogate` 的预发布 Release | **启用** |
 
 “fork 上”一列是目标状态：上游的三个发布工作流 “Build Wheels”、“Build Docker Images” 和 “jackalope” 应在 GitHub 设置中禁用，因为它们使用 fork 没有的 Blacksmith runner，并把镜像推到写死的 `ghcr.io/invergent-ai/surogate`。禁用是仓库所有者在 GitHub 上的操作，`fork/dev setup` 会打印检查清单，`fork/dev sync` 在推送前检查它们确实已禁用；在完成之前，这些工作流在 fork 上仍然是启用的。fork 不修改上游工作流文件，所以同步不会带来冲突。
 
@@ -58,6 +59,24 @@
 
    不要用 `git push --tags`，也不要推送 `v*` 或 `jackalope-v*` tag（见下文“版本号”）。
 
+## 发布原生版本
+
+fork 的原生 wheel 由 `.github/workflows/native-release.yml` 在 GitHub 免费 runner（4 核、16 GB）上构建：工作流腾出磁盘、加 24 GB swap，然后在 CUDA 13.1 构建镜像中运行 `fork/native/release/build-wheel.sh`。脚本照搬上游 `wheel.yml` 的 `wheel` job（系统包、Rust、`set_cuda_version_tag.py`、构建目标、auditwheel 排除项和产物检查），区别是训练和服务端的 GPU 代码只编译所选架构（默认 `120a`，即 RTX 50 系列），版本号取自 tag，并且不发布 `install.sh`。同步报告在上游修改 `wheel.yml` 时会提示把改动移植到这个脚本。
+
+1. 选定版本号：tag 是 `native-v<版本>`，版本必须是不带本地部分的 PEP 440 版本，wheel 的版本为 `<版本>+cu130`。基于上游某个发布之后的提交时用 `.postN`，例如上游 1.5.9 之后的第一个 fork 版本是 `native-v1.5.9.post1`。
+2. 推送要发布的提交，等 fork CI 通过。
+3. 只推送这一个 tag：
+
+   ```bash
+   git tag native-v<版本> <提交>
+   git push origin native-v<版本>
+   ```
+
+4. 冷构建需要数小时。ccache 存在 Actions 缓存中，超时或失败后在 GitHub 上重新运行 job 会从缓存继续编译。构建失败且需要改代码时，修复并推送后把同一个 tag 移到新提交（`git tag -f`，再 `git push -f origin native-v<版本>`）；只有在这个 tag 还没有发布 Release 时才能这样做。
+5. 构建在没有 GPU 的 runner 上完成，发布前没有在 GPU 上运行过。安装后在 GPU 主机上运行 `fork/dev test gpu`。
+
+在默认分支上手动触发工作流（Actions → Native Wheel Release → Run workflow）时只构建、不发布，可以在 `archs` 输入中改架构，例如 `89;120a`；每多一个架构，构建时间大致按比例增加。
+
 ## 版本固定在哪里
 
 升级下列依赖时，用对应的命令找出所有位置并一起修改，否则各处会悄悄不一致。
@@ -71,7 +90,7 @@
 | 仓库名 `invergent-ai/surogate` | `git grep -n 'invergent-ai/surogate' -- ':!fork' ':!docs' ':!*.md'`：`install.sh`、`surogate/cli/_jackalope.py`、`pyproject.toml`、两个 Dockerfile、`.github/workflows/docker.yml`、`jackalope/src` |
 | 实验包的版本与依赖 | `fork/experimental/pyproject.toml`（静态版本号，见“发布实验版本”）、`fork/experimental/requirements-ci.txt` |
 
-这些上游文件中的仓库名不要改成 fork：`install.sh` 和 `surogate/cli/_jackalope.py` 下载的是上游发布的 wheel 和二进制，fork 不发布这些产物。
+这些上游文件中的仓库名不要改成 fork：`install.sh` 和 `surogate/cli/_jackalope.py` 下载的是上游发布的 wheel 和二进制。fork 的原生 wheel 用它的 Release 说明中的 `uv pip install` 命令安装。
 
 ## 版本号
 
@@ -82,11 +101,11 @@
 3. `.github/workflows/docker.yml` 的 “Determine version” 步骤根据触发它的 tag 自行计算镜像版本。
 4. `install.sh` 的 `VERSION_OVERRIDE` 由 `.github/workflows/wheel.yml` 的 “Pin version in install.sh” 步骤用 sed 填入。
 
-fork 上没有 `v*` tag（`git ls-remote --tags origin` 只有 `experimental-v*`），所以在 fork 上构建的原生包版本号是回退值 `0.0.1` 或上游最近一次发布的版本号。
+fork 上没有 `v*` tag（`git ls-remote --tags origin` 只有 `experimental-v*` 和 `native-v*`），所以用 `make` 在 fork 上构建的原生包版本号是回退值 `0.0.1` 或上游最近一次发布的版本号。`native-release.yml` 则把 `native-v*` tag 中的版本写入 `pyproject.toml`（见“发布原生版本”）。
 
 规则：
 
-- 只推送 `experimental-v*` tag。不要推送 `v*` 或 `jackalope-v*` tag，它们会触发上游的发布工作流。
+- 只推送 `experimental-v*` 和 `native-v*` tag。不要推送 `v*` 或 `jackalope-v*` tag，它们会触发上游的发布工作流。
 - 不要运行 `git push --tags`：它会把从上游取到的 tag 一起推到 fork。
 - `experimental-v0.1.0a1`、`a2`、`a3` 指向 `main` 上的提交，所以同步上游时只能 merge，不能 rebase。
 
