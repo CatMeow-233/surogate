@@ -4,6 +4,8 @@ name: Native Wheel Release
 # GitHub runner. fork/native/release/build-wheel.sh does the work inside the CUDA build image;
 # this file only prepares the runner, caches ccache and publishes. Upstream's wheel.yml needs
 # Blacksmith runners the fork does not have, and its tags are v*; this workflow uses native-v*.
+# A release is either a pushed native-v* tag or a manual run with release_tag set, in which case
+# the publish step creates that tag at the run's commit.
 on:
   push:
     tags:
@@ -13,6 +15,9 @@ on:
       archs:
         description: CUDA architectures, ';'-separated (120a = RTX 50 series)
         default: '120a'
+      release_tag:
+        description: native-v<version> to publish at this commit; empty builds without publishing
+        default: ''
 
 permissions:
   contents: read
@@ -24,6 +29,7 @@ jobs:
     timeout-minutes: 360
     env:
       ARCHS: ${{ inputs.archs || '120a' }}
+      RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}
       IMAGE: nvidia/cuda:13.1.1-cudnn-devel-ubuntu24.04
       CCACHE_HOST_DIR: /mnt/ccache
     steps:
@@ -68,10 +74,8 @@ jobs:
       - name: Build the wheel in the CUDA image
         timeout-minutes: 320
         run: |
-          tag=""
-          [ "$GITHUB_REF_TYPE" = tag ] && tag="$GITHUB_REF_NAME"
           docker run --rm -v "$GITHUB_WORKSPACE:/w" -v "$CCACHE_HOST_DIR:/ccache" -w /w \
-            -e RELEASE_TAG="$tag" -e ARCHS -e HOST_UID="$(id -u)" \
+            -e RELEASE_TAG -e ARCHS -e HOST_UID="$(id -u)" \
             "$IMAGE" bash fork/native/release/build-wheel.sh
 
       - name: Save ccache
@@ -89,10 +93,14 @@ jobs:
 
   release:
     needs: wheel
-    if: github.repository == 'CatMeow-233/surogate' && startsWith(github.ref, 'refs/tags/native-v')
+    if: >-
+      github.repository == 'CatMeow-233/surogate' &&
+      (startsWith(github.ref, 'refs/tags/native-v') || startsWith(inputs.release_tag, 'native-v'))
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -103,7 +111,7 @@ jobs:
         run: |
           sha256sum --check SHA256SUMS
           wheel=$(ls *.whl)
-          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${wheel//+/%2B}"
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${wheel//+/%2B}"
           cat > ../notes.md <<EOF
           Native Surogate wheel built from \`${GITHUB_SHA}\`: upstream invergent-ai/surogate plus this fork's changes (see \`fork/patches/ledger.toml\`).
 
@@ -121,9 +129,9 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           repository: CatMeow-233/surogate
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
           target_commitish: ${{ github.sha }}
-          name: Surogate native ${{ github.ref_name }}
+          name: Surogate native ${{ env.RELEASE_TAG }}
           body_path: notes.md
           prerelease: true
           make_latest: false
