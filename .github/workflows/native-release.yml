@@ -3,33 +3,58 @@ name: Native Wheel Release
 # The fork's native wheel (trainer + serving engine) for the RTX 50 series, built on a free
 # GitHub runner. fork/native/release/build-wheel.sh does the work inside the CUDA build image;
 # this file only prepares the runner, caches ccache and publishes. Upstream's wheel.yml needs
-# Blacksmith runners the fork does not have, and its tags are v*; this workflow uses native-v*.
-# A release is either a pushed native-v* tag or a manual run with release_tag set, in which case
-# the publish step creates that tag at the run's commit.
+# Blacksmith runners the fork does not have, and its tags are v*.
+#
+# To release, change fork/native/release/VERSION and push: the run builds the wheel and then
+# creates the tag native-v<VERSION> at the pushed commit while publishing the prerelease. A
+# VERSION whose tag already exists is skipped, so merging that change into another branch does
+# not publish twice. A manual run only builds (it needs this file on the default branch).
 on:
   push:
-    tags:
-      - 'native-v*'
+    branches: ['**']
+    paths: ['fork/native/release/VERSION']
   workflow_dispatch:
     inputs:
       archs:
         description: CUDA architectures, ';'-separated (120a = RTX 50 series)
         default: '120a'
-      release_tag:
-        description: native-v<version> to publish at this commit; empty builds without publishing
-        default: ''
 
 permissions:
   contents: read
 
 jobs:
-  wheel:
+  plan:
     if: github.repository == 'CatMeow-233/surogate'
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      build: ${{ steps.plan.outputs.build }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - id: plan
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != push ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          tag="native-v$(tr -d '[:space:]' < fork/native/release/VERSION)"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            echo "$tag already exists; nothing to release"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "releasing $tag"
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  wheel:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     env:
       ARCHS: ${{ inputs.archs || '120a' }}
-      RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}
+      RELEASE_TAG: ${{ needs.plan.outputs.tag }}
       IMAGE: nvidia/cuda:13.1.1-cudnn-devel-ubuntu24.04
       CCACHE_HOST_DIR: /mnt/ccache
     steps:
@@ -92,15 +117,13 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: wheel
-    if: >-
-      github.repository == 'CatMeow-233/surogate' &&
-      (startsWith(github.ref, 'refs/tags/native-v') || startsWith(inputs.release_tag, 'native-v'))
+    needs: [plan, wheel]
+    if: needs.plan.outputs.tag != ''
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     env:
-      RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}
+      RELEASE_TAG: ${{ needs.plan.outputs.tag }}
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:

@@ -32,7 +32,7 @@ Artefacts (details: fork/docs/build-and-release.md)
   serving engine + libsinfer    build serve              csrc/build-serve/, surogate/*.so     native wheel (disabled)
   STT / TTS engines             build stt | build tts    csrc/build-stt/, csrc/build-tts/     native wheel (disabled)
   quantizer llama-quantize      build quantizer          surogate/serve/_llama_cpp/bin/       native wheel (disabled)
-  native wheel (RTX 50, sm_120a)   (push a native-v* tag)  GitHub Release asset               native-release.yml on native-v* tags
+  native wheel (RTX 50, sm_120a)   (edit fork/native/release/VERSION, push)  Release asset    native-release.yml
   Docker, jackalope             (none: upstream workflows, disabled on the fork)
   surogate-experimental         release experimental     build/experimental-release/artifacts experimental-release.yml on experimental-v* tags
 
