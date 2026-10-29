@@ -185,12 +185,18 @@ def test_trainer_regression_artifact_holds_what_the_summary_reads():
     assert "self._write_regression_artifact()" in train
 
 
-def test_native_training_log_is_a_json_array_with_eval_lines():
-    """report.summarize reads `log`, `step` and `loss` of the eval lines."""
+def test_native_training_log_is_a_json_array_with_eval_and_step_lines():
+    """report reads `log`, `step` and `loss` of the eval and step lines; a step line counts steps from 0, the
+    regression curve from 1 (report.joined)."""
     source = (REPO / "csrc/src/runtime/training/logging.cpp").read_text(encoding="utf-8")
     assert 'mLogFile << "[\\n";' in source
-    formats = [f for f in re.findall(r'R"\((.*?)\)"', source) if '"log": "eval"' in f]  # raw string literals
-    assert any('"step": {}' in f and '"loss": {}' in f for f in formats), formats
+    lines = re.findall(r'R"\((.*?)\)"', source)  # raw string literals
+    for kind in ("eval", "step"):
+        formats = [f for f in lines if f'"log": "{kind}"' in f]
+        assert any('"step": {}' in f and '"loss": {}' in f for f in formats), (kind, formats)
+    loop = _method(_tree("surogate/train/trainer.py"), "SurogateTrainerWrapper", "run_training_loop")
+    calls = [n for n in ast.walk(loop) if isinstance(n, ast.Call) and ast.unparse(n.func) == "train_logger.log_step"]
+    assert calls and all(ast.unparse(call.args[0]) == "metrics.step" for call in calls)
 
 
 def test_native_out_of_memory_errors():

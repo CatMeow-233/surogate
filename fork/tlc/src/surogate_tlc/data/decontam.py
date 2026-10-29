@@ -12,8 +12,9 @@ costs one look.
 - `text8`: coverage of a benchmark description's lowercased word 8-grams (MBPP's text, HumanEval's docstring) by
   the document's words, for items with at least MIN_TEXT_GRAMS.
 - `ast`: a function of the document whose alpha-renamed, literal-normalised AST equals a benchmark function's
-  (ast_hash: every bound name, parameter, keyword argument, except-as and import-as name is renamed in visiting
-  order; functions of fewer than MIN_AST_NODES nodes are ignored, they match everything).
+  (ast_hash: every bound name, parameter, except-as and import-as name, and the keyword arguments of calls to
+  functions defined in the same tree, is renamed in visiting order; functions of fewer than MIN_AST_NODES nodes are
+  ignored, they match everything).
 - `name`: a function named like a benchmark's distinctive entry point.
 
 A text document is scanned as text, and its markdown code blocks (data.corpus.fences, as the shards frame them) as
@@ -161,12 +162,16 @@ def text_grams(text: str) -> set[tuple[str, ...]]:
 
 
 class _Alpha(ast.NodeTransformer):
-    """Bound names become v0, v1, ... in visiting order: names, parameters, keyword arguments (which name a
-    parameter), except-as, import-as and global/nonlocal names. Constants become their type name, functions F;
-    docstrings, annotations and return annotations go. Attribute names and imported module names stay."""
+    """Bound names become v0, v1, ... in visiting order: names, parameters, except-as, import-as and global/nonlocal
+    names, and the keyword arguments of calls to a function, named lambda or class (its __init__) defined in the tree,
+    which name one of its parameters. Any other keyword (sorted's key=, print's end=) is an API name and stays, so
+    renaming locals alone never changes the hash. Constants become their type name, functions F; docstrings,
+    decorators, annotations and return annotations go, and an annotated assignment becomes a plain one. Attribute
+    names and imported module names stay. Visit a Module (ast_hash parses a copy into one)."""
 
     def __init__(self) -> None:
         self.names: dict[str, str] = {}
+        self.params: dict[str, set[str]] = {}  # callee name -> its parameters, filled by visit_Module
 
     def _name(self, name: str) -> str:
         return self.names.setdefault(name, f"v{len(self.names)}")
@@ -177,10 +182,33 @@ class _Alpha(ast.NodeTransformer):
     def visit_arg(self, node: ast.arg) -> ast.AST:
         return ast.copy_location(ast.arg(arg=self._name(node.arg)), node)
 
-    def visit_keyword(self, node: ast.keyword) -> ast.AST:
-        value = self.visit(node.value)
-        arg = None if node.arg is None else self._name(node.arg)  # None: **kwargs
-        return ast.copy_location(ast.keyword(arg=arg, value=value), node)
+    def visit_Module(self, node: ast.Module) -> ast.AST:
+        for n in ast.walk(node):
+            if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef):
+                callees = [(n.name, n.args)]
+            elif isinstance(n, ast.Assign) and isinstance(n.value, ast.Lambda):
+                callees = [(t.id, n.value.args) for t in n.targets if isinstance(t, ast.Name)]
+            elif isinstance(n, ast.ClassDef):
+                init = (f for f in n.body if isinstance(f, ast.FunctionDef | ast.AsyncFunctionDef))
+                callees = [(n.name, f.args) for f in init if f.name == "__init__"]
+            else:
+                continue
+            for name, args in callees:
+                self.params.setdefault(name, set()).update(
+                    a.arg for a in args.posonlyargs + args.args + args.kwonlyargs
+                )
+        self.generic_visit(node)
+        return node
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        params = self.params.get(node.func.id, set()) if isinstance(node.func, ast.Name) else set()
+        func, args = self.visit(node.func), [self.visit(arg) for arg in node.args]
+        keywords = []
+        for k in node.keywords:
+            value = self.visit(k.value)
+            arg = self._name(k.arg) if k.arg in params else k.arg  # None (**kwargs) is in no parameter set
+            keywords.append(ast.copy_location(ast.keyword(arg=arg, value=value), k))
+        return ast.copy_location(ast.Call(func=func, args=args, keywords=keywords), node)
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> ast.AST:
         node.type = None if node.type is None else self.visit(node.type)
@@ -371,16 +399,21 @@ def scan_corpus(
     index = Index(items)
     docs = ((doc.key, doc.source.name, doc.source.kind, doc.text) for doc in documents(corpus))
     removed, flagged, scanned = [], [], Counter()
-    host_texts: list[str] = []
+    calibration = None
     for key, source, digest, hits in scan(index, docs, jobs):
         scanned[source] += 1
         if hits:
             entry = {"key": key, "source": source, "sha256": digest, "hits": hits}
             (removed if removing(hits) else flagged).append(entry)
     if plants:
-        rng = random.Random(seed)
-        code = [doc.text for doc in documents(corpus) if doc.source.kind == "code"]
-        host_texts = rng.sample(code, min(hosts, len(code)))
+        # Natural code only: generated programs (synth) are short and never match a benchmark, so as hosts they would
+        # lower the recorded false-positive and flag rates and always parse for the ast rule.
+        natural = (doc for doc in documents(corpus) if doc.source.kind == "code" and not doc.source.generated)
+        code = [(doc.source.name, doc.text) for doc in natural]
+        chosen = random.Random(seed).sample(code, min(hosts, len(code)))
+        if chosen:
+            calibration = calibrate(index, items, [text for _, text in chosen], plants=plants, seed=seed)
+            calibration["host_sources"] = dict(sorted(Counter(name for name, _ in chosen).items()))
     audit = [e["key"] for e in removed + flagged]
     return {
         "tlc_decontam_version": DECONTAM_VERSION,
@@ -398,7 +431,7 @@ def scan_corpus(
         "removed": removed,
         "flagged": flagged,
         "audit_sample": sorted(random.Random(seed).sample(audit, min(AUDIT_SAMPLE, len(audit)))),
-        "calibration": calibrate(index, items, host_texts, plants=plants, seed=seed) if host_texts else None,
+        "calibration": calibration,
     }
 
 

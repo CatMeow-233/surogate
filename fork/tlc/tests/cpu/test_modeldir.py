@@ -119,17 +119,38 @@ def test_write_rejects_an_invalid_config_before_writing(tmp_path, tokenizer_dir)
     "overrides, problem",
     [
         ({"bos_token_id": 3}, "bos_token '<|bos|>' has id 1 in the tokenizer, config.json says 3"),
-        ({"vocab_size": 200}, "tokenizer ids reach {max_id}, but vocab_size is 200"),
+        # The native trainer does not range-check ids: vocab_size equal to the largest id reads past the embedding.
+        ({"vocab_size": 299}, "tokenizer ids reach 299, but vocab_size is 299"),
     ],
 )
 def test_config_must_agree_with_the_tokenizer(tmp_path, tokenizer_dir, overrides, problem):
     from tokenizers import Tokenizer
 
     max_id = Tokenizer.from_file(str(tokenizer_dir / "tokenizer.json")).get_vocab_size(with_added_tokens=True) - 1
-    assert max_id >= 200
+    assert max_id == 299
     with pytest.raises(modeldir.ModelDirError) as error:
         modeldir.write_model_dir(tmp_path / "model", hf.default_config(**overrides), tokenizer_dir)
-    assert problem.format(max_id=max_id) in error.value.problems
+    assert problem in error.value.problems
+    modeldir.write_model_dir(tmp_path / "fits", hf.default_config(vocab_size=max_id + 1), tokenizer_dir)
+
+
+@pytest.mark.parametrize(
+    "edit, problem",
+    [
+        *[(lambda meta, key=key: meta.pop(key), f"tlc_meta.json lacks {key}") for key in modeldir.META_KEYS],
+        (lambda meta: meta.update(tlc_meta_version=2), "tlc_meta.json must be an object with tlc_meta_version 1"),
+        (lambda meta: meta.pop("tlc_meta_version"), "tlc_meta.json must be an object with tlc_meta_version 1"),
+        (lambda meta: [meta], "tlc_meta.json must be an object with tlc_meta_version 1"),
+    ],
+    ids=[*(f"lacks {key}" for key in modeldir.META_KEYS), "future version", "no version", "not an object"],
+)
+def test_meta_must_follow_the_contract(model_dir, edit, problem):
+    meta = json.loads((model_dir / modeldir.META_FILE).read_text())
+    edited = edit(meta)
+    (model_dir / modeldir.META_FILE).write_text(json.dumps(edited if isinstance(edited, list) else meta))
+    with pytest.raises(modeldir.ModelDirError) as error:
+        modeldir.check_model_dir(model_dir, weights=False)
+    assert error.value.problems == [problem]
 
 
 def test_tokenizer_needs_a_chat_template(model_dir):

@@ -4,8 +4,8 @@ The expected tensor names are re-derived here from the per-layer parameter names
 model-level mappings, not from init's own naming, so a renamed or added parameter shows up as a mismatch.
 """
 
-import json
 import math
+from pathlib import Path
 
 import pytest
 import torch
@@ -144,15 +144,16 @@ def test_unknown_parameter_is_refused():
         init.init_state_dict(cfg, module, seed=0)
 
 
-def test_init_model_dir_completes_the_directory(model_dir, tmp_path, tokenizer_dir):
+def test_init_model_dir_completes_the_directory(tmp_path, tokenizer_dir):
+    """The weights come from the recorded seed (SEED, not 0: a seed dropped on the way would give seed 0's)."""
+    model_dir = modeldir.write_model_dir(tmp_path / "model", hf.default_config(), tokenizer_dir, init_seed=SEED)
     weights_file = init.init_model_dir(model_dir)
 
     assert weights_file == model_dir / modeldir.WEIGHTS_FILE
     cfg = modeldir.check_model_dir(model_dir)
     with safe_open(weights_file, framework="pt") as f:
-        assert f.metadata() == {"format": "pt", "tlc_init_version": str(init.INIT_VERSION), "tlc_init_seed": "0"}
-    seed = json.loads((model_dir / modeldir.META_FILE).read_text())["init_seed"]
-    expected = init.init_state_dict(cfg, seed=seed)
+        assert f.metadata() == {"format": "pt", "tlc_init_version": str(init.INIT_VERSION), "tlc_init_seed": str(SEED)}
+    expected = init.init_state_dict(cfg, seed=SEED)
     stored = load_file(weights_file)
     assert set(stored) == set(expected)
     assert all(torch.equal(stored[k], expected[k]) for k in expected)
@@ -164,3 +165,22 @@ def test_init_model_dir_completes_the_directory(model_dir, tmp_path, tokenizer_d
     with pytest.raises(ValueError, match="init_seed"):
         init.init_model_dir(unseeded)
     assert not (unseeded / modeldir.WEIGHTS_FILE).exists()
+
+
+def test_init_writes_its_weights_atomically(tmp_path, tokenizer_dir, monkeypatch):
+    """A crash or a full disk while writing leaves no model.safetensors, and the leftover temporary file does not
+    stop the next attempt."""
+    cfg = hf.row_config("A0", num_hidden_layers=1, tlc_layer_pattern="M")
+    path = modeldir.write_model_dir(tmp_path / "m", cfg, tokenizer_dir, init_seed=SEED)
+    real = init.save_file
+
+    def partial(tensors, filename, metadata=None):
+        Path(filename).write_bytes(b"partial")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(init, "save_file", partial)
+    with pytest.raises(OSError, match="disk full"):
+        init.init_model_dir(path)
+    assert not (path / modeldir.WEIGHTS_FILE).exists()
+    monkeypatch.setattr(init, "save_file", real)
+    assert load_file(init.init_model_dir(path)).keys() == init.init_state_dict(cfg, seed=SEED).keys()

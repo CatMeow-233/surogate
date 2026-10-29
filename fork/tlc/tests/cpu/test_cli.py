@@ -59,6 +59,32 @@ def test_train_reports_problems_without_training(run_yaml, capsys):
     assert "lora must be False" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("error, code", [(None, 0), (RuntimeError("Cuda OOM in fwd"), 1)], ids=["completed", "failed"])
+def test_train_exit_codes(run_yaml, monkeypatch, capsys, error, code):
+    """README: 0 completed (the summary on stdout), 1 training failed (the failure report in the run record); the
+    runbook stops a gate on any non-zero exit."""
+    import functools
+    from types import SimpleNamespace
+
+    from surogate_tlc.train import driver
+
+    def train():
+        if error is not None:
+            raise error
+
+    fake = lambda sft, train_files, eval_files: SimpleNamespace(train=train)  # noqa: E731
+    monkeypatch.setattr(driver, "train", functools.partial(driver.train, factory=fake))
+    path = run_yaml()
+    assert main(["train", str(path)]) == code
+    out, err = capsys.readouterr()
+    record = json.loads((path.parent / "runs" / "run" / driver.RUN_FILE).read_text())
+    assert record["status"] == ("completed" if code == 0 else "failed")
+    if code == 0:
+        assert json.loads(out)["run_dir"] == record["sft"]["output_dir"]
+    else:
+        assert "Cuda OOM" in err and out == ""
+
+
 def test_eval_writes_its_result(small_model, shard_dirs, tmp_path, monkeypatch, capsys):
     from surogate_tlc.eval import loss
 

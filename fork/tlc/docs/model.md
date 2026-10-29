@@ -33,7 +33,7 @@ DSL 类名一律带 `TLC` 前缀：注册表按类名做键，同名类会悄悄
 - `config.json`，满足上面的不变量；
 - `configuration_tlc.py`：`auto_map` 指向它，内容就是包里的 `surogate_tlc.configuration_tlc`，只依赖 transformers，因此不 import fork 的进程也能读取 config；
 - tokenizer 文件：`tokenizer.json` 与带 `chat_template` 的 `tokenizer_config.json`（也可以是单独的 `chat_template.jinja`）。`bos_token`、`eos_token`、`pad_token` 在 tokenizer 中的 id 必须等于 config.json 中的值，最大 token id 小于 `vocab_size`；
-- `tlc_meta.json`：`tlc_meta_version`（当前为 1）、`init_seed`、`label_ontology_version`、`shard_version`、`sidecar_version`，后几项在用到之前为 null。checkpoint 与导出目录另有 `step`、`kind`（`checkpoint`、`run` 或 `export`），训练驱动收尾时还写入 `tokenizer_sha256`、`data_manifest_sha256` 和 `run`（训练设置与运行配置文件的 sha256、提交、工作区是否有改动）；
+- `tlc_meta.json`：`tlc_meta_version`（当前为 1）、`init_seed`、`label_ontology_version`、`shard_version`、`sidecar_version`，后几项在用到之前为 null。checkpoint 与运行目录另有 `step`、`kind`（`checkpoint` 或 `run`；导出目录保留所导出 checkpoint 的这两项），训练驱动收尾时还写入 `tokenizer_sha256`、`data_manifest_sha256` 和 `run`：写出该目录的那次调用（`attempt` 序号与它从哪一步恢复）、训练设置与该次调用的运行配置文件的 sha256、提交、工作区是否有改动；
 - `model.safetensors`：从零训练时由 `surogate_tlc.init.init_model_dir()` 写出，见下文“初始化”。训练经 `from_pretrained(model_dir)` 加载它。
 
 `surogate_tlc.modeldir.write_model_dir()` 写出除权重以外的全部文件；`check_model_dir()` 检查一个目录并列出全部问题，`weights=False` 时不要求 `model.safetensors`。
@@ -44,12 +44,12 @@ DSL 类名一律带 `TLC` 前缀：注册表按类名做键，同名类会悄悄
 
 - `finalize_dir(target, source, meta=None)`：把源模型目录的 config.json、`configuration_tlc.py`、tokenizer 文件和 `tlc_meta.json`（并入 `meta`）复制进 `target`，原生写的 config.json 被源目录的完整版本替换。`target` 中原生写的结构键（架构、模型类型、词表、宽度、层数、FFN 宽度）与源目录不一致时拒绝执行，以免配错源目录；A0-split 的层数允许少 1，因为原生 config 的层数取自 DSL，而 DSL 的层数不含模型级的第 1 层。step 目录归原生训练器所有，收尾只能往里加文件：每个文件原子替换，`tlc_meta.json` 最后写入，第一次收尾中途失败的目录通不过 `check_model_dir()`。可重复执行。
 - `finalize_checkpoints(checkpoint_dir, source, meta=None)`：对每个已写完 `checkpoint.json` 的 step 目录执行 `finalize_dir`，`tlc_meta.json` 并入 `meta` 并记下 `step`；还在写的目录不动。
-- `export(checkpoint, source, out)`：从一个 step 目录导出干净的模型目录，只带 `model.safetensors` 和收尾文件，不带优化器状态和分片；step 目录已收尾时，保留其 `tlc_meta.json` 中的字段。导出先在 `out` 旁边的临时目录中完成并通过检查，再整体改名为 `out`，所以 `out` 要么是完整的模型目录，要么不变。`out` 必须不存在或为空。
+- `export(checkpoint, source, out)`：从一个 step 目录导出干净的模型目录，只带 `model.safetensors` 和收尾文件，不带优化器状态和分片；step 目录已收尾时，保留其 `tlc_meta.json` 中的字段。导出先在 `out` 旁边的临时目录中完成并通过检查，再整体改名为 `out`，所以 `out` 要么是完整的模型目录，要么不变。`out` 必须不存在或为空；它可以是指向空目录的符号链接（在链接目标旁边构建，写进目标），但不能是挂载点（改名不能跨文件系统，换成挂载点下面的目录）。目录的权限按 umask，`out` 已存在时沿用它的权限。
 
 规则：
 
 - 未经收尾的原始 checkpoint 目录不得直接用作 `model_dir`。
-- 收尾后的目录能在不 import fork 的新解释器中用 transformers 读取 config 与 tokenizer（CPU 测试）；save → resume 后 logits 和下一步 loss 能否复现、导出到另一个 seed 的源目录后权重是否逐位不变，在 G2 中验证。
+- 收尾后的目录能在不 import fork 的新解释器中用 transformers 读取 config 与 tokenizer（CPU 测试）；save → resume 后 logits 和下一步 loss 能否复现、导出到另一个 seed 的源目录后权重文件是否不变，在 G2 中验证。
 - CPU 测试钉住原生的 step 目录命名、`checkpoint.json` 在全部分片和导出之后写入，以及上游导出复制的文件清单；上游改动这些时测试失败。
 
 ## DSL 模型与 IR 检查
@@ -125,14 +125,24 @@ CPU 测试另外检查参照实现的假设与编译出的 IR 一致（每层的
 | G2.2 初始 loss | 随机 token 的交叉熵在 ln V + var(logits)/2 ± 0.1 之内，logits 的标准差小于 1 |
 | G2.3 过拟合 | 一个 16 个 token id 的固定 batch，其 H(next \| current) ≥ 1.5：完整模型 200 步内 loss < 0.05，mixer 输出置零的消融模型 loss ≥ 0.9 × 下限。在 16384 的词表上随机 batch 中几乎每个 token 的后继都唯一，消融模型也能拟合，过拟合测试就证明不了序列混合有效 |
 
-G2.4（保存后加载进另一个 seed 构建的模型，logits 逐位相等）与 G2.5（resume 与不中断的运行逐位相等）测的是原生 checkpoint，不在 CPU 参照上做：P0 的训练循环、优化器状态、调度器与数据游标都在原生训练器里。它们在 GPU 上的对应检查见 [运行手册的 G2](runbook.md#g2-数学与梯度)；数据游标的恢复由 `fork/tlc/tests/gpu/test_data_native.py` 逐位检查。
+G2.4（保存后加载进另一个 seed 构建的模型，logits 逐位相等）与 G2.5（resume 与不中断的运行逐位相等）测的是原生 checkpoint，不在 CPU 参照上做：P0 的训练循环、优化器状态、调度器与数据游标都在原生训练器里。G2.5 在 GPU 上的对应检查见 [运行手册的 G2](runbook.md#g2-数学与梯度)；数据游标的恢复由 `fork/tlc/tests/gpu/test_data_native.py` 逐位检查。G2.4 目前只检查到导出：导出复制 checkpoint 的权重文件（sha256 相同），另一个 seed 的源目录只提供权重以外的文件。把 checkpoint 加载进另一个 seed 构建的 trainer（原生 `load_checkpoint`）再逐位比较 logits 还没有做：它要在 GPU 上确认原生的加载路径，并且取决于下文 tied LM head 的处理。
+
+### 已知问题：tied LM head
+
+四行都是 tied embedding，但原生全量训练没有把两者绑在一起（GPU 的 G2 会暴露它，CPU 上只能读代码确认）：
+
+- IR 中 `lm_head` 是单独的可训练参数（`hf_mapping` 为 `lm_head.weight`）。只有开 LoRA 时，参数存储才让它与 embedding 共用存储（`csrc/src/runtime/dsl/dsl_param_store.cpp`，`storage_alias` 要求 `freeze_base`）；全量训练时它有自己的存储，加载时由 embedding 填入。
+- 它的梯度与 embedding 的梯度是同一块缓冲（`dsl_grad_store.cpp`），AdamW 跳过已见过的梯度指针，所以只更新 embedding（按两者梯度之和），`lm_head` 一直停在初始值，而前向读的正是这份 `lm_head`。
+- checkpoint 与最终导出按参数名写出全部参数，因而带一份停在初始值的 `lm_head.weight`；`ref_mamba2.Reference` 拒绝这样的 tied checkpoint。带 LoRA 的采样 trainer 又把 embedding 当作 head，所以训练之后采样与打分算的不是同一个网络。
+
+修复要 owner 决定：要么加一个原生 ledger topic（全量训练时也让 tied 的 `lm_head` 与 embedding 共用存储，导出时不写别名参数；P0 原本不改上游文件），要么把各行明确改成 untied（参数量与设计都变）。在那之前 G2 的恢复检查预期失败（运行手册的 G2），G3 的训练后样例只作参考。
 
 ### G1(b) 的 goldens
 
 生成 G1(b) 的 goldens（CPU 即可，A0、batch 2、512 token 在单线程上约 6 秒）：
 
 ```bash
-python -I -B fork/tlc/prototypes/ref_mamba2.py MODEL_DIR OUT.npz --batch 2 --seq-len 512 --seed 0
+fork/.venv-experimental/bin/python -I -B fork/tlc/prototypes/ref_mamba2.py MODEL_DIR OUT.npz --batch 2 --seq-len 512 --seed 0
 ```
 
 `.npz` 中的数组：`input_ids`、`targets`（int32，[batch, seq_len]，正是 `compute_logprobs` 的两个参数；`targets` 是下一个 token，最后一列为 −100）；`logprobs`（fp32 参照，逐 token 递归）；`logprobs_bf16`（bf16 模式）；`tolerance` = 2 × max \|`logprobs_bf16` − `logprobs`\|；`meta`（JSON：`model.safetensors` 的 sha256、seed、dt clamp 区间、求值顺序）。G1(b) 的判据：原生 `compute_logprobs(input_ids, targets, use_lora=False)` 与 `logprobs` 的最大绝对差不超过 `tolerance`，且 `meta` 中的 sha256 与所测目录的权重文件一致。bf16 对拍的 mean-KL 判据要完整的 logits，而 `compute_logprobs` 只返回目标的 log-probability，所以 P0 不做。

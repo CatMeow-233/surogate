@@ -21,6 +21,7 @@ import hashlib
 import itertools
 import json
 import math
+import os
 import re
 import tomllib
 from collections import Counter
@@ -32,7 +33,7 @@ from typing import Any
 
 from ..files import file_sha256, text_sha256
 
-DECONTAM_VERSION = 2  # surogate_tlc.data.decontam's report version
+DECONTAM_VERSION = 3  # surogate_tlc.data.decontam's report version
 KINDS = ("code", "text")
 SOURCE_KEYS = ("name", "kind", "files", "url", "license", "downloaded", "filters")
 OPTIONAL_SOURCE_KEYS = ("revision", "stage", "generated")
@@ -66,8 +67,9 @@ class Corpus:
     removed: Mapping[str, str] = field(default_factory=dict)  # document key -> sha256 of its text
 
     def relative(self, path: Path) -> str:
-        """`path` relative to the spec's directory where possible: the form recorded in manifests and keys."""
-        return path.relative_to(self.path.parent).as_posix() if path.is_relative_to(self.path.parent) else str(path)
+        """`path` relative to the spec's directory, with ../ for files outside it: the form recorded in manifests and
+        keys, so that a copy of the whole tree at another path keeps its keys, split and shards."""
+        return Path(os.path.relpath(path, self.path.parent)).as_posix()
 
 
 @dataclass(frozen=True)

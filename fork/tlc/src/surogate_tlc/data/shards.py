@@ -133,6 +133,12 @@ class ShardWriter:
                 self.sources.append({"name": source, "first_row": len(self.lengths), "rows": 1})
         self.lengths.append(len(ids))
 
+    def discard(self) -> None:
+        """Remove what this writer wrote, finished or not (a failed build)."""
+        self._file.close()
+        self._tmp.unlink(missing_ok=True)
+        self.path.unlink(missing_ok=True)
+
     def close(self) -> dict[str, Any]:
         """Finish the file and return its statistics."""
         lengths = np.asarray(self.lengths, dtype=np.int64)
@@ -210,11 +216,13 @@ def build_shards(
     """Write train-NNNNN.bin, val-00000.bin and, last, manifest.json into `out`, which must be new or empty.
 
     A train document goes to one of `train_files` files by a hash of its key, so each file samples every source:
-    the native DataLoader reads files one after another and shuffles rows only within a file.
+    the native DataLoader reads files one after another and shuffles rows only within a file. A build that fails
+    removes its files, so the same command can run again; a killed one leaves hidden .*.tmp files, which the
+    "not empty" error names.
     """
     out = Path(out)
     if out.exists() and any(out.iterdir()):
-        raise FileExistsError(f"{out} is not empty")
+        raise FileExistsError(f"{out} is not empty: {', '.join(sorted(p.name for p in out.iterdir()))}")
     out.mkdir(parents=True, exist_ok=True)
     tokenizer = load(tokenizer_dir, ordinary=True)
     special = special_ids(tokenizer)
@@ -227,22 +235,34 @@ def build_shards(
     }
     dropped: Counter = Counter()
     counts: dict[str, Counter] = defaultdict(Counter)
-    for doc, ids in encode(tokenizer, documents(corpus, dropped), special):
-        split = split_of(corpus, doc)
-        rows = windows(ids, seq_len)
-        writer = writers[split, unit_hash(corpus.seed, "shard\0" + doc.key) % train_files if split == "train" else 0]
-        for row in rows:
-            writer.add_row(row, doc.source.name)
-        counted = {"documents": 1, "characters": len(doc.text), "rows": len(rows), "real_tokens": sum(map(len, rows))}
-        for key, n in counted.items():
-            counts[doc.source.name][split, key] += n
     shards = []
-    for (split, _), writer in writers.items():
-        stats = writer.close()
-        if stats["rows"]:
-            shards.append({"split": split, **stats})
-        else:
-            writer.path.unlink()
+    try:
+        for doc, ids in encode(tokenizer, documents(corpus, dropped), special):
+            split = split_of(corpus, doc)
+            rows = windows(ids, seq_len)
+            writer = writers[
+                split, unit_hash(corpus.seed, "shard\0" + doc.key) % train_files if split == "train" else 0
+            ]
+            for row in rows:
+                writer.add_row(row, doc.source.name)
+            counted = {
+                "documents": 1,
+                "characters": len(doc.text),
+                "rows": len(rows),
+                "real_tokens": sum(map(len, rows)),
+            }
+            for key, n in counted.items():
+                counts[doc.source.name][split, key] += n
+        for (split, _), writer in writers.items():
+            stats = writer.close()
+            if stats["rows"]:
+                shards.append({"split": split, **stats})
+            else:
+                writer.path.unlink()
+    except BaseException:
+        for writer in writers.values():
+            writer.discard()
+        raise
     splits = {}
     for split in ("train", "val"):
         totals = {

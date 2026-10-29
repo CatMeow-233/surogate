@@ -425,7 +425,8 @@ def programs_of(document: str) -> list[str]:
 def check(out: Path) -> dict[str, Any]:
     """Disjointness of the training stream and the eval halves in `out`; raises SplitLeak listing every violation.
 
-    The training programs are re-hashed from their text, so a recorded hash cannot hide a collision."""
+    Every program of the training text is re-hashed, recorded or not, so neither a recorded hash nor a missing
+    record can hide a collision."""
     out = Path(out)
     halves = {half: read_items(out / SUITE_FILES[half]) for half in HALVES}
     evals = [item for items in halves.values() for item in items]
@@ -440,14 +441,13 @@ def check(out: Path) -> dict[str, Any]:
                 if info["family"] in HELD_OUT_FAMILIES or info["pattern"] in HELD_OUT_PATTERNS:
                     problems.append(f"{where}: held-out family or pattern {info['family']}/{info['pattern']}")
                 counts[info["task"]] += 1
-            texts = programs_of(text)
-            if len(texts) != len(infos):
-                problems.append(f"{where}: {len(texts)} programs, {len(infos)} item records")
-            for program, info in zip(texts, infos, strict=False):
-                digest = ast_hash(ast.parse(program))
+            digests = [ast_hash(ast.parse(program)) for program in programs_of(text)]
+            train_hashes.update(digests)  # every program of the text, recorded or not, meets the AST rule
+            if len(digests) != len(infos):
+                problems.append(f"{where}: {len(digests)} programs, {len(infos)} item records")
+            for digest, info in zip(digests, infos, strict=False):
                 if digest != info["hash"]:
                     problems.append(f"{where}: a program hashes to {digest}, its record says {info['hash']}")
-                train_hashes.add(digest)
             names = held & set(IDENTIFIER.findall(LITERAL.sub("''", text)))
             if names:
                 problems.append(f"{where}: held-out identifiers {sorted(names)[:3]}")

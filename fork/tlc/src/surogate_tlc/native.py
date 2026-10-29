@@ -28,7 +28,8 @@ SCORING = {
     **FIXED,
 }
 # A rank-1 adapter on the MLP down projections. Its B factor starts at zero (the native LoRA initialisation), so the
-# adapted model computes the base model; native next_token_logits only runs with resident LoRA weights.
+# adapted model computes the base model on the weights the LoRA trainer reads (with a tied head: the embedding, not a
+# checkpoint's lm_head.weight); native next_token_logits only runs with resident LoRA weights.
 SAMPLING_LORA = {
     "lora": True,
     "lora_rank": 1,
@@ -37,6 +38,9 @@ SAMPLING_LORA = {
     "lora_target_modules": ["down_proj"],
 }
 
+# The shared library with the training runtime and the kernels, which the extension links and fork/dev build copies
+# next to it (csrc/CMakeLists.txt: surogate-common).
+COMMON_LIBRARY = "libsurogate-common.so"
 # (inputs, targets, positions), int32 [batch, seq_len] -> log-probabilities of the targets, 0 where IGNORE.
 Scorer = Callable[[np.ndarray, np.ndarray, np.ndarray], np.ndarray]
 # (inputs int32 [batch, seq_len], last positions int32 [batch]) -> next-token logits float32 [batch, vocab].
@@ -104,11 +108,15 @@ def native_tokenizer(model_dir: Path) -> Any:
 
 
 def extension_fingerprint() -> dict[str, Any] | None:
-    """Path and sha256 of the training extension this process would load; it is found, not imported."""
+    """Path and sha256 of the training extension this process would load, and of COMMON_LIBRARY next to it; found,
+    not imported. The extension is a thin binding: a change to the runtime or a kernel alone can leave it byte for
+    byte the same, so the library's sha256 is what tells two kernel builds apart (both written by fork/dev build)."""
     try:
         spec = importlib.util.find_spec("surogate._surogate")
     except ImportError:
         spec = None
     if spec is None or not spec.origin:
         return None
-    return {"path": spec.origin, "sha256": file_sha256(Path(spec.origin))}
+    library = Path(spec.origin).with_name(COMMON_LIBRARY)
+    common = {"path": str(library), "sha256": file_sha256(library)} if library.is_file() else None
+    return {"path": spec.origin, "sha256": file_sha256(Path(spec.origin)), COMMON_LIBRARY: common}

@@ -31,7 +31,7 @@ tlc:
 
 ### 恢复
 
-再次运行同一条命令时，上游从运行目录中最新的 checkpoint 继续（`resume_from_checkpoint: true`）。驱动只在运行的身份不变时允许恢复，否则拒绝（退出码 2）并列出变了的项：
+再次运行同一条命令时，上游从运行目录中最新的 checkpoint 继续（`resume_from_checkpoint: true`）。运行已经完成、`max_steps` 也没变时，驱动直接返回运行记录，不再调用训练器：否则上游会从最后保存的一步起把末段重训一遍，并覆盖最终导出。恒定学习率的阶段加大 `max_steps` 时照常恢复。要从头重训，删除运行目录或换一个阶段、`--microbatch`。驱动只在运行的身份不变时允许恢复，否则拒绝（退出码 2）并列出变了的项：
 
 - 初始权重、config.json、tokenizer 和数据 manifest 的 sha256；
 - 训练设置（`surogate_tlc.train.config.settings()` 的 sha256）：除下列键以外的全部上游设置，加上学习率调度的总步数（恒定学习率时为空）、`tokens_per_update` 和是否固定 batch。可以改的键只影响保存、日志、评测的频率和运行长度：`output_dir`、`max_steps`、`save_steps`、`save_total_limit`、`eval_steps`、`logging_steps`、`log_gpu_util`、`run_name`、`resume_from_checkpoint`。`max_steps` 同时决定非恒定学习率调度的长度，所以对 cosine 等调度改它会被拒绝。microbatch 与 GA 也在设置之中：checkpoint 中数据加载器的位置以 microbatch 为单位。
@@ -48,13 +48,13 @@ tlc:
 
 - `identity`：初始权重、config.json、tokenizer、数据 manifest 和训练设置的 sha256；`settings` 是训练设置本身，拒绝恢复时据此指出变了的键。
 - `attempts`：每次调用（第一次和每次恢复）的 microbatch、GA、名义 token 数、配置文件的 sha256、从哪一步恢复、环境指纹、上游日志的路径、状态，以及完成时的摘要。
-  - 环境指纹（`surogate_tlc.train.report.environment()`）：提交、工作区是否有未提交的改动、Python 与各包的版本、原生扩展的路径与 sha256、GPU 名称、计算能力、显存和驱动版本。结果因此能追溯到产生它的代码和机器。
+  - 环境指纹（`surogate_tlc.train.report.environment()`）：提交、工作区是否有未提交的改动、Python 与各包的版本、原生扩展的路径与 sha256 及其旁边 `libsurogate-common.so`（运行时与 kernel）的路径与 sha256、GPU 名称、计算能力、显存和驱动版本。结果因此能追溯到产生它的代码和机器；扩展只是一层绑定，只改 kernel 时它可能逐字节不变，两次 kernel 构建靠共享库的 sha256 区分（两者都由 `fork/dev build train` 写出）。
   - 摘要：loss 曲线、首末 loss、验证 loss、按每步时间中位数折算的 tokens/s（名义 token，含 pad）、峰值显存、block schema 统计。驱动为每次调用设置环境变量 `SUROGATE_REGRESSION_ARTIFACT`，上游训练器据此写出 `regression-<序号>.json`；摘要取自它和上游日志。
 - `status`（running、completed、failed）、`failure_report`、`data`（文件、固定 batch 的统计、每次更新的有效目标数）、`sft`（实际使用的上游设置）。
 
-收尾：训练完成后，驱动对运行目录中每个完整的 step 目录执行 `finalize_checkpoints()`，再对运行目录本身（上游的最终导出）执行 `finalize_dir()`；训练失败时只收尾已有的 checkpoint。`tlc_meta.json` 另记 `tokenizer_sha256`、`data_manifest_sha256`、`shard_version`（shard 格式版本，即 `surogate_tlc.data.shards.SHARD_VERSION`）、`kind`（`checkpoint` 或 `run`）和 `run`：训练设置与配置文件的 sha256、提交和工作区是否有改动。因此运行目录和其中的 step 目录都可以直接用作 `model_dir`；`export` 保留 step 目录 `tlc_meta.json` 中的这些字段。
+收尾：训练完成后，驱动对运行目录中每个完整的 step 目录执行 `finalize_dir()`，再对运行目录本身（上游的最终导出）执行一次；训练失败时只收尾已有的 checkpoint。`tlc_meta.json` 另记 `tokenizer_sha256`、`data_manifest_sha256`、`shard_version`（shard 格式版本，即 `surogate_tlc.data.shards.SHARD_VERSION`）、`kind`（`checkpoint` 或 `run`）和 `run`：写出该目录的那次调用（`attempt` 与它的 `resumed_from_step`）、训练设置的 sha256，以及那次调用的配置文件 sha256、提交和工作区是否有改动。step 目录归写出它的调用，即起点低于该步的最后一次调用（上游只保存恢复点之后的步），所以换了提交或改了配置文件之后恢复，不会把前面调用写出的 checkpoint 改记到新的调用名下；被强行终止、没来得及收尾的调用写出的 checkpoint，也由下一次调用按原来的调用收尾。运行记录中没有哪次调用写出的 step 目录（例如从别的运行复制进来）保持原样。运行目录本身记最后一次调用。因此运行目录和其中的 step 目录都可以直接用作 `model_dir`；`export` 保留 step 目录 `tlc_meta.json` 中的这些字段。
 
-`python -m surogate_tlc.train.report DIR [--peak-tflops X]` 把 DIR 下每个运行记录的最后一次调用打印成一行 JSON：阶段、状态、microbatch、GA、是否用 CUDA graph、有效目标数、首末 loss、验证 loss、tokens/s、峰值显存、前向 FLOPs/token（`surogate_tlc.ir.flops_per_token`），给出 GPU 的 dense bf16 峰值时还有 MFU（tokens/s × 3 × 前向 FLOPs/token ÷ 峰值）。G0.5、G3 的记录和 [运行手册](runbook.md) 中的 GPU 预算都取自它。
+`python -m surogate_tlc.train.report DIR [--peak-tflops X]` 把 DIR 下每个运行记录打印成一行 JSON：阶段、状态、调用次数（`attempts`）与最后一次调用的 `resumed_from_step`、microbatch、GA、是否用 CUDA graph、有效目标数、步数范围、首末 loss、验证 loss、tokens/s、峰值显存、前向 FLOPs/token（`surogate_tlc.ir.flops_per_token`），给出 GPU 的 dense bf16 峰值时还有 MFU（tokens/s × 3 × 前向 FLOPs/token ÷ 峰值）。loss 与验证 loss 接起所有调用：后一次调用的点替换它恢复点之后的点，所以失败后恢复的运行仍从第 1 步读起。完成的调用的 loss 取自摘要（regression artifact，步数从 1 起），失败的调用没有 artifact，取自它的上游日志的 step 行（步数从 0 起，pin 测试钉住）。吞吐与显存取自最后一次调用。G0.5、G3 的记录和 [运行手册](runbook.md) 中的 GPU 预算都取自它。
 
 ## 评测
 
@@ -108,4 +108,4 @@ python -m surogate_tlc probe MODEL DATA SUITE.jsonl --out FILE             # 打
 
 ### 生成样例
 
-`python -m surogate_tlc sample MODEL DATA`（`surogate_tlc.eval.samples`）在固定的 prompt（`PROMPTS`：四个代码开头、两个英文开头）上做 greedy 生成，最多 `--max-new` 个 token，遇到 `<|eos|>` 或 `<|code_end|>` 停止。原生 `next_token_logits` 只在带常驻 LoRA 权重的 trainer 上运行，所以采样用的 trainer 带一个 rank 1 的 LoRA（`surogate_tlc.native.SAMPLING_LORA`，挂在 MLP 的 down 投影上）：原生 LoRA 的 B 初始化为零，适配后的模型就是原模型（pin 测试钉住这一点，G3 在 GPU 上核对它的 next-token 分布与 `compute_logprobs` 一致）。Mamba 还没有原生的解码 cache，每生成一个 token 都重算整行；G3 只有几个 prompt，这个开销可以接受。prompt 按 shard 的方式框定：代码前加 `<|bos|> <|code_start|>`，英文前加 `<|bos|>`。
+`python -m surogate_tlc sample MODEL DATA`（`surogate_tlc.eval.samples`）在固定的 prompt（`PROMPTS`：四个代码开头、两个英文开头）上做 greedy 生成，最多 `--max-new` 个 token，遇到 `<|eos|>` 或 `<|code_end|>` 停止。原生 `next_token_logits` 只在带常驻 LoRA 权重的 trainer 上运行，所以采样用的 trainer 带一个 rank 1 的 LoRA（`surogate_tlc.native.SAMPLING_LORA`，挂在 MLP 的 down 投影上）：原生 LoRA 的 B 初始化为零，适配后的模型在初始权重上就是原模型（pin 测试钉住这一点，G3 在 GPU 上核对它的 next-token 分布与 `compute_logprobs` 一致）。训练之后不一定：带 LoRA 的 trainer 把 tied embedding 当作 head，不读 checkpoint 中的 `lm_head.weight`，见 [model.md 的“已知问题：tied LM head”](model.md#已知问题tied-lm-head)。Mamba 还没有原生的解码 cache，每生成一个 token 都重算整行；G3 只有几个 prompt，这个开销可以接受。prompt 按 shard 的方式框定：代码前加 `<|bos|> <|code_start|>`，英文前加 `<|bos|>`。

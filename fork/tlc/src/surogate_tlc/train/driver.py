@@ -6,8 +6,9 @@ accumulation has reached 16, keeps the accumulation: the tokens per update halve
 rows at a fixed number of nominal tokens per update, so on any failure, OOM included, the driver stops and writes a
 failure report into the run record, tlc_run.json in the run directory; a smaller microbatch is a new run
 (--microbatch). Rerunning the same command resumes from the latest checkpoint, and only when the weights, tokenizer,
-data and training settings are the ones the run started with. After the run, finished checkpoints and the final
-export are finalized as model directories.
+data and training settings are the ones the run started with; rerunning a completed run with the same max_steps does
+nothing. After the run, finished checkpoints and the final export are finalized as model directories, each labelled
+with the attempt that wrote it.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from ..checkpoint import checkpoint_step, finalize_checkpoints, finalize_dir
+from ..checkpoint import checkpoint_step, finalize_dir
 from ..data.shards import ShardWriter, manifest, manifest_sha256, read_shard, shard_files
 from ..data.tokenizer import PAD
 from ..files import dump_json, file_sha256, write_text_atomic
@@ -154,33 +155,63 @@ def _device_memory() -> dict[str, int] | None:
     return {"free_bytes": free, "total_bytes": total}
 
 
+def _producer(attempts: Sequence[Mapping[str, Any]], step: int) -> int | None:
+    """Index of the attempt that wrote checkpoint `step`: the latest one that started below it (upstream saves only
+    steps after the one it resumed from). None when no attempt of the record did, e.g. a step directory copied in."""
+    started = [i for i, attempt in enumerate(attempts) if (attempt["resumed_from_step"] or 0) < step]
+    return max(started, default=None)
+
+
 def _finalize(run: Run, record: dict[str, Any], *, done: bool) -> None:
-    """Make the run's complete checkpoints, and the final export when `done`, model directories with provenance."""
-    identity, environment = record["identity"], record["attempts"][-1]["environment"]
-    meta = {
-        "tokenizer_sha256": identity["tokenizer_sha256"],
-        "data_manifest_sha256": identity["data_manifest_sha256"],
-        "shard_version": manifest(run.data)["tlc_shard_version"],
-        "run": {
-            "settings_sha256": identity["settings_sha256"],
-            "config_sha256": record["attempts"][-1]["config_sha256"],
-            "git_commit": environment["git_commit"],
-            "git_dirty": environment["git_dirty"],
-        },
-    }
-    checkpoints = finalize_checkpoints(run.run_dir, run.model_dir, meta={**meta, "kind": "checkpoint"})
-    record["finalized_checkpoints"] = [p.name for p in checkpoints]
+    """Make the run's complete checkpoints, and the final export when `done`, model directories with provenance.
+
+    The `run` block of each directory names the attempt that wrote it, so a resume at another commit or with an edited
+    configuration file does not relabel the checkpoints of earlier attempts."""
+    identity, attempts = record["identity"], record["attempts"]
+    shard_version = manifest(run.data)["tlc_shard_version"]
+
+    def meta(index: int) -> dict[str, Any]:
+        attempt = attempts[index]
+        return {
+            "tokenizer_sha256": identity["tokenizer_sha256"],
+            "data_manifest_sha256": identity["data_manifest_sha256"],
+            "shard_version": shard_version,
+            "run": {
+                "settings_sha256": identity["settings_sha256"],
+                "attempt": index,
+                "resumed_from_step": attempt["resumed_from_step"],
+                "config_sha256": attempt["config_sha256"],
+                "git_commit": attempt["environment"]["git_commit"],
+                "git_dirty": attempt["environment"]["git_dirty"],
+            },
+        }
+
+    finalized = []
+    for path in sorted(run.run_dir.iterdir()):
+        step = checkpoint_step(path)
+        index = None if step is None else _producer(attempts, step)
+        if index is not None:
+            finalized.append(
+                finalize_dir(path, run.model_dir, meta={**meta(index), "kind": "checkpoint", "step": step})
+            )
+    record["finalized_checkpoints"] = [p.name for p in finalized]
     if done:
-        finalize_dir(run.run_dir, run.model_dir, meta={**meta, "kind": "run", "step": run.sft["max_steps"]})
+        last = meta(len(attempts) - 1)
+        finalize_dir(run.run_dir, run.model_dir, meta={**last, "kind": "run", "step": run.sft["max_steps"]})
 
 
 def train(run: Run, *, factory: Factory = native_wrapper) -> dict[str, Any]:
-    """Train `run`; returns the run record. Raises RunError before training, RunFailed when training fails."""
+    """Train `run`; returns the run record. Raises RunError before training, RunFailed when training fails.
+
+    A completed run with the same max_steps is returned as it is: upstream would resume from the last saved step,
+    train the tail again and overwrite the final export. A larger max_steps (a constant-LR stage) resumes."""
     found = problems(run)
     if found:
         raise RunError(found)
     run.run_dir.mkdir(parents=True, exist_ok=True)
     record = _start(run)
+    if record["status"] == "completed" and record["sft"]["max_steps"] == run.sft["max_steps"]:
+        return record
     train_files, eval_files, record["data"] = _data(run)
     microbatch, accum = run.batch
     attempt: dict[str, Any] = {

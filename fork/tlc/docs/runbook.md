@@ -1,11 +1,15 @@
 # 运行手册（RTX 5090，G0–G3）与 GPU 预算
 
-命令都在 GPU 主机的仓库根目录运行。门槛按顺序进行：某一步的命令以非零退出码结束、或判据不成立，就停止，把输出和运行记录中的 `failure_report` 存进 `$TLC_RUNS/env/`，不进入下一个门槛；A0 没有通过 G1 或 G2 时不进入后续阶段。标 [P] 的阈值是暂定的：不成立时记录实测值并停下，不要放宽阈值。GPU 测试单独运行，不与 `fork/tlc/tests/cpu` 在同一次 pytest 中收集：CPU 测试会把仓库根目录放到 `sys.path` 最前面，GPU 测试则用 `fork/.venv-tlc` 的导入路径。
+命令都在 GPU 主机的仓库根目录运行。门槛按顺序进行：某一步的命令以非零退出码结束、或判据不成立，就停止，把输出和运行记录中的 `failure_report` 存进 `$TLC_RUNS/env/`，不进入下一个门槛；A0 没有通过 G1 或 G2 时不进入后续阶段。标 [P] 的阈值是暂定的：不成立时记录实测值并停下，不要放宽阈值。GPU 测试单独运行，不与 `fork/tlc/tests/cpu` 在同一次 pytest 中收集：CPU 测试会把仓库根目录放到 `sys.path` 最前面，GPU 测试则用 `fork/.venv-tlc` 的导入路径。设置了 `TLC_RUNS` 而 torch 看不到 CUDA 时（驱动升级后没有重启、`CUDA_VISIBLE_DEVICES` 不对等），GPU 测试不再全部跳过、以退出码 0 结束，而是报错（退出码 4）：全部跳过会被当成门槛通过。各门槛给出预期通过的测试数，少于它也要停下。
+
+修好问题后重跑整段命令即可：训练驱动不重跑已完成且 `max_steps` 未变的运行（直接返回其记录），失败的运行从最后一个 checkpoint 恢复；`report` 把一个运行各次调用的 loss 与验证点接成一条曲线。数据工具不覆盖已有输出，重跑前按第 4、5 步的说明删除该步的输出。
 
 ```bash
 set -o pipefail                  # `pytest ... | tee` 保留 pytest 的退出码
 export TLC_RUNS=/data/tlc        # 所有产物的根目录，放在仓库之外
 PY=fork/.venv-tlc/bin/python
+# RTX 5090 dense bf16 Tensor 峰值（fp32 累加、不计稀疏），按 NVIDIA 规格表填写，单位 TFLOPS；G0.5、G3 的 MFU 用它
+export PEAK_TFLOPS=
 mkdir -p "$TLC_RUNS/env" "$TLC_RUNS/corpus" "$TLC_RUNS/goldens" "$TLC_RUNS/benchmarks"
 ```
 
@@ -13,11 +17,9 @@ mkdir -p "$TLC_RUNS/env" "$TLC_RUNS/corpus" "$TLC_RUNS/goldens" "$TLC_RUNS/bench
 
 ## G0 环境
 
-1. 原生扩展。根目录 `.venv` 按 [fork/README.md 的“首次准备环境”](../../README.md#首次准备环境) 创建（只需一次；首次完整构建需要数小时），然后用本检出重建训练扩展。CMake 按本机 GPU 自动选择 `120a`；之后每次同步上游或修改训练侧 C++，都重新运行 `fork/dev build train`。
+1. 原生扩展。根目录 `.venv` 还不存在时，按 [fork/README.md 的“首次准备环境”](../../README.md#首次准备环境) 创建（只需一次；首次完整构建需要数小时）；已有的 `.venv` 不要重建，`uv venv` 遇到已有的环境会报错，在终端中还会询问是否替换、默认替换。然后用本检出重建训练扩展。CMake 按本机 GPU 自动选择 `120a`；之后每次同步上游或修改训练侧 C++，都重新运行下面两条。
 
    ```bash
-   uv venv --python 3.12
-   uv pip install -e .
    fork/dev build train
    cuobjdump --list-elf surogate/libsurogate-common.so | grep -o 'sm_[0-9]*a*' | sort -u
    ```
@@ -27,14 +29,16 @@ mkdir -p "$TLC_RUNS/env" "$TLC_RUNS/corpus" "$TLC_RUNS/goldens" "$TLC_RUNS/bench
 2. `fork/.venv-tlc`。依赖与根目录 `.venv` 相同，并锁定成文件；`surogate` 经 `.pth` 文件从本检出导入，所以 `fork/dev build train` 复制进 `surogate/` 的扩展就是 `.venv-tlc` 加载的扩展，不需要第二次原生构建，也不会留下过期的副本。
 
    ```bash
-   uv venv --python 3.12 fork/.venv-tlc
-   uv pip freeze -p .venv --exclude-editable > "$TLC_RUNS/env/requirements.lock"
-   uv pip install -p fork/.venv-tlc -r "$TLC_RUNS/env/requirements.lock" pytest
-   uv pip install -p fork/.venv-tlc --no-deps -e fork/tlc
+   uv --no-config venv --clear --python 3.12 fork/.venv-tlc
+   uv --no-config pip freeze -p .venv --exclude-editable > "$TLC_RUNS/env/requirements.lock"
+   uv --no-config pip install -p fork/.venv-tlc -r "$TLC_RUNS/env/requirements.lock" pytest
+   uv --no-config pip install -p fork/.venv-tlc --no-deps -e fork/tlc
    echo "$PWD" > fork/.venv-tlc/lib/python3.12/site-packages/surogate-checkout.pth
    ```
 
-   根目录 `.venv` 的 torch 若来自 download.pytorch.org（锁文件中的版本带 `+cu…`），第三条命令要加上对应的 `--index-url`。
+   - `--no-config` 与 `fork/dev` 的实验环境相同：根目录 `pyproject.toml` 的 `[tool.uv]` 不带版本地覆盖 torch 与 triton（`override-dependencies`）并允许预发布版本，不加它时锁文件中的 torch、triton 会悄悄换成索引上最新的版本。安装失败就停下，不要去掉 `--no-config`。
+   - 锁文件中的 torch 若带 `+cuXXX`（来自 download.pytorch.org），第三条命令加上 `--extra-index-url https://download.pytorch.org/whl/cuXXX --index-strategy unsafe-best-match`。不要用 `--index-url`：它替换 PyPI，锁文件中其余的包都找不到。
+   - 这一步可以重跑：`--clear` 重建 `.venv-tlc`（它没有原生构建，重建很快），也去掉锁文件中已经没有的包。根目录 `.venv` 的依赖因同步上游而变了时，在 `fork/dev build train` 之后重跑这一步。
 
 3. 环境指纹与 GPU。
 
@@ -43,35 +47,61 @@ mkdir -p "$TLC_RUNS/env" "$TLC_RUNS/corpus" "$TLC_RUNS/goldens" "$TLC_RUNS/bench
    $PY -m pytest -c fork/tlc/pyproject.toml fork/tlc/tests/gpu/test_gpu_environment.py
    ```
 
-   预期 2 个测试通过：`surogate._surogate` 与 `surogate_tlc` 都来自本检出，GPU 的计算能力为 (12, 0)，指纹中提交、原生扩展的 sha256、驱动版本齐全。每个运行记录都带同样的指纹。
+   预期 2 个测试通过：在仓库之外的工作目录中新开的解释器（与 `python -m surogate_tlc` 相同）从本检出导入 `surogate._surogate` 和 `fork/tlc/src` 中的 `surogate_tlc`（不是装进 `.venv-tlc` 的副本），GPU 的计算能力为 (12, 0)，指纹中提交、原生扩展与 `libsurogate-common.so`（运行时与 kernel 所在的共享库）的 sha256、驱动版本齐全。每个运行记录都带同样的指纹。
 
-4. 合成数据、去污染与 T3 套件。依次运行，每条之后按说明改 spec：
+4. 合成数据、去污染与 T3 套件。三条命令依次运行，每条之后按说明改 spec，不要整段粘贴。要重跑某一条，先删除它的输出（`suites/synth`、`corpus/decontam.json` 或 `suites/natural`）：工具不覆盖已有输出。
 
    ```bash
-   $PY -m surogate_tlc.data.synth "$TLC_RUNS/suites/synth" --seed 0 --train-chars "$SYNTH_CHARS"
+   SYNTH_CHARS=$($PY -c 'import sys; from surogate_tlc.data import corpus as c; spec = c.load_corpus(sys.argv[1], decontam=False); print(round(sum(len(d.text) for d in c.documents(spec) if not d.source.generated) * 0.05 / 0.95))' "$TLC_RUNS/corpus/corpus.toml")
+   echo "SYNTH_CHARS=$SYNTH_CHARS" | tee "$TLC_RUNS/env/synth-chars.txt"
+   $PY -m surogate_tlc.data.synth "$TLC_RUNS/suites/synth" --seed 0 --train-chars "${SYNTH_CHARS:?}"
+   ```
+
+   `SYNTH_CHARS` 是其余（非生成）来源归一化后的字符数 × 0.05 / 0.95（暂定的 5%，按字符计；实际的 token 占比见第 5 步 shard manifest 中 synth-binding 的 `train_token_share`）。预期 manifest 的 `disjoint.eval_items_with_a_training_ast` 为 0。然后在 spec 中加一个来源（必需键见 [data.md 的“语料”](data.md#语料)）：
+
+   ```toml
+   [[source]]
+   name = "synth-binding"
+   kind = "code"
+   generated = true
+   files = ["../suites/synth/train.jsonl"]   # spec 目录之外：键与 provenance 记作相对路径 ../suites/...
+   url = "python -m surogate_tlc.data.synth ... --seed 0 --train-chars N; manifest sha256 <sha256sum suites/synth/manifest.json>"
+   license = "generated"
+   downloaded = 2026-10-29                    # 生成日期
+   filters = []
+   ```
+
+   ```bash
    $PY -m surogate_tlc.data.decontam "$TLC_RUNS/corpus/corpus.toml" "$TLC_RUNS/benchmarks" "$TLC_RUNS/corpus/decontam.json" --plant 40 --jobs 8
+   ```
+
+   然后在 spec 顶层加 `decontam = "decontam.json"`。把输出中的 `calibration`（召回率与误报率，宿主只取非生成的代码来源，见 `host_sources`）连同 `audit_sample` 中各文档的人工审计结论记进 `$TLC_RUNS/env/decontam.txt`，作为 G6 的去污染记录。
+
+   ```bash
    $PY -m surogate_tlc.data.natural "$TLC_RUNS/corpus/corpus.toml" "$TLC_RUNS/suites/natural"
    ```
 
-   - `synth`：`SYNTH_CHARS` 约为其余来源的字符数 × 0.05 / 0.95（暂定的 5%）。然后在 spec 中加一个来源：`name = "synth-binding"`、`kind = "code"`、`generated = true`、`files = ["../suites/synth/train.jsonl"]`，`url` 写生成命令与 manifest 的 sha256，`license` 写“generated”。预期 manifest 的 `disjoint.eval_items_with_a_training_ast` 为 0。
-   - `decontam`：然后在 spec 顶层加 `decontam = "decontam.json"`。把输出中的 `calibration`（召回率与误报率）连同 `audit_sample` 中各文档的人工审计结论记进 `$TLC_RUNS/env/decontam.txt`，作为 G6 的去污染记录。
-   - `natural`：T3 的 dev 与 test，取自去污染之后语料 val 划分中的自然代码；`generated = true` 的合成来源不出探针项，manifest 的 `corpus.sources` 列出实际取用的来源。
+   T3 的 dev 与 test，取自去污染之后语料 val 划分中的自然代码；`generated = true` 的合成来源不出探针项，manifest 的 `corpus.sources` 列出实际取用的来源。
 
 5. tokenizer、模型目录与 shard。
 
    ```bash
+   ( set -e  # a subshell: a tokenizer difference stops it before the shards are built
    $PY -m surogate_tlc.data.tokenizer train "$TLC_RUNS/corpus/corpus.toml" "$TLC_RUNS/tokenizer" --pretokenizer qwen2
    for row in A0 A0-split A1 A1h; do
      $PY -m surogate_tlc init "$row" "$TLC_RUNS/models/$row" --tokenizer "$TLC_RUNS/tokenizer" --seed 1
    done
    $PY -m surogate_tlc.data.tokenizer check "$TLC_RUNS/models/A0" "$TLC_RUNS/corpus/corpus.toml" --limit 10000
    $PY -m pytest -c fork/tlc/pyproject.toml fork/tlc/tests/gpu/test_data_native.py
-   $PY -m surogate_tlc.data.shards "$TLC_RUNS/corpus/corpus.toml" "$TLC_RUNS/tokenizer" "$TLC_RUNS/data" --seq-len 512 | tee "$TLC_RUNS/env/shards.json"
+   $PY -m surogate_tlc.data.shards "$TLC_RUNS/corpus/corpus.toml" "$TLC_RUNS/tokenizer" "$TLC_RUNS/data" --seq-len 512 --train-files 1 | tee "$TLC_RUNS/env/shards.json"
+   )
    ```
 
    - 预分词和词表还没有选定（[data.md 的“Tokenizer”](data.md#tokenizer)）。owner 在 A0 之前定下，四行共用同一个 tokenizer 和同一个 `--seed`；A0 与 A0-split 用同一个种子，得到同一份权重（G1(d)）。
    - `check`：预期输出 `consistent on N texts`，退出码 0；有差异时停止，不建 shard。`test_data_native.py`：预期 5 个测试通过（三个预分词候选的原生一致性、原生 DataLoader 读出的行，以及从保存的位置恢复的 DataLoader 逐位接着读下去）。
    - `data.shards` 输出各划分的 `pad_fraction`，以及单核构建速率（`real_tokens_per_cpu_second`，G0.5 的数据流水线速率）；`pad_fraction` 超过约 25% 时记下来，pilot 照常进行。
+   - `--train-files`：每个 train 文件少于 2³¹ 个 token（含 pad），所以每约 15 亿个真实 train token 用一个文件（按实测约 5% 的 padding 留余量）：`ceil(train 的真实 token 数 / 1.5e9)`，P0 的小语料用 1。超出时构建在写到上限处报错。
+   - 重跑：先删除这一步改动过的输出。tokenizer 变了就删除 `$TLC_RUNS/tokenizer`、`$TLC_RUNS/models/*`、`$TLC_RUNS/goldens` 和 `$TLC_RUNS/data`（权重与 goldens 都依赖 tokenizer）；只是 shard 构建失败就删除 `$TLC_RUNS/data`。失败的构建会删掉自己写的文件；被强行终止（`kill -9`、OOM）的构建留下隐藏的 `.*.bin.tmp`，`ls` 看不到，“is not empty” 的报错会列出它们。语料或去污染报告变了（例如重扫），第 4 步的 `natural` 和本步都要重做。
 
 6. kernel 与图。
 
@@ -87,6 +117,7 @@ mkdir -p "$TLC_RUNS/env" "$TLC_RUNS/corpus" "$TLC_RUNS/goldens" "$TLC_RUNS/bench
 
 ```bash
 ( set -e  # a subshell: the first failing command stops the loop, not the login shell
+: "${PEAK_TFLOPS:?set PEAK_TFLOPS (see the preamble)}"
 for row in A0 A1; do
   for microbatch in 2 8 32; do
     for stage in throughput throughput-eager; do
@@ -98,7 +129,7 @@ $PY -m surogate_tlc.train.report "$TLC_RUNS/train" --peak-tflops "$PEAK_TFLOPS" 
 )
 ```
 
-- `PEAK_TFLOPS` 是 GPU 规格表中 dense bf16（fp32 累加）的峰值。每次更新 16,384 token 不变，microbatch 2、8、32（GA 相应为 16、4、1），各跑 30 步、开和关 CUDA graph。报告每行给出 tokens/s、MFU、峰值显存和是否用 CUDA graph；tokens/s 只在相同 microbatch 之间比较，每行注明所用档位。
+- `PEAK_TFLOPS` 在前言中设置（GPU 规格表中 dense bf16、fp32 累加的峰值）；没有设置时子 shell 在训练之前就停下，不会跑完 12 次训练后才因报告失败。只有报告那一条失败时，设好变量后单独重跑它即可。每次更新 16,384 token 不变，microbatch 2、8、32（GA 相应为 16、4、1），各跑 30 步、开和关 CUDA graph。报告每行给出 tokens/s、MFU、峰值显存和是否用 CUDA graph；tokens/s 只在相同 microbatch 之间比较，每行注明所用档位。
 - 数据流水线的单核速率取自第 5 步 `data.shards` 的输出（`real_tokens_per_cpu_second`，包括 tokenizer 编码）。
 - 还没有做的：kernel 计数（要用 nsys 另行剖析）、上下文 2048 的那一半（等 owner 定正式训练的上下文，并放开 `surogate_tlc.hf.CONTEXT_LENGTH`）。
 
@@ -109,15 +140,15 @@ $PY -I -B fork/tlc/prototypes/ref_mamba2.py "$TLC_RUNS/models/A0" "$TLC_RUNS/gol
 $PY -m pytest -c fork/tlc/pyproject.toml fork/tlc/tests/gpu/test_gates.py -k g1 -s | tee "$TLC_RUNS/env/g1.txt"
 ```
 
-第一条在 CPU 上生成 G1(b) 的 goldens（见 [model.md 的“数值参照”](model.md#数值参照)）。参照实现本身的因果性与路径一致性（G1.1–G1.8）由 CPU 测试检查，不在 GPU 上重复。`-s` 让测试打印实测的误差（JSON 行）。
+第一条在 CPU 上生成 G1(b) 的 goldens（见 [model.md 的“数值参照”](model.md#数值参照)）。参照实现本身的因果性与路径一致性（G1.1–G1.8）由 CPU 测试检查，不在 GPU 上重复。`-s` 让测试打印实测的误差（JSON 行）。预期 13 个测试通过（`g1n1` 3 个、`g1n3` 6 个、`g1b` 1 个、`g1c` 2 个、`g1d` 1 个）。
 
 | 选择 | 行 | 判据 |
 |---|---|---|
 | `-k g1n1` | A0、A1、A1h | 把位置 p 起的 token 全部改掉，位置 p 之前的 logprobs 逐位不变，p ∈ {1, 2, 7, 127, 128, 129, 511}（chunk 128 的两侧）；p 之后的 logprobs 确有变化 |
-| `-k g1n3` | A0、A1、A1h | 只保留位置 129 之前的目标，改动之后的 token，参数梯度的变化不超过同一输入重复一次的差异的 2 倍（原生反向用浮点 atomicAdd，重复运行未必逐位相同） |
+| `-k g1n3` | A0、A1、A1h | 只保留位置 ≤ s 的目标（s ∈ {127, 128}，chunk 128 的两侧），改动位置 s 之后的全部 token（含紧邻的 s + 1；`step()` 另收目标，位置 s 的标签不变），参数梯度的变化不超过同一输入重复一次的差异的 2 倍（原生反向用浮点 atomicAdd，重复运行未必逐位相同） |
 | `-k g1b` | A0 | goldens 记录的权重 sha256 与模型目录一致；原生 logprobs 与参照的最大绝对差不超过 goldens 中的 `tolerance` |
 | `-k g1c` | A1；A0 为负对照 | 两个文档打包在一行（第二个文档的 position 从 0 重新开始），与各自单独打分比较：A1 最大绝对差 ≤ 2e-2 [P]；A0 的第一个文档 ≤ 2e-2，第二个文档的差异 > 1e-3，因为 `mamba_ssm_scan` 不在文档之间复位，这正是 Mamba 行每行只放一个文档的原因 |
-| `-k g1d` | A0、A0-split | 两者的 `init_seed` 相同；logprobs 最大绝对差不超过 goldens 的 `tolerance`；梯度按 `split_param_name()` 改名后一一对应，最小余弦 ≥ 0.999 [P] |
+| `-k g1d` | A0、A0-split | 两者的 `init_seed` 相同；logprobs 最大绝对差不超过 goldens 的 `tolerance`；梯度按 `split_param_name()` 改名后一一对应，两个模型的每个梯度都存在、有限且不全为零（A0-split 不在 G0 中），每个余弦都 ≥ 0.999 [P]（NaN 也算不成立） |
 
 G1(d) 不成立时，模型级第 1 层的方案不能承载 P2/P3 的 c_t 与槽写入，改走 fork IR 后处理 pass。打包行的文档隔离靠每行一个文档保证（shard 的构建规则，CPU 测试）。
 
@@ -127,19 +158,24 @@ G1(d) 不成立时，模型级第 1 层的方案不能承载 P2/P3 的 c_t 与�
 $PY -m pytest -c fork/tlc/pyproject.toml fork/tlc/tests/gpu/test_gates.py -k g2 -s | tee "$TLC_RUNS/env/g2.txt"
 ```
 
+预期 7 个测试通过（`test_g2_initial_loss` 3 个、梯度 1 个、过拟合 2 个、恢复 1 个）。
+
 | 测试 | 判据 |
 |---|---|
-| `test_g2_initial_loss`（A0、A1、A1h） | 初始权重下随机 token 的交叉熵在 ln V + var(logits)/2 ± 0.1 之内，logits 的标准差 < 1。var(logits) 由权重估计：初始化时 final norm 的输出每个 token 均方为 1，所以它是宽度 × LM head（tied 时即 embedding）的均方；原生只返回目标的 log-probability，拿不到完整的 logits |
+| `test_g2_initial_loss`（A0、A1、A1h） | 初始权重下随机 token 的交叉熵在 ln V + var(logits)/2 ± 0.1 之内，logits 的标准差 < 1。var(logits) 由权重估计：初始化时 final norm 的输出每个 token 均方为 1，所以它是宽度 × LM head（tied 时即 embedding）的均方。标准差这一半因此检查的是初始化方案（0.02 × √384 ≈ 0.39，打印为 `logit_std_from_weights`），不是原生训练器；打分用的 trainer 只返回目标的 log-probability，完整的 logits 要另建一个带 LoRA 的 trainer（如 G3）。期望值保持由权重估计，交叉熵这一半才是对原生前向的独立检查 |
 | `test_g2_gradients_point_where_the_reference_does` | A0 第 1 层与第 12 层的每个参数：原生 bf16 梯度与参照实现（分块形式，fp32 autograd，2 × 128 token）的梯度余弦 ≥ 0.99 [P] |
 | `test_g2_overfits_a_small_alphabet_batch`（A0、A1） | 一个只含 64 个 token id 的固定 batch（2 × 512，其 H(next \| current) ≥ 1.5），200 步 AdamW（学习率 1e-3）后 loss < 0.05 [P]。只看当前 token 的模型到不了这个下限，所以拟合它说明序列混合有效；消融 mixer 的对照在 CPU 参照上做（`prototypes/g2_suite.py`），原生图无法消融 |
-| `test_g2_resume_reproduces_the_next_steps_and_the_logits` | A0 的 smoke 阶段跑两次：一次不中断，一次从第 5 步的 checkpoint 恢复；第 6–10 步的 loss 相差 ≤ 1e-3（原生反向用浮点 atomicAdd，不要求逐位相等），两次的最终权重在 goldens 上的 logprobs 相差不超过 G1(b) 的 `tolerance` [P]。再把第 5 步的 checkpoint 导出到一个用另一个 seed 初始化的源目录：导出目录的 logprobs 与 checkpoint 逐位相同，tied embedding 只存一份（没有 `lm_head.weight`） |
+| `test_g2_resume_reproduces_the_next_steps_and_the_logits` | A0 的 smoke 阶段跑两次：一次不中断，一次从第 5 步的 checkpoint 恢复；第 6–10 步的 loss 相差 ≤ 1e-3（原生反向用浮点 atomicAdd，不要求逐位相等），两次的最终权重在 goldens 上的 logprobs 相差不超过 G1(b) 的 `tolerance` [P]。再把第 5 步的 checkpoint 导出到一个用另一个 seed 初始化的源目录：导出目录的权重文件与 checkpoint 的相同（sha256），与源目录的不同；tied embedding 只存一份（没有 `lm_head.weight`）。“加载进另一个 seed 构建的模型后 logits 逐位相等”（G2.4）还没有原生检查，见下文“已知问题” |
 
 梯度全部有限由 G0 的第 6 步检查；固定 batch 在真实数据上的过拟合是 G3 的 overfit 阶段。
+
+已知问题（待 owner 决定，见 [model.md 的“已知问题：tied LM head”](model.md#已知问题tied-lm-head)）：原生全量训练没有把 tied 的 `lm_head` 与 embedding 绑在一起，checkpoint 会写出一份停在初始值的 `lm_head.weight`。所以恢复检查预期在“没有 `lm_head.weight`”处失败：按停止规则在 G2 停下，记录输出，不要删掉这条断言。修复（原生 ledger topic，或明确改成 untied）之后，G2.4 的“加载进另一个 seed 构建的模型”检查和 G3 采样器在训练后权重上的检查一并补上。
 
 ## G3 基线
 
 ```bash
 ( set -e  # a subshell: the first failing command stops the loop, not the login shell
+: "${PEAK_TFLOPS:?set PEAK_TFLOPS (see the preamble)}"
 for row in A0 A1 A1h; do
   for stage in smoke overfit pilot; do
     TLC_ROW=$row $PY -m surogate_tlc train fork/tlc/examples/p0.yaml --stage "$stage"
@@ -159,13 +195,13 @@ $PY -m pytest -c fork/tlc/pyproject.toml fork/tlc/tests/gpu/test_probes.py fork/
 )
 ```
 
-每行依次跑 10 步冒烟、100 步过拟合和 300 步 pilot（microbatch 32），每个阶段结束时在固定 prompt 上写出 greedy 样例；再在每次更新 16,384 token 不变的前提下用 microbatch 2 和 8 重跑 pilot（运行目录 `pilot-mb2`、`pilot-mb8`）；`eval` 给出验证 loss、按来源和种类的 loss 与 unigram 基线；`probe` 在两个 dev 套件上打分；`report` 汇总全部运行。判据：
+修好问题后重跑整段即可：已完成的阶段不再训练，失败的阶段从最后一个 checkpoint 恢复；`sample`、`eval`、`probe` 只是在同一份最终权重上重测。每行依次跑 10 步冒烟、100 步过拟合和 300 步 pilot（microbatch 32），每个阶段结束时在固定 prompt 上写出 greedy 样例；再在每次更新 16,384 token 不变的前提下用 microbatch 2 和 8 重跑 pilot（运行目录 `pilot-mb2`、`pilot-mb8`）；`eval` 给出验证 loss、按来源和种类的 loss 与 unigram 基线；`probe` 在两个 dev 套件上打分；`report` 汇总全部运行。判据：
 
-- 每条命令退出码为 0，`status` 为 completed，loss 曲线中没有 NaN 或 Inf。
-- smoke：第 1 步的 loss 接近 G2 的初始 loss。
+- 每条命令退出码为 0，`status` 为 completed，loss 曲线中没有 NaN 或 Inf。`-k "probe or g3"` 预期 4 个测试通过。
+- smoke：第 1 步的 loss 接近 G2 的初始 loss（`report` 的 `first_loss`；运行恢复过时它仍取自第一次调用，`attempts` 与 `resumed_from_step` 两列注明）。
 - overfit：在固定 batch 上，第 100 步的 loss 低于第 1 步的一半 [P]。
 - pilot：`eval` 输出 `below_unigram: true`。
-- 样例：10、100、300 步各有 `samples.json`（固定 prompt、生成的 token 与文本）；`-k g3` 通过，即采样用的 trainer（零初始化的 rank 1 LoRA）给出的 next-token 分布与 `compute_logprobs` 一致，最大绝对差 ≤ 2e-2 [P]。
+- 样例：10、100、300 步各有 `samples.json`（固定 prompt、生成的 token 与文本）；`-k g3` 通过，即在初始权重上，采样用的 trainer（零初始化的 rank 1 LoRA）给出的 next-token 分布与 `compute_logprobs` 一致，最大绝对差 ≤ 2e-2 [P]。训练之后两者未必一致（上文 G2 的已知问题：带 LoRA 的 trainer 把 embedding 当作 head，不读 `lm_head.weight`），所以在修复之前，训练后的样例只作参考。
 - 探针：`test_probes.py` 通过，即 A0 在合成 dev 套件的短项上，原生的候选得分与参照实现（bf16 存储）之差不超过 G1(b) 的 `tolerance` × 计分 token 数，参照的领先幅度超过误差界时两者选出同一个候选。pilot 规模下准确率接近 chance 是预期的，这一步只检验探针流水线；test 半不在 G3 读取。
 - 记录每行在 microbatch 2、8、32 下的 tokens/s、MFU 与峰值显存，以及每次更新的有效目标数，然后填写下文的 GPU 预算。
 - 这些结果是 pilot：G3 只认证流水线，不认证模型质量。未通过 G3 时不进入 Phase 1。

@@ -166,14 +166,23 @@ def test_rebuild_is_identical_and_refuses_a_used_directory(tmp_path, built, corp
         shards.build_shards(corpus.load_corpus(corpus_spec), trained_tokenizer, again, seq_len=SEQ_LEN)
 
 
-def test_writer_matches_upstream_bytes(tmp_path):
+def _five_rows(rng):
+    return SEQ_LEN, [rng.integers(1, 300, size=n).tolist() for n in (1, 5, SEQ_LEN, 17, SEQ_LEN - 1)]
+
+
+def _three_blocks(rng):
+    # close() writes positions and mask bits in blocks of about 4096 rows; 12289 rows make three uneven blocks.
+    return 8, [rng.integers(1, 300, size=int(n)).tolist() for n in rng.integers(1, 9, size=12289)]
+
+
+@pytest.mark.parametrize("make", [_five_rows, _three_blocks], ids=["one block", "three blocks"])
+def test_writer_matches_upstream_bytes(tmp_path, make):
     source = (REPO / "surogate" / "train" / "tokenize.py").read_text(encoding="utf-8")
     [cls] = [n for n in ast.parse(source).body if isinstance(n, ast.ClassDef) and n.name == "TokenizedDataFileWriter"]
     namespace = {"np": np}
     exec(compile(ast.Module([cls], []), "tokenize.py", "exec"), namespace)
-    rng = np.random.default_rng(0)
-    rows = [rng.integers(1, 300, size=n).tolist() for n in (1, 5, SEQ_LEN, 17, SEQ_LEN - 1)]
-    ours = shards.ShardWriter(tmp_path / "ours.bin", seq_len=SEQ_LEN, vocab_size=300, pad_id=0)
+    seq_len, rows = make(np.random.default_rng(0))
+    ours = shards.ShardWriter(tmp_path / "ours.bin", seq_len=seq_len, vocab_size=300, pad_id=0)
     for row in rows:
         ours.add_row(row)
     ours.close()
@@ -181,10 +190,31 @@ def test_writer_matches_upstream_bytes(tmp_path):
         str(tmp_path / "theirs.bin"), 300, masking=True, non_overlapping=True
     ) as w:
         for row in rows:
-            tokens = np.zeros(SEQ_LEN, dtype=np.int32)
+            tokens = np.zeros(seq_len, dtype=np.int32)
             tokens[: len(row)] = row
-            w.add_document(tokens, np.arange(SEQ_LEN), mask=np.arange(SEQ_LEN) < len(row) - 1)
+            w.add_document(tokens, np.arange(seq_len), mask=np.arange(seq_len) < len(row) - 1)
     assert (tmp_path / "ours.bin").read_bytes() == (tmp_path / "theirs.bin").read_bytes()
+
+
+def test_a_failed_build_removes_its_files(tmp_path, corpus_spec, trained_tokenizer):
+    """A bad record halfway leaves `out` empty, so the same command runs again once the corpus is fixed."""
+    import shutil
+
+    shutil.copytree(corpus_spec.parent / "code", tmp_path / "corpus" / "code")
+    for name in (corpus_spec.name, "text.jsonl"):
+        shutil.copy(corpus_spec.parent / name, tmp_path / "corpus" / name)
+    spec, text = tmp_path / "corpus" / corpus_spec.name, tmp_path / "corpus" / "text.jsonl"
+    good = text.read_text(encoding="utf-8")
+    text.write_text(good + json.dumps({"txt": "no text field"}) + "\n", encoding="utf-8")
+    out = tmp_path / "data"
+    with pytest.raises(ValueError, match="needs a string 'text'"):
+        shards.build_shards(corpus.load_corpus(spec), trained_tokenizer, out, seq_len=SEQ_LEN)
+    assert list(out.iterdir()) == []  # no hidden .*.tmp left behind
+    text.write_text(good, encoding="utf-8")
+    shards.build_shards(corpus.load_corpus(spec), trained_tokenizer, out, seq_len=SEQ_LEN)
+    (out / ".train-00000.bin.tmp").write_bytes(b"left by a killed build")
+    with pytest.raises(FileExistsError, match=r"\.train-00000\.bin\.tmp"):
+        shards.build_shards(corpus.load_corpus(spec), trained_tokenizer, out, seq_len=SEQ_LEN)
 
 
 def test_writer_rejects_bad_rows(tmp_path):

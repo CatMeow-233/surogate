@@ -111,3 +111,62 @@ def test_provenance_lists_files_with_hashes(corpus_spec):
     }
     keys = {"name", "kind", "url", "revision", "license", "downloaded", "stage", "filters", "generated", "files"}
     assert set(sources[1]) == keys
+
+
+SPEC = """seed = 3
+val_fraction = 0.5
+
+[[source]]
+name = "natural"
+kind = "code"
+files = ["code/*.py"]
+url = "https://example.invalid"
+license = "MIT"
+downloaded = 2026-10-01
+filters = []
+
+[[source]]
+name = "synth-binding"
+kind = "code"
+generated = true
+files = ["../suites/synth/train.jsonl"]
+url = "python -m surogate_tlc.data.synth"
+license = "generated"
+downloaded = 2026-10-29
+filters = []
+"""
+
+
+def test_a_tree_keeps_its_keys_and_split_wherever_it_lives(tmp_path):
+    """The runbook's synth source lies outside the spec's directory (../suites): its keys, and with them the split,
+    the shard files and the decontamination keys, must not depend on where $TLC_RUNS lives."""
+    seen = []
+    for root in (tmp_path / "a" / "runs", tmp_path / "elsewhere" / "renamed"):
+        (root / "corpus" / "code").mkdir(parents=True)
+        (root / "suites" / "synth").mkdir(parents=True)
+        for i in range(6):
+            (root / "corpus" / "code" / f"m{i}.py").write_text(f"x = {i}\n")
+        lines = "".join(json.dumps({"text": f"y{i} = 'abcd'\n"}) + "\n" for i in range(40))
+        (root / "suites" / "synth" / "train.jsonl").write_text(lines)
+        (root / "corpus" / "corpus.toml").write_text(SPEC)
+        c = corpus.load_corpus(root / "corpus" / "corpus.toml")
+        seen.append(([(d.key, d.group, corpus.split_of(c, d)) for d in corpus.documents(c)], corpus.provenance(c)))
+    assert seen[0] == seen[1]
+    keys = [key for key, _, _ in seen[0][0]]
+    assert "synth-binding/../suites/synth/train.jsonl:1" in keys and not any(str(tmp_path) in k for k in keys)
+
+
+def test_jsonl_documents_that_are_not_utf8_are_dropped(tmp_path):
+    """A lone surrogate escape (valid JSON, invalid text) and raw invalid bytes on a line: both dropped and counted."""
+    good = json.dumps({"text": "fine"}).encode()
+    surrogate = json.dumps({"text": "a \ud800 b"}).encode()
+    (tmp_path / "t.jsonl").write_bytes(surrogate + b"\n" + b'{"text": "x \xff y"}\n' + good + b"\n")
+    spec = tmp_path / "c.toml"
+    spec.write_text(
+        'seed = 0\nval_fraction = 0.0\n[[source]]\nname = "t"\nkind = "text"\nfiles = ["t.jsonl"]\nurl = "u"\n'
+        'license = "l"\ndownloaded = 2026-10-01\nfilters = []\n',
+        encoding="utf-8",
+    )
+    dropped = Counter()
+    assert [d.key for d in corpus.documents(corpus.load_corpus(spec), dropped)] == ["t/t.jsonl:3"]
+    assert dropped == {("t", "not_utf8"): 2}

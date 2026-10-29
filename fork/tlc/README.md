@@ -16,13 +16,13 @@ P0 不修改任何上游文件：TLC 模型在 import 时注册进上游 DSL，�
 | [tests/gpu/](tests/gpu/) | GPU 测试，在 GPU 主机上按 [运行手册](docs/runbook.md) 运行；没有 CUDA 时全部跳过 |
 | [prototypes/](prototypes/) | 纯 PyTorch 的 Mamba-2 参照与 G1、G2 参照套件，不打包 |
 
-TLC 代码不进任何其他 wheel：根目录 `pyproject.toml` 的原生 wheel 只打包 `surogate/`，实验 wheel 只打包 `surogate.experimental*`。`tests/cpu` 中的测试检查这两条边界，所以不要把 TLC 代码放进 `surogate/_fork`。
+TLC 代码不进任何其他 wheel：根目录 `pyproject.toml` 的原生 wheel 只打包 `surogate/`，实验 wheel 只打包 `fork/experimental/src` 中的 `surogate.experimental*`，所以不要把 TLC 代码放进 `surogate/_fork` 或那里。`tests/cpu/test_scaffold.py` 按两个 pyproject 读出这些目录，检查 TLC 目录树不在其中、TLC 代码不导入随 wheel 发布的 fork 代码（`surogate._fork`、`surogate.experimental`），以及其中的文件不含 TLC 的名字（包名、config 键、`TLC` 开头的类名）；去掉了所有 TLC 名字的副本仍查不出来，边界最终靠审查。
 
 ## 环境
 
 - CPU 测试：`fork/dev test tlc` 用 `FORK_PY` 指定的解释器，默认是仓库根目录的 `.venv/bin/python`，那里不需要装本包也不需要原生扩展，准备方法见 [fork/README.md 的“首次准备环境”](../README.md#首次准备环境)。测试把仓库根目录和 `fork/tlc/src` 放在 `sys.path` 最前面，只测检出目录中的代码，不在仓库中写入文件。
 - GPU 主机（RTX 5090）：专用环境 `fork/.venv-tlc` 的依赖与根目录 `.venv` 相同，本包以 editable 方式装入；`surogate` 经一个 `.pth` 文件从本检出导入，原生扩展就是 `fork/dev build train` 复制进 `surogate/` 的那一份。创建步骤见 [运行手册的 G0](docs/runbook.md#g0-环境)。
-- 原型：在 `fork/.venv-experimental` 或任一装有 CPU torch 的环境中运行，见 [prototypes/README.md](prototypes/README.md)。
+- 原型：在 `fork/` 下的隔离环境中运行：只有 CPU 时用 `fork/.venv-experimental`（`fork/dev test experimental` 创建，已有 torch、numpy 与 safetensors），GPU 主机上用 `fork/.venv-tlc`（运行手册 G1 即如此）；CPU 测试经 `fork/dev test tlc` 用 `FORK_PY` 从检出目录加载它们。见 [prototypes/README.md](prototypes/README.md)。
 
 ## 命令行
 
@@ -31,7 +31,7 @@ TLC 代码不进任何其他 wheel：根目录 `pyproject.toml` 的原生 wheel 
 | 命令 | 作用 |
 |---|---|
 | `init ROW OUT --tokenizer DIR --seed N` | 写出 P0 一行的模型目录及初始权重。`OUT` 必须不存在或为空 |
-| `train CONFIG [--stage S] [--microbatch B]` | 训练一个运行配置。退出码：0 完成；1 训练失败，失败报告在运行记录中；2 配置有问题，没有开始训练 |
+| `train CONFIG [--stage S] [--microbatch B]` | 训练一个运行配置；再次运行时从最后一个 checkpoint 恢复，已完成的运行不再训练。退出码：0 完成；1 训练失败，失败报告在运行记录中；2 配置有问题，没有开始训练 |
 | `eval MODEL DATA [--split val] [--max-rows N] [--out FILE]` | teacher-forced 的 loss、按来源和按种类（代码、英文）的 loss 与 unigram 基线 |
 | `probe MODEL DATA SUITE [--max-items N] [--out FILE]` | 在绑定探针套件上做候选打分；`--out` 另写每项的结果 |
 | `sample MODEL DATA [--max-new 64] [--out FILE]` | 固定 prompt 上的 greedy 样例 |

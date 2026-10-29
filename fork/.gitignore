@@ -2,5 +2,8 @@
 /.venv-tlc/
 /outputs/
 /build/
-# An editable install of fork/tlc writes its metadata into the source tree.
+# Installing or building fork/tlc writes its metadata, and for a non-editable install or a wheel build/ and dist/,
+# into the package directory.
 /tlc/src/*.egg-info/
+/tlc/build/
+/tlc/dist/

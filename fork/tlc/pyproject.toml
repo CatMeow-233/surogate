@@ -22,4 +22,4 @@ include = ["surogate_tlc*"]
 [tool.pytest.ini_options]
 testpaths = ["tests/cpu"]
 addopts = "-p no:cacheprovider --import-mode=importlib"
-markers = ["gpu: needs CUDA and the native extension; run on the GPU host (README: G0-G3 runbook)"]
+markers = ["gpu: needs CUDA and the native extension; run on the GPU host (docs/runbook.md)"]

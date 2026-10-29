@@ -97,3 +97,32 @@ def test_greedy_stops_at_a_stop_id_or_the_row_end():
     assert greedy([[1, 2], [1]], next_position, seq_len=8, **kwargs) == [[2, 3], [1, 2, 3]]
     assert greedy([[1, 2], [1]], next_position, seq_len=3, **kwargs) == [[2], [1, 2]]
     assert greedy([[1, 2]], next_position, seq_len=8, **{**kwargs, "max_new": 1}) == [[2]]
+
+
+@pytest.mark.parametrize("stop", ["<|eos|>", "<|code_end|>"])
+def test_samples_start_like_shard_documents_and_stop_at_either_end(small_model, shard_dirs, stop):
+    """A prompt is the start of a document as the shards frame it (special-token strings are text), and both
+    <|eos|> and <|code_end|> end a sample."""
+    from surogate_tlc.data import corpus
+    from surogate_tlc.data import tokenizer as tok
+    from surogate_tlc.eval import samples
+
+    tokenizer = tok.load(small_model, ordinary=True)
+    special = tok.special_ids(tokenizer)
+    seen = []
+
+    def next_logits(inputs, last):
+        seen.append((inputs.copy(), last.copy()))
+        logits = np.zeros((inputs.shape[0], 320), np.float32)
+        logits[:, special[stop]] = 1.0
+        return logits
+
+    prompts = [("code", "x = 1\n"), ("text", "a <|eos|> b <|code_end|> c")]
+    result = samples.sample(small_model, shard_dirs[64], prompts=prompts, max_new=4, batch=2, next_logits=next_logits)
+    assert [s["tokens"] for s in result["samples"]] == [[special[stop]]] * 2
+    (inputs, last), *_ = seen
+    for row, (kind, text) in enumerate(prompts):
+        doc = corpus.Document(corpus.Source("s", kind, (), {}), "s/x", "s/x", text)
+        [(_, framed)] = shards.encode(tokenizer, [doc], special)
+        prompt = framed[:-2] if kind == "code" else framed[:-1]  # without <|code_end|> <|eos|>, or <|eos|>
+        assert inputs[row, : len(prompt)].tolist() == prompt and last[row] == len(prompt) - 1, kind

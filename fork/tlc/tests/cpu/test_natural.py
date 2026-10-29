@@ -4,6 +4,7 @@ the static subset, functions left out by their AST, the val split, and no items 
 import json
 import random
 import textwrap
+from types import SimpleNamespace
 
 import pytest
 from surogate_tlc.data import corpus, decontam, natural
@@ -63,7 +64,8 @@ def test_natural_items_leave_out_excluded_functions():
 def test_static_subset():
     import ast
 
-    for body, inside in (("x = 1\nreturn x", True), ("global y\ny = 1", False), ("del x", False)):
+    cases = (("x = 1\nreturn x", True), ("global y\ny = 1", False), ("nonlocal y\ny = 1", False), ("del x", False))
+    for body, inside in cases:
         fn = ast.parse("def f(x):\n" + textwrap.indent(body, "    ")).body[0]
         assert natural.static_subset(fn, natural._own_nodes(fn)) is inside
 
@@ -87,7 +89,8 @@ CLONE = (  # at least decontam.MIN_AST_NODES nodes, so its structure has a hash
 def test_build_natural_uses_the_val_split(tmp_path):
     (tmp_path / "code").mkdir()
     for i in range(24):
-        # CLONE with other names in every file: its structure is in the train split, so it gives no item.
+        # CLONE with other names in every file, so in both splits: it gives no item. Which split's functions count is
+        # test_t3_excludes_the_train_split_and_keeps_a_group_in_one_half.
         clone = CLONE.replace("merge", f"merge{i}").replace("result", f"out{i}")
         (tmp_path / "code" / f"m{i:02d}.py").write_text(FUNCTIONS[i % 4] + "\n\n" + clone)
     # Synthetic binding programs as a generated source: they are code of the val split too, but give no T3 item.
@@ -118,3 +121,55 @@ def test_build_natural_uses_the_val_split(tmp_path):
     assert not any(item.prompt.rsplit("\ndef ", 1)[-1].startswith("merge") for v in halves.values() for item in v)
     with pytest.raises(FileExistsError):
         natural.build_natural(c, tmp_path / "t3")
+
+
+VAL_ONLY = (
+    "def tally(rows, width, fill):\n    grid = []\n    for row in rows:\n        line = list(row)\n"
+    "        while len(line) < width:\n            line.append(fill)\n        if len(line) > width:\n"
+    "            line = line[:width]\n        grid.append(line)\n    return grid\n"
+)
+NAT_TRAIN = (
+    "def window(seq, size, step):\n    out = []\n    index = 0\n    while index + size <= len(seq):\n"
+    "        chunk = seq[index : index + size]\n        if chunk and size > step:\n            out.append(chunk)\n"
+    "        index = index + step\n    return out\n"
+)
+
+
+def test_t3_excludes_the_train_split_and_keeps_a_group_in_one_half(tmp_path):
+    """The excluded ASTs are those of every train-split code document, generated sources included, and only those: a
+    function that is only in the val split stays. A group's documents (one repository) stay in one half."""
+    seed, fraction = 3, 0.5
+    probe = corpus.Corpus(tmp_path / "unused.toml", seed, fraction, ())
+    groups = {"train": [], "val": []}
+    for i in range(200):
+        split = corpus.split_of(probe, SimpleNamespace(group=f"group:repo{i}"))
+        groups[split].append(f"repo{i}")
+    train, val = groups["train"][:4], groups["val"][:6]
+    hashes = {}
+    for name, text in (("clone", CLONE), ("val", VAL_ONLY), ("natural", NAT_TRAIN)):
+        [(_, _, hashes[name])] = decontam.function_hashes(text)
+    natural_docs = [{"text": NAT_TRAIN.replace("window", f"window{i}"), "group": g} for i, g in enumerate(train)]
+    natural_docs += [
+        {"text": NAT_TRAIN + "\n\n" + CLONE.replace("result", f"out{i}") + "\n\n" + VAL_ONLY, "group": g}
+        for i, g in enumerate(val * 3)
+    ]
+    generated = [{"text": CLONE.replace("merge", f"gen{i}"), "group": g} for i, g in enumerate(train)]
+    for name, records in (("code.jsonl", natural_docs), ("gen.jsonl", generated)):
+        (tmp_path / name).write_text("".join(json.dumps(r) + "\n" for r in records))
+    source = '[[source]]\nname = "{}"\nkind = "code"\nfiles = ["{}"]\nurl = "https://example.invalid"\n'
+    source += 'license = "MIT"\ndownloaded = 2026-10-01\nfilters = []\n'
+    spec = tmp_path / "corpus.toml"
+    spec.write_text(
+        f"seed = {seed}\nval_fraction = {fraction}\n\n"
+        + source.format("code", "code.jsonl")
+        + source.format("synth", "gen.jsonl")
+        + "generated = true\n"
+    )
+    c = corpus.load_corpus(spec)
+    assert natural.train_function_hashes(c) == {hashes["clone"], hashes["natural"]}
+    natural.build_natural(c, tmp_path / "t3", seed=1)
+    halves = {half: read_items(tmp_path / "t3" / f"{half}.jsonl") for half in HALVES}
+    assert all(item.prompt.rsplit("\ndef ", 1)[-1].startswith("tally") for v in halves.values() for item in v)
+    group_of = {f"code/code.jsonl:{n}": r["group"] for n, r in enumerate(natural_docs, 1)}
+    used = {half: {group_of[i.id[len("T3:") :].rsplit(":", 1)[0]] for i in items} for half, items in halves.items()}
+    assert used["dev"] and used["test"] and not used["dev"] & used["test"], used

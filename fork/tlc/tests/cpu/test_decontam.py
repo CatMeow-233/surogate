@@ -108,10 +108,74 @@ def test_identifier_abstraction():
         ("try:\n    f()\nexcept E as err:\n    g(err)\n", "try:\n    f()\nexcept E as e2:\n    g(e2)\n"),
         ("import numpy as np\nnp.zeros(3)\n", "import numpy as xp\nxp.zeros(3)\n"),
         ("def f():\n    global n\n    n = 1\n", "def f():\n    global m\n    m = 1\n"),
+        (
+            "def f():\n    n = 0\n    def g():\n        nonlocal n\n        n += 1\n    return g\n",
+            "def f():\n    m = 0\n    def g():\n        nonlocal m\n        m += 1\n    return g\n",
+        ),
+        ("try:\n    f()\nexcept MyError as e:\n    g(e)\n", "try:\n    f()\nexcept Oops as e:\n    g(e)\n"),
+        (
+            "class C:\n    def __init__(self, a):\n        self.a = a\nc = C(a=1)\n",
+            "class C:\n    def __init__(self, b):\n        self.a = b\nc = C(b=1)\n",
+        ),
+        ("f = lambda a, b: a\nx = f(a='p', b='q')\n", "g = lambda c, d: c\ny = g(c='p', d='q')\n"),
     ],
-    ids=["keyword arguments", "except-as", "import-as", "global"],
+    ids=["keyword arguments", "except-as", "import-as", "global", "nonlocal", "except type", "class", "lambda"],
 )
 def test_ast_hash_renames_every_binding(a, b):
+    assert decontam.ast_hash(ast.parse(a)) == decontam.ast_hash(ast.parse(b))
+
+
+TOP_WORDS = """def top_words(text, key):
+    counts = {}
+    for word in text.split():
+        counts[word] = counts.get(word, 0) + 1
+    return sorted(counts.items(), key=key, reverse=True)
+"""
+RENAMED_TOP_WORDS = """def f(s, order):
+    c = {}
+    for w in s.split():
+        c[w] = c.get(w, 0) + 1
+    return sorted(c.items(), key=order, reverse=True)
+"""
+
+
+@pytest.mark.parametrize(
+    "a, b, equal",
+    [
+        # Renaming locals alone keeps the hash, also when a local shares its name with a callee's keyword.
+        (TOP_WORDS, RENAMED_TOP_WORDS, True),
+        ("def f(xs, end):\n    print(xs, end=end)\n", "def f(xs, tail):\n    print(xs, end=tail)\n", True),
+        # An API keyword is a name of its own: key= is not reverse=.
+        ("sorted(xs, key=f)\n", "sorted(xs, reverse=f)\n", False),
+        # A keyword of a local function binds one of its parameters: the reordered call is another binding.
+        ("def f(a, b):\n    return b\nf(a='p', b='q')\n", "def f(a, b):\n    return b\nf(b='q', a='p')\n", False),
+    ],
+    ids=["local named like a keyword", "print end", "api keywords", "keyword reordered"],
+)
+def test_ast_hash_keywords_follow_their_callee(a, b, equal):
+    assert (decontam.ast_hash(ast.parse(a)) == decontam.ast_hash(ast.parse(b))) is equal
+
+
+@pytest.mark.parametrize(
+    "a, b",
+    [
+        ('def f(a, b):\n    """Doc."""\n    return a + b\n', "def f(a, b):\n    return a + b\n"),
+        ("def f(a: List[int], b: int):\n    return a + b\n", "def f(a, b):\n    return a + b\n"),
+        ("def f(a, b) -> List[str]:\n    return a + b\n", "def f(a, b):\n    return a + b\n"),
+        ("@functools.cache\ndef f(a, b):\n    return a + b\n", "def f(a, b):\n    return a + b\n"),
+        ("a: str = 'k1'\nb = a\n", "a = 'k1'\nb = a\n"),
+        ("def f(x):\n    y: int\n    return x\n", "def f(x):\n    pass\n    return x\n"),
+    ],
+    ids=[
+        "docstring",
+        "argument annotations",
+        "return annotation",
+        "decorator",
+        "annotated assignment",
+        "bare annotation",
+    ],
+)
+def test_ast_hash_drops_docstrings_annotations_and_decorators(a, b):
     assert decontam.ast_hash(ast.parse(a)) == decontam.ast_hash(ast.parse(b))
 
 
@@ -157,10 +221,41 @@ def test_rules(benchmarks):
     assert {h["rule"] for h in hits} == {"name"} and decontam.removing(hits) == []
 
 
+def test_ast_rule_finds_a_bare_copy(benchmarks):
+    """A copy without the docstring and the annotations, with a decorator: code13 misses it, the ast rule does not."""
+    index = decontam.Index(decontam.load_benchmarks(benchmarks)[0])
+    bare = "@functools.cache\ndef running_balance_report(entries, limit):\n" + HE_SOLUTION
+    hits = index.scan(decontam.rename(bare), "code")
+    assert ("ast", "HumanEval/HumanEval/0") in {(h["rule"], h["item"]) for h in decontam.removing(hits)}
+
+
+WORDS = "write a function that returns the longest strictly increasing run of distinct primes".split()
+
+
+@pytest.mark.parametrize(
+    "item_words, doc_words, coverage, removed",
+    [(12, 11, 0.8, True), (12, 10, 0.6, False), (13, 10, 0.5, False), (13, 9, None, False)],
+    ids=["remove boundary", "below remove", "flag boundary", "below flag"],
+)
+def test_coverage_thresholds_are_inclusive(item_words, doc_words, coverage, removed):
+    """>= 0.5 flags, >= 0.8 removes. A description of n words has n - 7 word 8-grams; a document quoting its first
+    k words covers k - 7 of them (4/5 = 0.8, 3/5 = 0.6, 3/6 = 0.5, 2/6)."""
+    index = decontam.Index([decontam.BenchmarkItem("toy/1", "", " ".join(WORDS[:item_words]), None)])
+    hits = index.scan("Homework: " + " ".join(WORDS[:doc_words]) + " please.", "text")
+    assert [(h["rule"], h["coverage"]) for h in hits] == ([("text8", coverage)] if coverage else [])
+    assert bool(decontam.removing(hits)) is removed
+
+
 def test_calibration(benchmarks):
     items, _ = decontam.load_benchmarks(benchmarks)
     result = decontam.calibrate(decontam.Index(items), items, [CLEAN, CLEAN.replace("root", "top")], plants=3)
     assert result["plants"] == 3 and result["recall"] == 1.0 and result["false_positive_rate"] == 0
+
+
+SOURCE = (
+    '[[source]]\nname = "{}"\nkind = "code"\nfiles = ["{}"]\nurl = "https://example.invalid"\nlicense = "MIT"\n'
+    "downloaded = 2026-10-01\nfilters = []\n"
+)
 
 
 def _corpus(root):
@@ -168,12 +263,20 @@ def _corpus(root):
     (root / "code" / "clean.py").write_text(CLEAN)
     (root / "code" / "copied.py").write_text(CLEAN + "\n\n" + decontam.rename(MBPP_CODE))
     (root / "code" / "named.py").write_text("def count_matching_neighbours(a, b):\n    return a == b\n")
-    spec = (
-        'seed = 0\nval_fraction = 0.0\n\n[[source]]\nname = "code"\nkind = "code"\nfiles = ["code/*.py"]\n'
-        'url = "https://example.invalid"\nlicense = "MIT"\ndownloaded = 2026-10-01\nfilters = []\n'
-    )
-    (root / "corpus.toml").write_text(spec)
+    (root / "corpus.toml").write_text("seed = 0\nval_fraction = 0.0\n\n" + SOURCE.format("code", "code/*.py"))
     return root / "corpus.toml"
+
+
+def test_calibration_hosts_are_natural_code(benchmarks, tmp_path):
+    """G6 measures on natural code: a generated source (the synth stream) is scanned, but plants no host."""
+    spec = _corpus(tmp_path / "c")
+    (tmp_path / "c" / "synth.jsonl").write_text(
+        "".join(json.dumps({"text": f"x{i} = 'abcd'\n"}) + "\n" for i in range(9))
+    )
+    spec.write_text(spec.read_text() + SOURCE.format("synth", "synth.jsonl") + "generated = true\n")
+    report = decontam.scan_corpus(corpus.load_corpus(spec), benchmarks, plants=2)
+    assert report["documents"] == {"code": 3, "synth": 9}
+    assert report["calibration"]["hosts"] == 3 and report["calibration"]["host_sources"] == {"code": 3}
 
 
 def test_report_and_corpus(benchmarks, tmp_path, trained_tokenizer, capsys):

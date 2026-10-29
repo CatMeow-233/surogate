@@ -6,6 +6,7 @@ the end fail when upstream changes that layout or the file list its final export
 
 import ast
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -64,10 +65,14 @@ def test_finalize_checkpoints_copies_the_source_contract(model_dir, tmp_path):
     step = _native_checkpoint(root, 10, model_dir)
     partial = _native_checkpoint(root, 20, model_dir, complete=False)
     partial_before = _snapshot(partial)
+    aside = _native_checkpoint(tmp_path / "aside", 30, model_dir).rename(root / "step_00000030.old")
+    aside_before = _snapshot(aside)
 
+    assert checkpoint.checkpoint_step(aside) is None  # only step_<8 digits> itself is a step directory
     assert checkpoint.finalize_checkpoints(root, model_dir) == [step]
 
     assert _snapshot(partial) == partial_before  # still being written: left alone
+    assert _snapshot(aside) == aside_before
     config = modeldir.check_model_dir(step)
     assert config == json.loads((model_dir / "config.json").read_text())
     for name in modeldir.companion_files(model_dir):
@@ -127,6 +132,86 @@ def test_export_writes_a_model_dir_from_one_checkpoint(model_dir, tmp_path):
     partial = _native_checkpoint(tmp_path / "ckpt", 20, model_dir, complete=False)
     with pytest.raises(ValueError, match="not a complete native checkpoint"):
         checkpoint.export(partial, model_dir, tmp_path / "export-20")
+
+
+@pytest.mark.parametrize("umask, mode", [(0o022, 0o755), (0o027, 0o750)])
+def test_export_mode_follows_the_umask(model_dir, tmp_path, umask, mode):
+    step = _native_checkpoint(tmp_path / "ckpt", 10, model_dir)
+    previous = os.umask(umask)
+    try:
+        out = checkpoint.export(step, model_dir, tmp_path / "export")
+    finally:
+        os.umask(previous)
+    assert out.stat().st_mode & 0o777 == mode  # not the 0700 of a temporary directory
+
+
+def test_export_into_a_symlink_or_an_existing_empty_directory(model_dir, tmp_path):
+    step = _native_checkpoint(tmp_path / "ckpt", 10, model_dir)
+    real = tmp_path / "big-disk" / "A0"
+    real.mkdir(parents=True)
+    real.chmod(0o750)
+    link = tmp_path / "exports" / "A0"
+    link.parent.mkdir()
+    link.symlink_to(real)
+    assert checkpoint.export(step, model_dir, link) == link
+    assert link.is_symlink() and modeldir.check_model_dir(real)
+    assert real.stat().st_mode & 0o777 == 0o750  # an existing empty directory keeps its mode
+    assert sorted(p.name for p in real.parent.iterdir()) == ["A0"]  # built next to the target, no leftovers
+
+
+def test_export_refuses_a_mount_point_before_copying(model_dir, tmp_path, monkeypatch):
+    step = _native_checkpoint(tmp_path / "ckpt", 10, model_dir)
+    out = tmp_path / "volume"
+    out.mkdir()
+    monkeypatch.setattr(checkpoint.os.path, "ismount", lambda path: Path(path) == out)
+    with pytest.raises(ValueError, match="mount point"):
+        checkpoint.export(step, model_dir, out)
+    assert list(out.iterdir()) == [] and sorted(p.name for p in tmp_path.iterdir()) == ["ckpt", "model", "volume"]
+
+
+def test_export_carries_optional_tokenizer_files(model_dir, tmp_path):
+    """A chat template kept only in chat_template.jinja, and special_tokens_map.json, reach checkpoints and exports."""
+    tokenizer_config = json.loads((model_dir / "tokenizer_config.json").read_text())
+    template = tokenizer_config.pop("chat_template")
+    (model_dir / "tokenizer_config.json").write_text(json.dumps(tokenizer_config))
+    (model_dir / "chat_template.jinja").write_text(template)
+    (model_dir / "special_tokens_map.json").write_text(json.dumps({"eos_token": "<|eos|>"}))
+    step = _native_checkpoint(tmp_path / "ckpt", 10, model_dir)
+    out = checkpoint.export(step, model_dir, tmp_path / "export")
+    for name in ("chat_template.jinja", "special_tokens_map.json"):
+        assert (out / name).read_bytes() == (model_dir / name).read_bytes(), name
+    modeldir.check_model_dir(out)
+
+
+def test_interrupted_finalize_fails_the_check(model_dir, tmp_path, monkeypatch):
+    """tlc_meta.json comes last, so a finalize cut off at any copy leaves a directory check_model_dir() refuses, even
+    the upstream final export, which already holds config.json and the tokenizer files."""
+    copies = len(modeldir.companion_files(model_dir)) - 1
+    real_copy = checkpoint.copy_atomic
+    for stop in range(copies):
+        out = tmp_path / f"output-{stop}"
+        out.mkdir()
+        (out / "model.safetensors").write_bytes(b"exported weights")
+        for name in _upstream_export_copies():
+            if (model_dir / name).is_file():
+                (out / name).write_bytes((model_dir / name).read_bytes())
+        calls = []
+
+        def copy(src, dst, calls=calls, stop=stop):
+            if len(calls) == stop:
+                raise OSError("disk full")
+            calls.append(dst)
+            real_copy(src, dst)
+
+        monkeypatch.setattr(checkpoint, "copy_atomic", copy)
+        with pytest.raises(OSError, match="disk full"):
+            checkpoint.finalize_dir(out, model_dir)
+        assert not (out / modeldir.META_FILE).exists(), stop
+        with pytest.raises(modeldir.ModelDirError):
+            modeldir.check_model_dir(out)
+        monkeypatch.setattr(checkpoint, "copy_atomic", real_copy)
+        checkpoint.finalize_dir(out, model_dir)
+        modeldir.check_model_dir(out)
 
 
 def test_failed_export_leaves_out_unchanged(model_dir, tmp_path):

@@ -1,7 +1,7 @@
-"""The binding-probe path on the native trainer (docs/training.md: 绑定探针, G3): for A0 on short items of the synthetic dev
-suite, the native candidate scores equal those of prototypes/ref_mamba2.py (bf16 storage) within the G1(b)
-tolerance per scored token, through the same rows and sums (surogate_tlc.eval.probes). Needs $TLC_RUNS with
-models/A0, data/, goldens/A0.npz and suites/synth/ from the runbook.
+"""The binding-probe path on the native trainer (docs/training.md: 绑定探针; docs/runbook.md: G3 基线): for A0 on
+short items of the synthetic dev suite, the native candidate scores equal those of prototypes/ref_mamba2.py (bf16
+storage) within the G1(b) tolerance per scored token, through the same rows and sums (surogate_tlc.eval.probes).
+Needs $TLC_RUNS with models/A0, data/, goldens/A0.npz and suites/synth/ from the runbook.
 """
 
 import json

@@ -26,7 +26,8 @@ filters = ["..."]      # 下载之后、入库之前做过的过滤；可以为�
 
 - 缺少必需键、出现未知键、glob 匹配不到文件时报错。
 - `.jsonl` 文件每行一个文档，正文在 `text` 字段；可选的 `group`（例如仓库名）让同组的文档落在同一划分。其他文件整个是一个文档。
-- 入库规则：换行按 Python 的通用换行统一为 `\n`（`\r\n` 和单独的 `\r`），之后为空的文档和不是合法 UTF-8 的文档被丢弃并计数。后续的标签按 UTF-8 字节偏移对齐时，看到的就是模型训练的文本。
+- 文档的键（`来源名/文件` 或 `来源名/文件:行号`）与 manifest 中的文件路径都相对 spec 所在目录，spec 目录之外的文件写成以 .. 开头的相对路径（运行手册中合成来源的 train.jsonl 就在 spec 目录之外）。键决定划分（没有 `group` 时）、shard 文件的分配和去污染报告的条目，所以整个目录树换个位置（另一台主机、改名的 `$TLC_RUNS`）得到同样的划分和逐字节相同的 shard；只移动 spec 而不移动它引用的文件则不然。
+- 入库规则：换行按 Python 的通用换行统一为 `\n`（`\r\n` 和单独的 `\r`），之后为空的文档和不是合法 UTF-8 的文档（包括 JSON 中单独的代理项转义，如 `"\ud800"`）被丢弃并计数。后续的标签按 UTF-8 字节偏移对齐时，看到的就是模型训练的文本。
 - 划分：sha256(seed, group) 按 2⁶⁴ 的比例小于 `val_fraction` 的文档进 val；没有 `group` 的文档自成一组。tokenizer 只用 train 划分训练，shard 按同一划分写出。
 - `generated = true` 的来源照常参与 tokenizer 和 shard，但 T3 自然代码套件不从它取探针项：T3 测的是自然代码，合成程序有自己的 T1、T2。
 - 文本文档中 markdown 代码块的判定只有一处实现（`surogate_tlc.data.corpus.fences`）：去掉缩进后以 ``` 开头的行打开代码块，代码块内恰为 ``` 的行关闭它，文档结束时仍未关闭的代码块在末尾关闭；行只在 `\n` 处结束（U+2028 等不算）。shard 的框定和去污染的代码扫描都用它，所以去污染当作代码扫描的，正是训练时框成代码的部分。
@@ -44,20 +45,20 @@ python -m surogate_tlc.data.decontam CORPUS.toml BENCHMARK_DIR CORPUS_DIR/decont
 |---|---|---|
 | `code13` | 基准解答的信息性 13-gram 中，在文档里出现的比例（覆盖率）。代码先做标识符抽象：标识符记为 ID，字符串与数字字面量记为 STR、NUM，去掉注释和 docstring。13-gram 中至少 4 个是词（关键字、内建名、ID）才算信息性，这样只含字面量的列表不会处处命中。信息性 13-gram 少于 15 个的条目不建索引 | ≥ 0.5 标记，≥ 0.8 删除 |
 | `text8` | 基准描述（MBPP 的 text，HumanEval 的 docstring）的小写词 8-gram 覆盖率，条目至少有 5 个 8-gram | ≥ 0.5 标记，≥ 0.8 删除 |
-| `ast` | 文档中某个函数的 AST 在 α-重命名、字面量归一、去掉 docstring 与注解之后与基准函数相同（`surogate_tlc.data.decontam.ast_hash`）。α-重命名覆盖每个绑定的名字：变量、形参、关键字实参名、`except ... as`、`import ... as`、`global`/`nonlocal`；属性名和被导入的模块名不变。少于 40 个节点的函数会处处相同，不比较 | 删除 |
+| `ast` | 文档中某个函数的 AST 在 α-重命名、字面量归一、去掉 docstring、装饰器与注解（带注解的赋值变成普通赋值）之后与基准函数相同（`surogate_tlc.data.decontam.ast_hash`）。α-重命名覆盖绑定的名字：变量、形参、`except ... as`、`import ... as`、`global`/`nonlocal`，以及调用同一段代码中定义的函数、具名 lambda 或类（其 `__init__`）时的关键字实参名（它们指向形参）；其他关键字实参名（`sorted(key=...)`、`print(end=...)`）是 API 名，保持不变，所以只改局部变量名不改变哈希。属性名和被导入的模块名不变。少于 40 个节点的函数会处处相同，不比较 | 删除 |
 | `name` | 文档定义的函数与基准的独特入口函数同名：至少 10 个字符、带下划线、不是 main、solve 之类的通用名 | 只标记 |
 
 - 只有高精度的证据才删除文档：`ast` 命中，或 `code13`、`text8` 的覆盖率达到删除阈值。误删会悄悄减少训练数据，误标只多一次人工查看，所以只被标记的文档留在语料中，供抽样人工审计。候选按函数和 n-gram 生成，删除以整个文档为单位。
 - 文本文档按文本扫描，其中的 markdown 代码块（`fences()`）另按代码扫描。
 - 基准文件：`BENCHMARK_DIR` 中所有 `*.jsonl`、`*.jsonl.gz`、`*.json`。支持两种格式：HumanEval 与 HumanEval+（`prompt` 是签名加 docstring，`canonical_solution` 是函数体），MBPP、MBPP+ 与 sanitized MBPP（完整代码加描述）。MBPP 要放入全部 974 个 id（`mbpp.jsonl`，含 prompt 划分 1–10）：要报告 MBPP+，这是前提。来源与许可：HumanEval 来自 openai/human-eval（MIT），MBPP 来自 google-research（CC-BY-4.0），HumanEval+ 与 MBPP+ 来自 evalplus 的 release（Apache-2.0）。
-- 报告 `decontam.json`（`tlc_decontam_version` 为 2：α-重命名改过之后，旧报告的 AST 哈希不再可比，语料 spec 拒绝读取）的内容：
+- 报告 `decontam.json`（`tlc_decontam_version` 为 3：关键字实参的 α-重命名改成只认本段代码中定义的被调函数，spec 目录之外的文件的键也改成了相对路径，旧报告的 AST 哈希与键不再可比，语料 spec 拒绝读取）的内容：
   - 版本，语料 spec 的 sha256，每个基准文件的 sha256 和条目数，各规则及其阈值；
   - 各来源扫描的文档数；
   - `removed` 与 `flagged`：每个文档的键、来源、正文的 sha256 和全部命中；
   - 从中抽取的 20 个待审计文档；
   - 植入校准的结果。
 - 使用：在语料 spec 顶层写 `decontam = "decontam.json"`。此后训练 tokenizer 和构建 shard 都丢弃报告中删除的文档，按来源记作 `decontaminated`；文档正文的 sha256 与报告不符时报错，要求重新扫描。tokenizer 与 shard 的 manifest 都在 `corpus.decontam` 中记下报告的路径、sha256 和删除数。扫描本身忽略 spec 中的这个键。
-- 植入校准（G6）：`--plant 40` 取 40 个基准解答，做 α-重命名（标识符改成 `zz_` 加倒序名，属性名不改），追加到随机抽取的代码文档末尾。报告给出删除规则的召回率、标记的召回率和各规则的召回数，以及未改动的宿主文档被删除（误报）和被标记的比例。在库代码上的一次校准见 [measurements.md](measurements.md)；英文网页上 `text8` 的误报要在 G0 用实际语料的报告抽样核对。
+- 植入校准（G6）：`--plant 40` 取 40 个基准解答，做 α-重命名（标识符改成 `zz_` 加倒序名，属性名不改），追加到随机抽取的自然代码文档末尾。宿主不取 `generated = true` 的来源：合成程序短、从不命中基准、总能解析，用作宿主会压低记下的误报率与标记率，抬高 `ast` 的召回（它们照常被扫描）。报告给出删除规则的召回率、标记的召回率和各规则的召回数，未改动的宿主文档被删除（误报）和被标记的比例，以及宿主取自哪些来源（`host_sources`）。在库代码上的一次校准见 [measurements.md](measurements.md)；英文网页上 `text8` 的误报要在 G0 用实际语料的报告抽样核对。
 
 ## 合成绑定任务
 
@@ -89,7 +90,7 @@ python -m surogate_tlc.data.synth OUT_DIR --seed 0 --per-task 4000 --train-chars
   | 标识符池 | `seen`：36 个代码词素，以及它们两两组合中的约 80%（共 1,062 个） | `novel`：其余 234 个组合，即由已见词素组成的新串；`rare`：只用 j、k、q、v、w、x、z 的 3–4 字母串（2,744 个），训练流中没有这样的标识符 |
   | 字面量 | sha256 桶 1–3 | sha256 桶 0，形状相同 |
 
-  此外，任何训练程序的 AST（`ast_hash`，与去污染的 `ast` 规则相同，关键字实参名也参与 α-重命名）都不与评测项相同：撞上就在同一格内重抽，最多 20 次，仍然撞上就放弃这一格。`check()` 从训练流的文本重新计算每个程序的 AST 哈希，逐项核验：训练流中没有留出的模板族、模式、标识符或字面量，没有评测项的 AST，dev 与 test 没有相同的程序；有违反时抛出列出全部违反的 `SplitLeak`。`build()` 把核验结果（含撞上训练 AST 的评测项数，应为 0）写进 manifest。`tlc_synth_version` 为 2：关键字实参名加入 α-重命名之后，版本 1 的训练流与评测项之间有 AST 相同的程序。
+  此外，任何训练程序的 AST（`ast_hash`，与去污染的 `ast` 规则相同，调用程序中定义的函数时的关键字实参名也参与 α-重命名）都不与评测项相同：撞上就在同一格内重抽，最多 20 次，仍然撞上就放弃这一格。`check()` 从训练流的文本重新计算每个程序的 AST 哈希（不论它有没有对应的记录），逐项核验：训练流中没有留出的模板族、模式、标识符或字面量，没有评测项的 AST，dev 与 test 没有相同的程序；有违反时抛出列出全部违反的 `SplitLeak`。`build()` 把核验结果（含撞上训练 AST 的评测项数，应为 0）写进 manifest。`tlc_synth_version` 为 2：关键字实参名加入 α-重命名之后，版本 1 的训练流与评测项之间有 AST 相同的程序。
 - **评测项**：每个任务每半至少 `--per-task` 项，网格的每格项数相同。每项随机取模板族和标识符池，所以每项记着自己被留出的轴（`strata.heldout`）。dev 与 test 是同一分布的两半，程序不重复：dev 用于选层，test 只在预注册的里程碑读取。
 - **训练流** `train.jsonl`：每行一个文档，由连续若干程序组成一个约 1,600 字符的模块，程序之间空一行；它像自然源文件一样定义并调用多个函数，按 512 token 切窗时大多落在一行内。整个模块再执行一次核验。T1 与 T2 交替出现，格在训练网格上均匀抽取，只用 `seen` 池和训练字面量。它作为一个 `kind = "code"`、`generated = true` 的来源加进语料 spec，与其他来源一起训练 tokenizer、构建 shard。配比（暂定 5%）由 `--train-chars` 决定，约为其余来源的字符数 × 0.05 / 0.95。P0 用固定配比，没有 ramp；按 A0 的成功率标定配比属于 Phase 1。
 - 输出：`dev.jsonl`、`test.jsonl`（`surogate_tlc.data.items.Item`）、`train.jsonl` 和 `manifest.json`。manifest 记录网格、留出的轴、各文件的 sha256、训练流中与评测 AST 相撞后重抽和放弃的次数，以及 `check()` 的结果。同样的参数得到逐字节相同的文件。规模与用时见 [measurements.md](measurements.md)；P0 的 512 token 放不下 `live` ≥ 32 的大部分 T1 项，探针把它们计为 `too_long`，每格都放得进 2048 token。
@@ -126,7 +127,7 @@ python -m surogate_tlc.data.tokenizer train CORPUS.toml OUT_DIR --pretokenizer q
 python -m surogate_tlc.data.shards CORPUS.toml TOKENIZER_DIR OUT_DIR --seq-len 512 --train-files 1
 ```
 
-- 输出 `train-00000.bin` 等、`val-00000.bin`，最后写 `manifest.json`。`OUT_DIR` 必须不存在或为空；同样的输入得到逐字节相同的输出。命令结束时打印各划分的统计，以及单进程构建（编码、框定、写出）所用的 CPU 秒和每 CPU 秒的真实 token 数，即数据流水线的单核速率（G0.5）。
+- 输出 `train-00000.bin` 等、`val-00000.bin`，最后写 `manifest.json`。`OUT_DIR` 必须不存在或为空；同样的输入得到逐字节相同的输出。构建失败时删掉自己写的文件，修好之后同一条命令可以重跑；被强行终止的构建留下隐藏的 `.*.bin.tmp`，“is not empty” 的报错列出它们，删除 `OUT_DIR` 后重跑。命令结束时打印各划分的统计，以及单进程构建（编码、框定、写出）所用的 CPU 秒和每 CPU 秒的真实 token 数，即数据流水线的单核速率（G0.5）。
 - 格式：BIN.TOK v3（1024 字节的头、int32 token、int32 position、按位存储的 mask），头中标为 non-overlapping。写出的文件与上游 `TokenizedDataFileWriter(masking=True, non_overlapping=True)` 的逐字节相同（CPU 测试）；上游模块 import 时就需要原生扩展，所以 fork 自己写。读取时文件头用上游的 `surogate.distill.sidecar.read_token_shard_header`。
 - 每行一个文档，不跨文档打包：`mamba_ssm_scan` 在打包的文档之间不复位状态。A1、A1h 也这样做，保证各行的数据语义相同。
   - 框定：代码文档为 `<|bos|> <|code_start|> 正文 <|code_end|> <|eos|>`；英文文档为 `<|bos|> 正文 <|eos|>`，其中 `fences()` 的 fence 行换成 `<|code_start|>`、`<|code_end|>`。
@@ -134,7 +135,7 @@ python -m surogate_tlc.data.shards CORPUS.toml TOKENIZER_DIR OUT_DIR --seq-len 5
   - mask：输入位置 i 的 mask 位为 1，当且仅当它的目标（第 i+1 个 token）是同一行中的真实 token。原生 DataLoader 对 non-overlapping 文件恰好给出这些行，并把每行最后一个位置的目标置为 −100（`surogate_tlc.data.shards.IGNORE`）。
 - ValidTokenCount：有 n 个真实 token 的行有 n−1 个有效目标。manifest 按 shard 和按划分记录 `rows`、`tokens`、`real_tokens`、`valid_targets`（一个 epoch 中 ValidTokenCount 之和）和 `pad_fraction`；每个 shard 另记各来源占的行区间（`sources`：文档按来源依次写出，每个来源在一个文件中是连续的一段），`eval` 据此按来源给出 loss。按来源还记录文档数、字符数、行数、真实 token 数、train 中的 token 占比、丢弃计数和 provenance（URL、revision、license、下载日期、过滤规则、是否生成，以及每个输入文件的大小与 sha256）；`rules` 列出入库与框定规则。
 - 身份：数据的身份是 `manifest.json` 的 sha256（`surogate_tlc.data.shards.manifest_sha256()`），与 `tokenizer_sha256` 一起写进运行记录、checkpoint 的 `tlc_meta.json` 和评测输出。训练驱动在开始前核对 shard 的 `seq_len` 等于训练配置的 `sequence_len`，manifest 中的 tokenizer sha256 等于模型目录中 `tokenizer.json` 的 sha256（`check_tokenizer()`）。
-- 原生 DataLoader 依次读取各文件，只在文件内打乱行，所以 train 文档按 hash 分到 `--train-files` 个文件，每个文件都是各来源的随机样本。单个文件少于 2³¹ 个 token。
+- 原生 DataLoader 依次读取各文件，只在文件内打乱行，所以 train 文档按 hash 分到 `--train-files` 个文件，每个文件都是各来源的随机样本。单个文件少于 2³¹ 个 token（含 pad），所以每约 15 亿个真实 train token 用一个文件；超出时构建在写到上限处报错。
 - `surogate_tlc.data.shards.served_rows()` 按原生 DataLoader 的读取规则给出每行的输入、目标与 position。CPU 测试用它核对上面的窗口与 ValidTokenCount；GPU 主机上的测试核对它与原生 DataLoader 一致，并核对从保存的位置恢复的 DataLoader 逐位接着读下去。
 - padding 浪费（`pad_fraction`）超过约 25% 时，再考虑实现文档复位并改用打包 shard，所有行同时切换。
 - 上下文：P0 用 512。正式训练用 2048 还是 512 由 owner 定：用 2048 时 shard 以 `--seq-len 2048` 重建，并把 `surogate_tlc.hf.CONTEXT_LENGTH` 改为 2048（config 检查、tokenizer 的 `model_max_length` 和 shard 的默认行长都取自它）。

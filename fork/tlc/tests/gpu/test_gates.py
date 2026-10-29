@@ -32,14 +32,30 @@ def _cfg(runs: Path, row: str) -> dict:
     return json.loads((runs / "models" / row / "config.json").read_text(encoding="utf-8"))
 
 
+class _Trainer:
+    """The native trainer of one `with native(...)` block. The block's end drops it, and with it the GPU memory (the
+    native trainer frees it only when destroyed): the caller's `as` name, and a failing test's traceback, keep only
+    this handle."""
+
+    def __init__(self, trainer) -> None:
+        self._trainer = trainer
+
+    def __getattr__(self, name: str):
+        if self._trainer is None:
+            raise RuntimeError("native trainer used after its with-block")
+        return getattr(self._trainer, name)
+
+
 @contextmanager
 def native(model: Path, runs: Path, tmp_path: Path, *, batch: int = 2, seq_len: int = 512, settings=None):
     out = tmp_path / f"native-{model.name}"
     out.parent.mkdir(parents=True, exist_ok=True)
     wrapper = native_trainer(model, runs / "data", out, batch=batch, seq_len=seq_len, settings=settings)
+    handle = _Trainer(wrapper.trainer)
     try:
-        yield wrapper.trainer
+        yield handle
     finally:
+        handle._trainer = None
         del wrapper
         gc.collect()
 
@@ -70,6 +86,11 @@ def random_batch(vocab: int, batch: int, seq_len: int, seed: int, low: int = 0) 
 def cosine(a: np.ndarray, b: np.ndarray) -> float:
     a, b = a.ravel().astype(np.float64), b.ravel().astype(np.float64)
     return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+
+def below(cosines: dict[str, float], bound: float) -> dict[str, float]:
+    """The cosines under `bound`. NaN (a zero or non-finite gradient) is among them: min() would skip it."""
+    return {name: c for name, c in cosines.items() if not c >= bound}
 
 
 @pytest.mark.parametrize("row", ROWS)
@@ -103,15 +124,18 @@ def test_g1n1_future_tokens_do_not_change_the_past(runs, row, tmp_path):
                 assert not np.array_equal(out[0, prefix:511], out[1, prefix:511]), prefix
 
 
+@pytest.mark.parametrize("last", (CHUNK - 1, CHUNK))
 @pytest.mark.parametrize("row", ROWS)
-def test_g1n3_gradients_ignore_tokens_after_the_last_target(runs, row, tmp_path):
-    """With targets only up to position t, the parameter gradients do not move when tokens after t change. The
-    native backward accumulates with atomics, so the comparison allows twice the spread of a repeated run."""
-    vocab, t = _cfg(runs, row)["vocab_size"], CHUNK + 1
+def test_g1n3_gradients_ignore_tokens_after_the_last_target(runs, row, last, tmp_path):
+    """With targets only at positions up to `last` (both sides of the scan's chunk boundary), the parameter gradients
+    do not move when the tokens after `last` change, the adjacent one at last + 1 included: step() takes the targets
+    apart from the tokens, so the label at `last` stays. The native backward accumulates with atomics, so the
+    comparison allows twice the spread of a repeated run."""
+    vocab = _cfg(runs, row)["vocab_size"]
     ids, targets = random_batch(vocab, 2, 512, seed=9)
-    targets[:, t:] = IGNORE  # the last target is token t, at position t - 1
+    targets[:, last + 1 :] = IGNORE
     changed = ids.copy()
-    changed[:, t + 1 :] = (changed[:, t + 1 :] + 1) % vocab
+    changed[:, last + 1 :] = (changed[:, last + 1 :] + 1) % vocab
     runs_ = []
     for batch in (ids, ids, changed):
         with native(runs / "models" / row, runs, tmp_path / str(len(runs_))) as trainer:
@@ -119,7 +143,7 @@ def test_g1n3_gradients_ignore_tokens_after_the_last_target(runs, row, tmp_path)
     first, repeat, other = runs_
     spread = max(float(np.abs(first[k] - repeat[k]).max()) for k in first)
     moved = max(float(np.abs(first[k] - other[k]).max()) for k in first)
-    print(json.dumps({"row": row, "g1n3_repeat_spread": spread, "g1n3_change": moved}))
+    print(json.dumps({"row": row, "last_target": last, "g1n3_repeat_spread": spread, "g1n3_change": moved}))
     assert moved <= 2 * spread
 
 
@@ -187,17 +211,24 @@ def test_g1d_split_first_layer_is_equivalent(runs, tmp_path):
     assert float(np.abs(lp - split_lp).max()) <= float(golden["tolerance"])
     renamed = {split_param_name(name): g for name, g in grads.items()}
     assert set(renamed) == set(split_grads)
-    worst = min((cosine(renamed[name], split_grads[name]), name) for name in renamed)
-    print(json.dumps({"g1d_min_gradient_cosine": worst}))
-    assert worst[0] >= 0.999  # [P]
+    # A0-split is not a G0 row: here every gradient of both models must exist, be finite and not be all zero.
+    both = [*renamed.items(), *split_grads.items()]
+    dead = sorted({name for name, g in both if not np.isfinite(g).all() or not g.any()})
+    assert not dead, dead
+    cosines = {name: cosine(renamed[name], split_grads[name]) for name in renamed}
+    print(json.dumps({"g1d_min_gradient_cosine": min(cosines.items(), key=lambda kv: kv[1])}))
+    low = below(cosines, 0.999)
+    assert not low, low  # [P]
 
 
 @pytest.mark.parametrize("row", ROWS)
 def test_g2_initial_loss(runs, row, tmp_path):
     """Random tokens on the initial weights: CE within 0.1 of ln V + var(logits)/2, logit std below 1. The final
     norm leaves each token's hidden state with mean square 1 at initialisation, so var(logits) is hidden x the
-    mean square of the LM head (the tied embedding); it is estimated from the weights, since the native trainer
-    returns target log-probabilities only."""
+    mean square of the LM head (the tied embedding), estimated from the weights: the std half checks the init scheme
+    (0.02 x sqrt(384), about 0.39), not the native trainer. The scoring trainer returns target log-probabilities
+    only; full logits need a second, LoRA-carrying trainer (as in test_g3). `expected` stays weight-derived, so the
+    CE half is an independent check of the native forward."""
     cfg = _cfg(runs, row)
     weights = load_file(runs / "models" / row / "model.safetensors")
     head = weights["model.embed_tokens.weight" if cfg["tie_word_embeddings"] else "lm_head.weight"].double()
@@ -206,8 +237,9 @@ def test_g2_initial_loss(runs, row, tmp_path):
     ids, targets = random_batch(cfg["vocab_size"], 2, 512, seed=2)
     with native(runs / "models" / row, runs, tmp_path) as trainer:
         loss = -float(logprobs(trainer, ids, targets)[targets != IGNORE].mean())
-    print(json.dumps({"row": row, "g2_initial_loss": loss, "expected": expected, "logit_std": math.sqrt(variance)}))
-    assert abs(loss - expected) <= 0.1 and math.sqrt(variance) < 1
+    std = math.sqrt(variance)
+    print(json.dumps({"row": row, "g2_initial_loss": loss, "expected": expected, "logit_std_from_weights": std}))
+    assert abs(loss - expected) <= 0.1 and std < 1
 
 
 def test_g2_gradients_point_where_the_reference_does(runs, tmp_path):
@@ -232,7 +264,8 @@ def test_g2_gradients_point_where_the_reference_does(runs, tmp_path):
             key = ref_mamba2.layer_key(cfg, layer, field)
             found[key] = cosine(native_grads[key], reference.w[key].grad.numpy())
     print(json.dumps({"g2_gradient_cosine": found}))
-    assert min(found.values()) >= 0.99  # [P]
+    low = below(found, 0.99)
+    assert not low, low  # [P]
 
 
 def _conditional_entropy(ids: np.ndarray) -> float:
@@ -276,8 +309,9 @@ def test_g2_resume_reproduces_the_next_steps_and_the_logits(runs, tmp_path, monk
     """A0 smoke stage, run twice: once straight through, once from the step-5 checkpoint of the first. Steps 6..10
     lose the same (native backward atomics: 1e-3), the final weights give the same logits within the G1(b)
     tolerance, and a finalized checkpoint exported against a model directory of another seed keeps its own
-    weights bit for bit, with the tied embedding stored once."""
+    weights file, with the tied embedding stored once."""
     from surogate_tlc import checkpoint, hf, init, modeldir
+    from surogate_tlc.files import file_sha256
 
     monkeypatch.setenv("TLC_RUNS", str(runs))
     monkeypatch.setenv("TLC_ROW", "A0")
@@ -313,10 +347,12 @@ def test_g2_resume_reproduces_the_next_steps_and_the_logits(runs, tmp_path, monk
     names = set(load_file(exported / "model.safetensors"))
     assert "lm_head.weight" not in names and "model.embed_tokens.weight" in names
     assert modeldir.check_model_dir(exported)["tie_word_embeddings"] is True
-    for name, path in (("step", tmp_path / "full" / "step_00000005"), ("export", exported)):
-        with native(path, runs, tmp_path / f"reload-{name}", batch=ids.shape[0]) as trainer:
-            scored[name] = logprobs(trainer, ids, targets)
-    assert np.array_equal(scored["step"], scored["export"])
+    # export() copies the checkpoint's weights file: scoring both would compare a file with its copy. The source
+    # directory of another seed contributes everything but the weights.
+    weights = [
+        file_sha256(d / "model.safetensors") for d in (tmp_path / "full" / "step_00000005", exported, other_seed)
+    ]
+    assert weights[0] == weights[1] != weights[2]
 
 
 def init_seed_of(runs: Path) -> int:

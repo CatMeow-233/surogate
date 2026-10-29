@@ -7,7 +7,7 @@ summary). The CPU pin tests fix the fields read here.
 
 `python -m surogate_tlc.train.report DIR [--peak-tflops X]` prints one JSON line per run record under DIR (gates
 G0.5 and G3): the model FLOPs utilisation needs the GPU's dense bf16 peak, which the runbook takes from the GPU's
-data sheet.
+data sheet. Loss and eval points join every attempt of a run, so a run that failed and was resumed reads from step 1.
 """
 
 from __future__ import annotations
@@ -35,7 +35,6 @@ def _checkout() -> Path:
 
 REPO = _checkout()
 RUN_FILE = "tlc_run.json"  # the run record, in the run directory
-SUMMARY_KEYS = ("steps", "first_loss", "last_loss", "eval_loss", "tokens_per_second", "cuda_peak_memory_bytes")
 PACKAGES = ("torch", "transformers", "tokenizers", "safetensors", "numpy", "surogate-tlc")
 
 
@@ -110,25 +109,65 @@ def summarize(regression: Path, log: Path | None, tokens_per_update: int) -> dic
     return out
 
 
+def _log_entries(log: str | None) -> list[dict[str, Any]]:
+    """Entries of an attempt's training log; none when it is missing or unreadable."""
+    try:
+        entries = json.loads(Path(log).read_text(encoding="utf-8")) if log else []
+    except (OSError, ValueError):
+        return []
+    return entries if isinstance(entries, list) else []
+
+
+def joined(record: dict[str, Any]) -> dict[str, list[list[Any]]]:
+    """Loss and eval points of every attempt of a run as one run: an attempt's points replace those after the step it
+    resumed from. A completed attempt's loss comes from its summary (the regression artifact, steps from 1); an attempt
+    that failed wrote no artifact, so its loss comes from the step lines of its training log, which count steps from 0
+    (pinned). Eval points are the log's eval lines."""
+    loss: dict[int, Any] = {}
+    evals: dict[int, Any] = {}
+    for attempt in record["attempts"]:
+        start = attempt.get("resumed_from_step") or 0
+        loss = {step: value for step, value in loss.items() if step <= start}
+        evals = {step: value for step, value in evals.items() if step <= start}
+        summary = attempt.get("summary") or {}
+        entries = _log_entries(attempt.get("log_file"))
+        if "loss" in summary:
+            loss.update((int(step), value) for step, value in summary["loss"])
+        else:
+            loss.update((int(e["step"]) + 1, e["loss"]) for e in entries if e.get("log") == "step")
+        evals.update((int(e["step"]), e["loss"]) for e in entries if e.get("log") == "eval")
+    return {"loss": [[s, loss[s]] for s in sorted(loss)], "eval_loss": [[s, evals[s]] for s in sorted(evals)]}
+
+
 def runs(root: Path, *, peak_tflops: float | None = None) -> list[dict[str, Any]]:
-    """The latest attempt of every run record under `root`, flattened for a results table. With the GPU's dense bf16
-    peak, the model FLOPs utilisation: tokens/s x training FLOPs per token (3 x forward, ir.flops_per_token) / peak."""
+    """Every run record under `root`, flattened for a results table: loss and eval points of all attempts (joined()),
+    throughput and memory of the latest. With the GPU's dense bf16 peak, the model FLOPs utilisation: tokens/s x
+    training FLOPs per token (3 x forward, ir.flops_per_token) / peak."""
     out = []
     for path in sorted(Path(root).rglob(RUN_FILE)):
         record = read_json(path)
         attempt = record["attempts"][-1] if record["attempts"] else {}
         summary = attempt.get("summary") or {}
         sft = record.get("sft") or {}
+        points = joined(record)
+        curve = points["loss"]
         row = {
             "run_dir": str(path.parent),
             "stage": record["stage"],
             "status": record["status"],
+            "attempts": len(record["attempts"]),
+            "resumed_from_step": attempt.get("resumed_from_step"),
             "microbatch": attempt.get("microbatch"),
             "grad_accum": attempt.get("grad_accum"),
             "use_cuda_graphs": sft.get("use_cuda_graphs"),
             "tokens_per_update": record["tokens_per_update"],
             "valid_targets_per_update": (record.get("data") or {}).get("valid_targets_per_update"),
-            **{key: summary.get(key) for key in SUMMARY_KEYS},
+            "steps": [curve[0][0], curve[-1][0]] if curve else None,
+            "first_loss": curve[0][1] if curve else None,
+            "last_loss": curve[-1][1] if curve else None,
+            "eval_loss": points["eval_loss"],
+            "tokens_per_second": summary.get("tokens_per_second"),
+            "cuda_peak_memory_bytes": summary.get("cuda_peak_memory_bytes"),
         }
         config = Path(record["model_dir"]) / "config.json"
         if config.is_file() and sft.get("sequence_len"):

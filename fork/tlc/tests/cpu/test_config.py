@@ -50,7 +50,19 @@ def test_rows_state_their_geometry_explicitly():
         ({**A0, "rms_norm_eps": "x"}, "rms_norm_eps must be a positive number"),
         ({**A0, "rms_norm_eps": 0.0}, "rms_norm_eps must be a positive number"),
         ({**A0, "rms_norm_eps": float("nan")}, "rms_norm_eps must be a positive number"),
+        ({**A0, "rms_norm_eps": float("inf")}, "rms_norm_eps must be a positive number"),
+        ({**A0, "rms_norm_eps": True}, "rms_norm_eps must be a positive number"),
         (_without(A0, "vocab_size"), "vocab_size must be"),
+        *[
+            ({**A0, key: 0}, f"{key} must be a positive integer")
+            for key in ("vocab_size", "hidden_size", "num_hidden_layers", "intermediate_size")
+        ],
+        *[
+            ({**A0, key: True}, f"{key} must be a non-negative integer")
+            for key in ("bos_token_id", "eos_token_id", "pad_token_id")
+        ],
+        ({**A0, "eos_token_id": -1}, "eos_token_id must be a non-negative integer"),
+        ({**A0, "tie_word_embeddings": 1}, "tie_word_embeddings must be given"),
         ({**A0, "pad_token_id": 16384}, "pad_token_id=16384 is outside the vocabulary"),
         (_without(A0, "eos_token_id"), "eos_token_id must be"),
         (_without(A0, "tie_word_embeddings"), "tie_word_embeddings must be given"),

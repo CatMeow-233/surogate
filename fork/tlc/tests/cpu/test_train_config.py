@@ -122,6 +122,8 @@ def test_problems_of_a_valid_run_and_defaults(run_yaml):
     [
         ({"lora": True}, {}, "lora must be False"),
         ({"sample_packing": True}, {}, "sample_packing must be False"),
+        ({"row_packing": True}, {}, "row_packing must be False"),
+        ({"from_scratch": True}, {}, "from_scratch must be False"),
         ({"datasets": [{"path": "x"}]}, {}, "datasets is not used"),
         ({"checkpoint_dir": "/elsewhere"}, {}, "checkpoint_dir is not used"),
         ({"max_steps": -1}, {}, "max_steps must be a positive integer"),
@@ -157,6 +159,45 @@ def test_settings_leave_out_what_a_resume_may_change(run_yaml):
     constant = config.settings(config.load(run_yaml(lr_scheduler_type="constant")))
     assert config.settings(config.load(run_yaml(lr_scheduler_type="constant", max_steps=20))) == constant
     assert config.settings(config.load(run_yaml(), microbatch=16)) != base
+
+
+# docs/training.md (恢复): the keys a resume may change. Written out here, so that widening the list is a deliberate
+# edit of the code, the documentation and this test together.
+DOCUMENTED_RESUMABLE = {
+    "output_dir",
+    "max_steps",
+    "save_steps",
+    "save_total_limit",
+    "eval_steps",
+    "logging_steps",
+    "log_gpu_util",
+    "run_name",
+    "resume_from_checkpoint",
+}
+
+
+@pytest.mark.parametrize("stage", list(STAGES))
+def test_settings_hold_every_sft_key_but_the_resumable_ones(runs, monkeypatch, stage):
+    monkeypatch.setenv("TLC_ROW", "A0")
+    run = config.load(EXAMPLE, stage=stage)
+    assert set(config.RESUMABLE) == DOCUMENTED_RESUMABLE
+    current = config.settings(run)
+    assert set(current) == (set(run.sft) - DOCUMENTED_RESUMABLE) | {
+        "schedule_total_steps",
+        "tokens_per_update",
+        "fixed_batch",
+    }
+    assert current["fixed_batch"] is run.fixed_batch and current["train_seed"] == run.sft["train_seed"]
+
+
+def test_settings_change_with_the_seed_and_the_fixed_batch(run_yaml, shard_dirs):
+    assert config.settings(config.load(run_yaml(train_seed=1))) != config.settings(config.load(run_yaml(train_seed=2)))
+    rows = config.manifest(shard_dirs[64])["shards"][0]["rows"]
+    stage = {"tokens_per_update": 64 * rows, "stages": {"fit": {}}}
+    plain = config.load(run_yaml(64, tlc=stage, per_device_train_batch_size=rows), stage="fit")
+    stage["stages"]["fit"] = {"fixed_batch": True}
+    fixed = config.load(run_yaml(64, tlc=stage, per_device_train_batch_size=rows), stage="fit")
+    assert fixed.fixed_batch and config.settings(fixed) != config.settings(plain)
 
 
 def test_fixed_batch_needs_enough_rows(run_yaml, shard_dirs):

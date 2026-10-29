@@ -105,11 +105,26 @@ def test_probe_picks_the_best_scored_candidate():
     assert results[0]["scores"] == pytest.approx([-1 * 4, -1 * 3 - 0.1])
 
 
-def test_a_non_finite_score_is_not_an_answer():
-    """A diverged checkpoint scores NaN; max() would then pick the first candidate, the line1 heuristic."""
+def _bad(value, letter=None):
+    """Every target costs 1 nat, except `value` on the targets of `letter` (on every target when letter is None)."""
+
+    def score(inputs, targets, positions):
+        hit = targets != -100 if letter is None else targets == ord(letter)
+        return np.where(targets == -100, 0.0, np.where(hit, value, -1.0))
+
+    return score
+
+
+@pytest.mark.parametrize(
+    "scorer",
+    [_bad(np.nan), _bad(np.nan, "b"), _bad(-np.inf), _bad(-np.inf, "b")],
+    ids=["all nan", "one nan", "all -inf", "one -inf"],
+)
+def test_a_non_finite_score_is_not_an_answer(scorer):
+    """A diverged checkpoint scores NaN or -inf (an overflowed logit), on some candidates or on all; max() would then
+    pick the first candidate, the line1 heuristic."""
     items = [item("q = ", ["'a'", "'b'"], "'a'", id="nan", heuristics={"line1": "'a'"}, strata={"pattern": "flat"})]
-    nan = lambda inputs, targets, positions: np.where(targets == -100, 0.0, np.nan)  # noqa: E731
-    results = probes.probe(items, chars, nan, frame=FRAME, batch=2, seq_len=16, pad_id=0)
+    results = probes.probe(items, chars, scorer, frame=FRAME, batch=2, seq_len=16, pad_id=0)
     assert results[0]["status"] == "nonfinite" and "choice" not in results[0]
     summary = probes.summarize(items, results)["T1"]
     assert summary["skipped"] == {"nonfinite": 1} and summary["accuracy"] is None
@@ -158,7 +173,8 @@ def test_summary_floors():
 
 @pytest.fixture
 def suite_file(tmp_path):
-    """T1 items of two small cells, and one T3 item that is not at its document's start."""
+    """T1 items of two small cells, and one T3 item that is not at its document's start, with a special-token string
+    in its prompt (text, as in the shards)."""
     rng = random.Random(0)
     items = [
         synth.make_item("T1", {**cell, "family": "assign"}, rng, "seen", "eval", f"T1-{i}")
@@ -167,7 +183,8 @@ def suite_file(tmp_path):
         )
     ]
     heuristics = {"recent": "count", "frequent": "total"}
-    t3 = item("    total = ", ["count", "total"], "total", tail=" + 1\n", start=40, task="T3", id="T3:x:1")
+    t3 = item("    end = '<|eos|>'\n    total = ", ["count", "total"], "total", tail=" + 1\n", start=40, task="T3")
+    t3 = dataclasses.replace(t3, id="T3:x:1")
     items.append(dataclasses.replace(t3, heuristics=heuristics, strata={"candidates": "2"}))
     path = tmp_path / "suite.jsonl"
     write_items(path, items)
@@ -189,8 +206,10 @@ def test_evaluate_suite_runs_the_core_with_the_model_tokenizer(small_model, shar
     assert all(r["status"] == "scored" for r in result["results"])
     assert set(result["summary"]) == {"T1", "T3"} and result["summary"]["T1"]["items"] == len(items) - 1
     rows = np.concatenate(seen)
-    framed = rows[(rows[:, 0] == 1) & (rows[:, 1] == 3)]  # bos, code_start: the T1 rows only
-    assert len(framed) == sum(len(i.candidates) for i in items if i.task == "T1")
+    t1 = (rows[:, 0] == 1) & (rows[:, 1] == 3)  # bos, code_start: the T1 rows only
+    assert t1.sum() == sum(len(i.candidates) for i in items if i.task == "T1")
+    # The T3 rows: "<|eos|>" in the prompt is text there, as in the shards (special ids are 1-4; 0 pads).
+    assert (~t1).sum() >= 2 and not set(rows[~t1].ravel().tolist()) & {1, 2, 3, 4}
 
 
 def test_probe_command(small_model, shard_dirs, suite_file, tmp_path, monkeypatch, capsys):

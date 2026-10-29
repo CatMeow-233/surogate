@@ -7,7 +7,8 @@ companion files into such a directory; a directory that has not been finalized m
 
 The native trainer owns step directories, so finalize_dir() can only add files to them: each file is replaced
 atomically and tlc_meta.json, which check_model_dir() requires, comes last. export() builds its directory under a
-temporary name and renames it into place, so `out` either is a complete model directory or does not change.
+temporary name next to `out` (next to its target when `out` is a symlink) and renames it into place, so `out` either
+is a complete model directory or does not change.
 """
 
 from __future__ import annotations
@@ -15,8 +16,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import shutil
-import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -87,7 +88,9 @@ def finalize_checkpoints(checkpoint_dir: Path, source: Path, *, meta: Mapping[st
 def export(checkpoint: Path, source: Path, out: Path) -> Path:
     """Write a model directory `out` from one native checkpoint: its weights plus `source`'s companion files.
 
-    Optimizer state and shards stay behind. `out` must be absent or empty, and is left unchanged on a failure.
+    Optimizer state and shards stay behind. `out` must be absent or empty, and is left unchanged on a failure. It may
+    be a symlink (the export goes to its target) but not a mount point: the directory is built on the target's
+    filesystem and renamed onto it. The directory's mode follows the umask, or an existing empty `out`.
     """
     checkpoint, out = Path(checkpoint), Path(out)
     step = checkpoint_step(checkpoint)
@@ -95,12 +98,17 @@ def export(checkpoint: Path, source: Path, out: Path) -> Path:
         raise ValueError(f"{checkpoint} is not a complete native checkpoint (step_<8 digits> with {NATIVE_DONE_FILE})")
     if not (checkpoint / WEIGHTS_FILE).is_file():
         raise FileNotFoundError(f"{checkpoint / WEIGHTS_FILE} is missing")
-    if out.exists() and any(out.iterdir()):
+    target = out.resolve()
+    if target.exists() and any(target.iterdir()):
         raise FileExistsError(f"{out} is not empty")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = Path(tempfile.mkdtemp(prefix=f".{out.name}.", dir=out.parent))
+    if os.path.ismount(target):
+        raise ValueError(f"{out} is a mount point and cannot be replaced; export into a directory below it")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.{secrets.token_hex(4)}")
+    tmp.mkdir()
     try:
-        tmp.chmod(0o755)  # mkdtemp's 0700 would carry over to `out`
+        if target.exists():
+            shutil.copymode(target, tmp)
         # The native config.json comes along so that finalize_dir() can compare it with the source.
         for name in (CONFIG_FILE, WEIGHTS_FILE):
             if (checkpoint / name).is_file():
@@ -110,9 +118,7 @@ def export(checkpoint: Path, source: Path, out: Path) -> Path:
         meta = json.loads(meta_file.read_text(encoding="utf-8")) if meta_file.is_file() else {}
         finalize_dir(tmp, source, meta={**meta, "step": step})
         check_model_dir(tmp)
-        if out.exists():
-            out.rmdir()
-        os.replace(tmp, out)
+        os.replace(tmp, target)  # replaces an empty directory atomically; fails if something was written into it
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)
         raise

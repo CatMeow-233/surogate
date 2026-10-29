@@ -1,7 +1,9 @@
 """Scouting for the shared-weight depth loop: one weight used twice in a layer (tests/gpu/twice_probe.py), one native
 forward and backward, and its gradient against PyTorch. The outcome - ok, nan, garbage (gradient cosine below
-0.99), error or crash - goes to $TLC_RUNS/env/w-twice.json. Every outcome passes: a failure is what P0 expects, and
-the record is the input for the later phase. The probe runs in a child process, so that a crash is recorded too.
+0.99), error, crash or timeout - goes to $TLC_RUNS/env/w-twice.json. Every outcome passes: a failure is what P0
+expects, and the record is the input for the later phase. The probe runs in a child process, so that a crash is
+recorded too. A child that measured and then died or hung in teardown keeps its measurement, with the exit next to
+it under "exit"; error, crash and timeout mean the probe never reported.
 """
 
 import json
@@ -43,21 +45,34 @@ got = grads[name].double().flatten()
 want = twice_probe.reference_gradient(weights, cfg, torch.from_numpy(ids).long()).double().flatten()
 cosine = float(got @ want / (got.norm() * want.norm()))
 outcome = "nan" if not torch.isfinite(got).all() else ("ok" if cosine >= 0.99 else "garbage")
-print(json.dumps({"outcome": outcome, "cosine": cosine, "norm_ratio": float(got.norm() / want.norm())}))
+print(json.dumps({"outcome": outcome, "cosine": cosine, "norm_ratio": float(got.norm() / want.norm())}), flush=True)
 """
+TIMEOUT = 1800  # seconds
+
+
+def outcome_of(stdout: str, stderr: str, returncode: int | None) -> dict:
+    """The record of one child run; returncode None: it timed out."""
+    lines = [line for line in stdout.splitlines() if line.startswith('{"outcome"')]
+    if lines:  # the probe measured; a non-zero exit after that is a teardown failure
+        outcome = json.loads(lines[-1])
+        if returncode != 0:
+            outcome["exit"] = {"returncode": returncode, "stderr": stderr[-4000:]}
+        return outcome
+    kind = "timeout" if returncode is None else "crash" if returncode < 0 else "error"
+    return {"outcome": kind, "returncode": returncode, "stderr": stderr[-4000:]}
 
 
 def test_w_used_twice_is_recorded(runs, tmp_path):
     record = runs / "env" / "w-twice.json"
     record.parent.mkdir(parents=True, exist_ok=True)
     command = [sys.executable, "-c", CHILD, str(HERE), str(runs), str(tmp_path)]
-    result = subprocess.run(command, capture_output=True, text=True, timeout=1800, env=dict(os.environ))
-    lines = [line for line in result.stdout.splitlines() if line.startswith('{"outcome"')]
-    if result.returncode == 0 and lines:
-        outcome = json.loads(lines[-1])
-    else:
-        kind = "crash" if result.returncode < 0 else "error"
-        outcome = {"outcome": kind, "returncode": result.returncode, "stderr": result.stderr[-4000:]}
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=TIMEOUT, env=dict(os.environ))
+        outcome = outcome_of(result.stdout, result.stderr, result.returncode)
+    except subprocess.TimeoutExpired as expired:  # its output may arrive as bytes despite text=True
+        output = (expired.stdout, expired.stderr)
+        stdout, stderr = (o.decode(errors="replace") if isinstance(o, bytes) else o or "" for o in output)
+        outcome = outcome_of(stdout, stderr, None)
     record.write_text(json.dumps(outcome, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({key: outcome[key] for key in outcome if key != "stderr"}))
-    assert outcome["outcome"] in {"ok", "nan", "garbage", "error", "crash"}
+    assert outcome["outcome"] in {"ok", "nan", "garbage", "error", "crash", "timeout"}

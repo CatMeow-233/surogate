@@ -2,7 +2,7 @@
 
 The harness runs here against stand-ins for the native tokenizer: one answered by the Hugging Face tokenizer, and
 damaged ones it must catch. The comparison with the real native tokenizer is a GPU-host test
-(tests/gpu/test_tokenizer_native.py) and, at G0 scale, the `check` command.
+(tests/gpu/test_data_native.py) and, at G0 scale, the `check` command.
 """
 
 import json
@@ -161,3 +161,29 @@ def test_compare_checks_special_ids_and_vocab(trained_tokenizer):
     native.bos_token_id, native.vocab_size = 7, 16384
     problems = tok.compare(trained_tokenizer, [], native)
     assert problems == ["bos_token_id: native 7, <|bos|> has id 1", "vocab_size: native 16384, here 300"]
+
+
+@pytest.mark.parametrize(
+    ("attr", "token"), [("pad_token_id", tok.PAD), ("bos_token_id", tok.BOS), ("eos_token_id", tok.EOS)]
+)
+def test_compare_checks_each_special_id(trained_tokenizer, attr, token):
+    native = FakeNative(trained_tokenizer)
+    setattr(native, attr, -1)  # what the native tokenizer reports for a token tokenizer_config.json does not name
+    ids = tok.special_ids(tok.load(trained_tokenizer))
+    assert tok.compare(trained_tokenizer, [], native) == [f"{attr}: native -1, {token} has id {ids[token]}"]
+
+
+class WrongBos(FakeNative):
+    def __init__(self, path):
+        super().__init__(path)
+        self.bos_token_id = 7
+
+
+@pytest.mark.parametrize(("native", "code"), [(FakeNative, 0), (DropsLastDigit, 1), (WrongBos, 1)])
+def test_check_command_exit_code(monkeypatch, capsys, trained_tokenizer, corpus_spec, native, code):
+    """The runbook's G0 `check` step stops on a non-zero exit: a difference must give 1, and only then."""
+    from surogate_tlc import native as native_module
+
+    monkeypatch.setattr(native_module, "native_tokenizer", native)
+    assert tok.main(["check", str(trained_tokenizer), str(corpus_spec), "--limit", "4"]) == code
+    assert capsys.readouterr().out.startswith("consistent on ") == (code == 0)

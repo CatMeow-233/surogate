@@ -28,7 +28,7 @@
 | 环境 | 用途 |
 |---|---|
 | `fork/.venv-experimental` | 实验训练器 `fork/experimental`（不含原生扩展），由 `fork/dev test experimental` 和 `fork/dev exp-train` 自己创建，只需要 uv；TLC 的纯 PyTorch 原型 `fork/tlc/prototypes`（不打包）也可以在这里运行 |
-| `fork/.venv-tlc` | GPU 主机上的 TLC 包 `fork/tlc`：以 editable 方式装入，需要原生训练器，见 [tlc/docs/runbook.md 的 G0](tlc/docs/runbook.md#g0-环境) |
+| `fork/.venv-tlc` | GPU 主机上的 TLC 包 `fork/tlc`：以 editable 方式装入，需要原生训练器，见 [tlc/docs/runbook.md 的 G0](tlc/docs/runbook.md#g0-环境)；GPU 主机上的 TLC 原型（运行手册 G1 的 goldens）也在这里运行 |
 | 仓库根目录的 `.venv`（或 `FORK_PY`） | 其余 Python 命令：`fork/dev test cpu`、`fork/dev test patches`、`fork/dev test tlc`、同步的检查步骤。TLC 的 CPU 测试只从检出目录导入 `fork/tlc/src`，不在这里安装 TLC 包，也不需要原生扩展 |
 
 - GPU 主机：按上游 [README.md](../README.md) 中 “For development” 的步骤创建 `.venv`（`uv venv --python 3.12`，然后 `uv pip install -e .`，会完整构建原生扩展）。之后修改训练侧 C++ 时用 `fork/dev build train`，它只重建 `_surogate` 并把 `.so` 复制进 `.venv`。

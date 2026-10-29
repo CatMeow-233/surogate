@@ -7,12 +7,12 @@ import json
 import random
 import re
 import shutil
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 import pytest
 from surogate_tlc.data import synth
 from surogate_tlc.data.decontam import ast_hash
-from surogate_tlc.data.items import HALVES, SUITE_FILES, read_items
+from surogate_tlc.data.items import HALVES, SUITE_FILES, Item, read_items, write_items
 
 
 @pytest.fixture(scope="module")
@@ -49,15 +49,20 @@ KEYWORDS = {"assert", "def", "return", "lambda", "str"}
 
 def _as_training_program(item) -> str:
     """The item's program with every identifier renamed into the training pool and every literal into the training
-    literal space: the same alpha-renamed AST, as a generator could have drawn it for the training stream."""
+    literal space: the same alpha-renamed AST, as a generator could have drawn it for the training stream. One pass,
+    so that no renamed identifier lands inside a literal."""
     names = iter(n for n in synth.POOLS["seen"] if not set(n.split("_")) & KEYWORDS)
     renamed: dict[str, str] = {}
     words = ("".join(w) for w in itertools.product("efgh", repeat=4))
     literals = (w for w in words if not synth.eval_literal(w))
-    text = synth.LITERAL.sub(lambda m: f"'{next(literals)}'", item.program)
-    return synth.IDENTIFIER.sub(
-        lambda m: m.group(0) if m.group(0) in KEYWORDS else renamed.setdefault(m.group(0), next(names)), text
-    )
+
+    def rename(match: re.Match) -> str:
+        token = match.group(0)
+        if token.startswith("'"):
+            return f"'{next(literals)}'"
+        return token if token in KEYWORDS else renamed.setdefault(token, next(names))
+
+    return re.sub(rf"{synth.LITERAL.pattern}|{synth.IDENTIFIER.pattern}", rename, item.program)
 
 
 def _with_record(out, tmp_path, record):
@@ -72,28 +77,125 @@ def _with_record(out, tmp_path, record):
     "leak, message",
     [
         ("eval literal", "an eval literal"),
-        ("held-out identifier", "held-out identifiers"),
+        ("novel identifier", "held-out identifiers"),
+        ("rare identifier", "held-out identifiers"),
         ("held-out pattern", "held-out family or pattern"),
+        ("held-out family", "held-out family or pattern"),
         ("recorded hash", "its record says"),
     ],
 )
 def test_check_finds_leaks(built, tmp_path, leak, message):
+    """One leak per case, on one axis: the others stay at training values."""
     out, _, halves = built
     text = "y = 'zzzz'\n"
+    assert not synth.eval_literal("zzzz")
     info = {"task": "T1", "pattern": "flat", "family": "assign", "hash": ast_hash(ast.parse(text))}
     if leak == "eval literal":
         words = ("".join(w) for w in itertools.product("abcd", repeat=4))
         text = next(f"x = '{w}'\n" for w in words if synth.eval_literal(w))
-        info["hash"] = ast_hash(ast.parse(text))
-    elif leak == "held-out identifier":
-        text = f"{synth.POOLS['novel'][0]} = 'zzzz'\n"
-        info["hash"] = ast_hash(ast.parse(text))
+    elif leak.endswith("identifier"):
+        text = f"{synth.POOLS[leak.split()[0]][0]} = 'zzzz'\n"
     elif leak == "held-out pattern":
         info["pattern"] = "shadow-closure"
-    else:
+    elif leak == "held-out family":
+        info["family"] = "annotated"
+    info["hash"] = ast_hash(ast.parse(text))
+    if leak == "recorded hash":
         info["hash"] = halves["test"][0].hash  # a recorded hash cannot stand in for the program's
-    with pytest.raises(synth.SplitLeak, match=message):
+    with pytest.raises(synth.SplitLeak, match=message) as error:
         synth.check(_with_record(out, tmp_path, {"text": text, "items": [info]}))
+    assert len(error.value.problems) == 1, error.value.problems
+
+
+def test_check_hashes_a_program_without_a_record(built, tmp_path):
+    """A program the item records do not list still meets the AST rule; the count mismatch is reported too."""
+    out, _, halves = built
+    item = next(i for i in halves["dev"] if i.task == "T2" and i.strata["family"] not in synth.HELD_OUT_FAMILIES)
+    benign = "y = 'zzzz'\n"
+    info = {"task": "T1", "pattern": "flat", "family": "assign", "hash": ast_hash(ast.parse(benign))}
+    text = benign + "\n" + _as_training_program(item)
+    with pytest.raises(synth.SplitLeak) as error:
+        synth.check(_with_record(out, tmp_path, {"text": text, "items": [info]}))
+    problems = error.value.problems
+    assert any(p.endswith("2 programs, 1 item records") for p in problems), problems
+    assert any("eval items have a training program's AST" in p for p in problems), problems
+
+
+def _with_halves(out, tmp_path, edit):
+    copy = tmp_path / "copy"
+    shutil.copytree(out, copy)
+    halves = {half: read_items(copy / SUITE_FILES[half]) for half in HALVES}
+    edit(halves)
+    for half, items in halves.items():
+        write_items(copy / SUITE_FILES[half], items)
+    return copy
+
+
+def _training_literal_candidate(halves):
+    word = next(w for w in ("".join(t) for t in itertools.product("pqrs", repeat=4)) if not synth.eval_literal(w))
+    halves["dev"][0].candidates.append(f"'{word}'")
+
+
+@pytest.mark.parametrize(
+    "edit, message",
+    [
+        (lambda h: h["test"].append(h["dev"][0]), "programs are in both halves"),
+        (_training_literal_candidate, "a candidate outside the eval literal space"),
+        (lambda h: setattr(h["dev"][0], "tail", ""), "empty tail"),
+        (lambda h: h["dev"][0].candidates.remove(h["dev"][0].gold), "the gold must be one of distinct candidates"),
+    ],
+    ids=["shared program", "training literal", "empty tail", "gold not a candidate"],
+)
+def test_check_finds_bad_eval_items(built, tmp_path, edit, message):
+    out, _, _ = built
+    with pytest.raises(synth.SplitLeak, match=message) as error:
+        synth.check(_with_halves(out, tmp_path, edit))
+    assert len(error.value.problems) == 1, error.value.problems
+
+
+def test_items_name_their_problems():
+    good = {"id": "i", "task": "T1", "prompt": "x = ", "candidates": ["'a'", "'b'"], "gold": "'a'", "tail": "\n"}
+    good |= {"heuristics": {}, "strata": {}}
+    assert Item(**good).problems() == []
+    for change, problem in [
+        ({"task": "T9"}, "task 'T9'"),
+        ({"gold": "'c'"}, "the gold must be one of distinct candidates"),
+        ({"candidates": ["'a'", "'a'"]}, "the gold must be one of distinct candidates"),
+        ({"tail": ""}, "empty tail"),
+    ]:
+        assert Item(**(good | change)).problems() == [f"i: {problem}"], change
+
+
+def test_training_stream_redraws_excluded_asts():
+    first = list(itertools.islice(synth.train_programs(5, set(), Counter()), 6))
+    exclude = {info["hash"] for _, info in first}
+    redrawn = Counter()
+    again = list(itertools.islice(synth.train_programs(5, exclude, redrawn), 6))
+    assert all(info["hash"] not in exclude for _, info in again) and sum(redrawn.values()) > 0
+
+
+def test_build_excludes_both_halves_and_keeps_test_programs_out_of_dev(tmp_path, monkeypatch):
+    """A test item whose program dev already holds is dropped, and the training stream avoids the ASTs of both
+    halves, the test half's too."""
+    cells = synth.cells("T1", ["flat"])
+    a, b = (
+        synth.make_item("T1", {**cells[i], "family": "assign"}, random.Random(i), "seen", "eval", f"T1-{i}")
+        for i in (0, 1)
+    )
+    assert a.program != b.program and a.hash != b.hash
+    picked = {"dev": [a], "test": [a, b]}
+    monkeypatch.setattr(synth, "suite", lambda task, half, per_task, seed: picked[half] if task == "T1" else [])
+    seen = {}
+    real = synth.training_documents
+
+    def spy(seed, chars, exclude, *args, **kwargs):
+        seen["exclude"] = set(exclude)
+        return real(seed, chars, exclude, *args, **kwargs)
+
+    monkeypatch.setattr(synth, "training_documents", spy)
+    synth.build(tmp_path / "out", seed=3, per_task=1, train_chars=2000)
+    assert [i.id for i in read_items(tmp_path / "out" / SUITE_FILES["test"])] == [b.id]
+    assert seen["exclude"] == {a.hash, b.hash}
 
 
 @pytest.mark.parametrize("pattern", ["keyword", "mixed", "default"])
@@ -194,6 +296,30 @@ def test_generation_is_deterministic():
     cell = {**synth.cells("T1", ["shadow-in"])[50], "family": "assign"}
     one = synth.make_item("T1", cell, random.Random("x"), "rare", "eval", "i")
     assert one == synth.make_item("T1", cell, random.Random("x"), "rare", "eval", "i")
+
+
+def test_annotated_family_keeps_the_ast():
+    """The held-out `annotated` family is the `assign` form with annotations (ast_hash drops them), so build() and
+    check() keep it apart from `assign` training programs."""
+    lines = ["a = 'x1'", "b = a", "def f():", "    c = 'x3'", "    __probe__(c)", "f()"]
+    annotated = synth.apply_family(lines, "annotated", random.Random(0))
+    assert annotated != lines and ": str = " in "\n".join(annotated)
+    assert ast_hash(ast.parse("\n".join(annotated))) == ast_hash(ast.parse("\n".join(lines)))
+
+
+def test_check_finds_an_annotated_eval_ast_written_plainly(built, tmp_path):
+    out, _, halves = built
+    item = next(
+        i
+        for items in halves.values()
+        for i in items
+        if i.task == "T1" and i.strata["family"] == "annotated" and i.strata["pattern"] not in synth.HELD_OUT_PATTERNS
+    )
+    text = _as_training_program(item).replace(": str = ", " = ")
+    assert ": str" not in text and ast_hash(ast.parse(text)) == item.hash
+    info = {"task": "T1", "pattern": item.strata["pattern"], "family": "assign", "hash": item.hash}
+    with pytest.raises(synth.SplitLeak, match="eval items have a training program's AST"):
+        synth.check(_with_record(out, tmp_path, {"text": text, "items": [info]}))
 
 
 @pytest.mark.parametrize("family", ["unpack", "annotated"])
