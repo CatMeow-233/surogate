@@ -1,4 +1,4 @@
-"""The config.json invariants (README: "config.json 的不变量") and the DSL reading the layer pattern as a string."""
+"""The config.json invariants (docs/model.md: config.json 的不变量) and the DSL reading the layer pattern as a string."""
 
 import ast
 import json
@@ -43,13 +43,18 @@ def test_rows_state_their_geometry_explicitly():
         ({**A0, "n_groups": 5}, "not a multiple of n_groups"),
         (_without(A1H, "num_key_value_heads"), "num_key_value_heads must be"),
         ({**A1H, "num_key_value_heads": 4}, "not a multiple of num_key_value_heads"),
-        ({**A0, "max_position_embeddings": 1024}, "max_position_embeddings must be 512"),
+        ({**A0, "max_position_embeddings": 1024}, "max_position_embeddings must be the integer 512"),
+        ({**A0, "max_position_embeddings": 512.0}, "max_position_embeddings must be the integer 512"),
+        ({**A0, "max_position_embeddings": True}, "max_position_embeddings must be the integer 512"),
+        (_without(A0, "rms_norm_eps"), "rms_norm_eps must be a positive number"),
+        ({**A0, "rms_norm_eps": "x"}, "rms_norm_eps must be a positive number"),
+        ({**A0, "rms_norm_eps": 0.0}, "rms_norm_eps must be a positive number"),
+        ({**A0, "rms_norm_eps": float("nan")}, "rms_norm_eps must be a positive number"),
         (_without(A0, "vocab_size"), "vocab_size must be"),
         ({**A0, "pad_token_id": 16384}, "pad_token_id=16384 is outside the vocabulary"),
         (_without(A0, "eos_token_id"), "eos_token_id must be"),
         (_without(A0, "tie_word_embeddings"), "tie_word_embeddings must be given"),
         ({**A0, "num_attention_heads": 0, "head_dim": 0}, "num_attention_heads or head_dim must be positive"),
-        ({**A0, "linear_num_key_heads": 4}, "a GDN geometry needs all of"),
         ({**A0, hf.SPLIT_KEY: 1}, "tlc_split_first_layer must be true or false"),
         ({**A1H, "tlc_layer_pattern": "A" * 12, hf.SPLIT_KEY: True}, "needs a Mamba first layer"),
         (hf.default_config(num_hidden_layers=1, **{hf.SPLIT_KEY: True}), "and at least one more layer"),
@@ -67,21 +72,6 @@ def test_attention_free_a0_still_states_head_geometry():
     assert "A" not in A0["tlc_layer_pattern"]
     assert hf.config_problems({**A0, "num_attention_heads": 0}) == []
     assert hf.config_problems({**A0, "head_dim": 0}) == []
-
-
-def test_non_tlc_rows_follow_the_common_rules_only():
-    a1 = {
-        "architectures": ["Qwen3ForCausalLM"],
-        "model_type": "qwen3",
-        **{k: A0[k] for k in ("vocab_size", "hidden_size", "num_hidden_layers", "intermediate_size")},
-        **{k: A0[k] for k in ("max_position_embeddings", "tie_word_embeddings", *hf.TOKEN_ID_KEYS)},
-        "num_attention_heads": 6,
-        "head_dim": 64,
-    }
-    assert hf.config_problems(a1) == []
-    assert hf.config_problems({**a1, "max_position_embeddings": 40960}) == [
-        "max_position_embeddings must be 512, got 40960"
-    ]
 
 
 def test_auto_map_file_is_self_contained():

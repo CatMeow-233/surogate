@@ -19,6 +19,9 @@ Linear and Conv1d reset_parameters (kaiming_uniform_ with a=sqrt(5), i.e. U(+-1/
 
 Each tensor draws from its own generator, seeded from (seed, layer, field), so the same seed gives A0 and A0-split
 the same weights under their two naming schemes (gate G1(d)).
+
+The native AdamW decays every parameter by name alike (weight_decay applies to A_log, dt_bias and D too, which the
+reference excludes), so the P0 run configuration trains without weight decay.
 """
 
 from __future__ import annotations
@@ -99,13 +102,13 @@ def _value(rule: str, shape: tuple[int, ...], cfg: Mapping[str, Any], generator:
 
 
 def init_state_dict(
-    cfg: Mapping[str, Any], module: Mapping[str, Any] | None = None, *, seed: int
+    cfg: Mapping[str, Any], module: Mapping[str, Any] | None = None, *, seed: int, rules: Mapping[str, str] = RULES
 ) -> dict[str, torch.Tensor]:
     """Initial weights of config.json `cfg` (its compiled IR `module`), keyed by the name the native loader reads.
 
     That name is the IR's hf_mapping entry, or the IR parameter name itself. Frozen tensors (RoPE tables) are left
     out because the runtime computes them; so is a tied LM head, which the loader fills from the embedding. Each
-    tensor has the dtype of its IR parameter.
+    tensor has the dtype of its IR parameter. `rules` maps each field to its rule (a probe model adds its own).
     """
     module = module if module is not None else compile_ir(cfg)
     params = module["forward"]["params"]
@@ -116,12 +119,12 @@ def init_state_dict(
         if name == "lm_head" and cfg["tie_word_embeddings"]:
             continue
         layer, field = layer_param(name, split)
-        if field not in RULES:
+        if field not in rules:
             raise ValueError(f"{name}: no initialisation rule for {field!r}; add one to RULES")
         key = names.get(name, name)
         if not isinstance(key, str):
             raise ValueError(f"{name}: hf_mapping {key!r} is not a plain tensor name")
-        value = _value(RULES[field], shape, cfg, _generator(seed, layer, field))
+        value = _value(rules[field], shape, cfg, _generator(seed, layer, field))
         out[key] = value.to(_DTYPES[params[name]["dtype"]])
     return out
 

@@ -1,4 +1,4 @@
-"""GPU tests run in fork/.venv-tlc on the GPU host (runbook in fork/tlc/README.md).
+"""GPU tests run in fork/.venv-tlc on the GPU host (fork/tlc/docs/runbook.md).
 
 That environment imports `surogate` from this checkout, whose `surogate/` holds the extension
 `fork/dev build train` copies there, through a .pth file the runbook writes; only fork/tlc/src is
@@ -29,7 +29,7 @@ def _cuda_available() -> bool:
 
 
 def pytest_collection_modifyitems(config, items):
-    skip = None if _cuda_available() else pytest.mark.skip(reason="needs CUDA (GPU runbook in fork/tlc/README.md)")
+    skip = None if _cuda_available() else pytest.mark.skip(reason="needs CUDA (fork/tlc/docs/runbook.md)")
     for item in items:
         if item.path.is_relative_to(HERE):
             item.add_marker(pytest.mark.gpu)
@@ -42,5 +42,5 @@ def runs() -> Path:
     """$TLC_RUNS as the runbook prepares it: tokenizer/, data/, models/<row>/ and goldens/A0.npz."""
     path = os.environ.get("TLC_RUNS")
     if not path:
-        pytest.skip("set TLC_RUNS to the runbook's directory (fork/tlc/README.md, G0)")
+        pytest.skip("set TLC_RUNS to the runbook's directory (fork/tlc/docs/runbook.md, G0)")
     return Path(path)

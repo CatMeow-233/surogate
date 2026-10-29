@@ -1,29 +1,26 @@
-"""Teacher-forced loss of a model directory on a split of a TLC shard directory (README: 评测).
+"""Teacher-forced loss of a model directory on a split of a TLC shard directory (docs/training.md: 评测).
 
 The rows are scored as the native DataLoader serves them (data.shards.served_rows), by the native trainer's
 compute_logprobs without LoRA; the loss is the mean negative log-probability over the valid targets. The baseline
-is the add-one smoothed unigram distribution of the train split's targets: v0.7's gate G3 asks that the validation
-loss be below it.
+is the add-one smoothed unigram distribution of the train split's targets: gate G3 asks that the validation loss
+be below it, since a model that has not learnt even the token frequencies has not trained. The loss is also given
+per source and per source kind (code, text) from the row ranges the shard manifest records; the text kind's
+perplexity is the English perplexity.
 """
 
 from __future__ import annotations
 
 import math
 import tempfile
-from collections.abc import Callable
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from ..data.shards import manifest_sha256, read_shard, served_rows
-from ..data.tokenizer import tokenizer_sha256
+from ..data.shards import IGNORE, check_tokenizer, manifest, manifest_sha256, read_shard, served_rows, shard_files
 from ..modeldir import check_model_dir
-from ..train.config import manifest, shard_files
-
-IGNORE = -100
-# (inputs, targets, positions), int32 [batch, seq_len] -> log-probabilities of the targets, 0 where IGNORE.
-Scorer = Callable[[np.ndarray, np.ndarray, np.ndarray], np.ndarray]
+from ..native import Scorer, native_scorer
 
 
 def unigram_loss(data: Path, targets: np.ndarray, vocab_size: int) -> float:
@@ -43,16 +40,25 @@ def unigram_loss(data: Path, targets: np.ndarray, vocab_size: int) -> float:
     return float(-np.log(counts[valid] / counts.sum()).mean())
 
 
-def native_scorer(model_dir: Path, data: Path, out: Path, *, batch: int, seq_len: int) -> Scorer:
-    """compute_logprobs of a native trainer on `model_dir` (no LoRA) for batches of `batch` rows of `seq_len`."""
-    from ..train.driver import native_trainer
+def _row_sources(info: dict[str, Any], files: list[Path]) -> list[str | None]:
+    """The source of every served row of `files`, in order, from the manifest's per-shard row ranges."""
+    shards = {entry["file"]: entry for entry in info["shards"]}
+    out: list[str | None] = []
+    for path in files:
+        entry = shards[path.name]
+        names: list[str | None] = [None] * entry["rows"]
+        for part in entry.get("sources", ()):
+            names[part["first_row"] : part["first_row"] + part["rows"]] = [part["name"]] * part["rows"]
+        out += names
+    return out
 
-    trainer = native_trainer(model_dir, data, out, batch=batch, seq_len=seq_len).trainer
 
-    def score(inputs: np.ndarray, targets: np.ndarray, positions: np.ndarray) -> np.ndarray:
-        return np.asarray(trainer.compute_logprobs(inputs, targets, use_lora=False, position_ids=positions))
-
-    return score
+def _losses(totals: dict[str, list[float]]) -> dict[str, dict[str, Any]]:
+    return {
+        name: {"valid_targets": int(count), "loss": total / count, "perplexity": math.exp(total / count)}
+        for name, (total, count) in sorted(totals.items())
+        if count
+    }
 
 
 def evaluate(
@@ -66,14 +72,17 @@ def evaluate(
 ) -> dict[str, Any]:
     """Loss of `model_dir` on `split` of shard directory `data`; `scorer` defaults to the native trainer."""
     model_dir, data = Path(model_dir), Path(data)
-    cfg, info = check_model_dir(model_dir), manifest(data)
-    if info["tokenizer"]["sha256"] != tokenizer_sha256(model_dir):
-        raise ValueError(f"the shards in {data} were built with another tokenizer than {model_dir}'s")
+    cfg, info = check_model_dir(model_dir), check_tokenizer(data, model_dir)
     seq_len = info["format"]["seq_len"]
-    parts = [served_rows(read_shard(path), seq_len) for path in shard_files(data, split)]
+    files = shard_files(data, split)
+    parts = [served_rows(read_shard(path), seq_len) for path in files]
     if not parts:
         raise ValueError(f"no {split}-*.bin in {data}")
     inputs, targets, positions = (np.concatenate(arrays)[:max_rows].astype(np.int32) for arrays in zip(*parts))
+    sources = _row_sources(info, files)[: len(inputs)]
+    kinds = {source["name"]: source["kind"] for source in info["sources"]}
+    by_source: dict[str, list[float]] = defaultdict(lambda: [0.0, 0])
+    by_kind: dict[str, list[float]] = defaultdict(lambda: [0.0, 0])
     total, count = 0.0, 0
     with tempfile.TemporaryDirectory(prefix="tlc-eval-") as tmp:
         score = scorer or native_scorer(model_dir, data, Path(tmp), batch=batch, seq_len=seq_len)
@@ -90,6 +99,13 @@ def evaluate(
             valid = targets[rows] != IGNORE
             total -= float(logprobs[valid].sum())
             count += int(valid.sum())
+            for row, source in enumerate(sources[rows]):
+                if source is None:
+                    continue
+                row_loss, row_count = -float(logprobs[row][valid[row]].sum()), int(valid[row].sum())
+                for table, key in ((by_source, source), (by_kind, kinds.get(source, "unknown"))):
+                    table[key][0] += row_loss
+                    table[key][1] += row_count
     if not count:
         raise ValueError(f"{split} of {data} has no valid targets")
     loss = total / count
@@ -106,4 +122,6 @@ def evaluate(
         "perplexity": math.exp(loss),
         "unigram_loss": unigram,
         "below_unigram": loss < unigram,
+        "by_source": _losses(by_source),
+        "by_kind": _losses(by_kind),
     }

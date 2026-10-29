@@ -2,7 +2,8 @@
 
 A fork-owned package, kept out of the native wheel. Importing it must stay cheap and must not need the native
 extension: the CPU tests import it in an environment without one, so modules that import `surogate` are only
-imported inside functions. See fork/tlc/README.md for the layout, the checkpoint contract and the GPU runbook.
+imported inside functions. See fork/tlc/README.md for the layout and fork/tlc/docs/ for the contracts and the GPU
+runbook.
 """
 
 from __future__ import annotations

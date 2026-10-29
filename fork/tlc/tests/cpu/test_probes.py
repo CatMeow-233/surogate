@@ -1,5 +1,5 @@
-"""Binding probes (surogate_tlc.eval.probes, README: 绑定探针): the scoring core on toy encoders and scorers, the
-floors of the summary, and evaluate_suite and `eval --suite` with a stand-in for the native scorer."""
+"""Binding probes (surogate_tlc.eval.probes, docs/training.md: 绑定探针): the scoring core on toy encoders and scorers,
+the floors of the summary, and evaluate_suite and the `probe` command with a stand-in for the native scorer."""
 
 import dataclasses
 import json
@@ -7,9 +7,10 @@ import random
 
 import numpy as np
 import pytest
+from surogate_tlc import files
 from surogate_tlc.__main__ import main
-from surogate_tlc.data import corpus, suites, synth
-from surogate_tlc.data.suites import Item
+from surogate_tlc.data import synth
+from surogate_tlc.data.items import Item, write_items
 from surogate_tlc.eval import probes
 
 FRAME = [1, 3]
@@ -104,6 +105,16 @@ def test_probe_picks_the_best_scored_candidate():
     assert results[0]["scores"] == pytest.approx([-1 * 4, -1 * 3 - 0.1])
 
 
+def test_a_non_finite_score_is_not_an_answer():
+    """A diverged checkpoint scores NaN; max() would then pick the first candidate, the line1 heuristic."""
+    items = [item("q = ", ["'a'", "'b'"], "'a'", id="nan", heuristics={"line1": "'a'"}, strata={"pattern": "flat"})]
+    nan = lambda inputs, targets, positions: np.where(targets == -100, 0.0, np.nan)  # noqa: E731
+    results = probes.probe(items, chars, nan, frame=FRAME, batch=2, seq_len=16, pad_id=0)
+    assert results[0]["status"] == "nonfinite" and "choice" not in results[0]
+    summary = probes.summarize(items, results)["T1"]
+    assert summary["skipped"] == {"nonfinite": 1} and summary["accuracy"] is None
+
+
 def _scored(name, cell, gold, choice, **heuristics):
     it = item(
         "x", ["'a'", "'b'", "'c'", "'d'"], gold, id=name, strata={"pattern": cell, **STRATA}, heuristics=heuristics
@@ -138,9 +149,10 @@ def test_summary_floors():
     # disagreement: a3, a4 (recent and stale wrong), and no shadow-out item (one heuristic is right on each)
     assert summary["disagreement"] == {"items": 2, "accuracy": 0.5}
     assert summary["stale_rate"] == 0.25
-    keys = "depth distance family heldout hops live overwrites pattern pieces pool"
+    keys = "depth distance distance_512 family heldout hops live overwrites pattern pieces pool"
     assert sorted(summary["by"]) == keys.split()
     assert list(summary["by"]["distance"]) == ["<=128"] and summary["by"]["heldout"]["none"]["items"] == 6
+    assert list(summary["by"]["distance_512"]) == ["65-256"]
     assert summary["by"]["pattern"]["flat"]["above_floor"] == pytest.approx(-0.25)
 
 
@@ -150,13 +162,15 @@ def suite_file(tmp_path):
     rng = random.Random(0)
     items = [
         synth.make_item("T1", {**cell, "family": "assign"}, rng, "seen", "eval", f"T1-{i}")
-        for i, cell in enumerate(c for c in synth.cells("T1", ["flat", "shadow-in"]) if c["live"] <= 4)
+        for i, cell in enumerate(
+            c for c in synth.cells("T1", ["flat", "shadow-in"]) if c["live"] <= 4 and c["overwrites"] <= 1
+        )
     ]
     heuristics = {"recent": "count", "frequent": "total"}
     t3 = item("    total = ", ["count", "total"], "total", tail=" + 1\n", start=40, task="T3", id="T3:x:1")
     items.append(dataclasses.replace(t3, heuristics=heuristics, strata={"candidates": "2"}))
     path = tmp_path / "suite.jsonl"
-    suites.write_items(path, items)
+    write_items(path, items)
     return path, items
 
 
@@ -170,7 +184,7 @@ def test_evaluate_suite_runs_the_core_with_the_model_tokenizer(small_model, shar
         return np.where(targets == -100, 0.0, -1.0)
 
     result = probes.evaluate_suite(small_model, shard_dirs[512], path, batch=4, scorer=uniform)
-    assert result["suite_sha256"] == corpus.file_sha256(path)
+    assert result["suite_sha256"] == files.file_sha256(path)
     assert result["seq_len"] == 512 and len(result["results"]) == len(items)
     assert all(r["status"] == "scored" for r in result["results"])
     assert set(result["summary"]) == {"T1", "T3"} and result["summary"]["T1"]["items"] == len(items) - 1
@@ -179,11 +193,11 @@ def test_evaluate_suite_runs_the_core_with_the_model_tokenizer(small_model, shar
     assert len(framed) == sum(len(i.candidates) for i in items if i.task == "T1")
 
 
-def test_eval_command_with_a_suite(small_model, shard_dirs, suite_file, tmp_path, monkeypatch, capsys):
+def test_probe_command(small_model, shard_dirs, suite_file, tmp_path, monkeypatch, capsys):
     path, items = suite_file
     monkeypatch.setattr(probes, "native_scorer", lambda *a, **k: prefers("a"))
     out = tmp_path / "probe.json"
-    args = ["eval", str(small_model), str(shard_dirs[512]), "--suite", str(path), "--batch", "8", "--out", str(out)]
+    args = ["probe", str(small_model), str(shard_dirs[512]), str(path), "--batch", "8", "--out", str(out)]
     assert main(args) == 0
     shown, written = json.loads(capsys.readouterr().out), json.loads(out.read_text())
     assert "results" not in shown and len(written["results"]) == len(items)

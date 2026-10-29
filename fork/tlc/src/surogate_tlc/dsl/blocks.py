@@ -7,6 +7,8 @@ class would replace the upstream definition without an error.
 from __future__ import annotations
 
 from surogate.dsl import nn
+from surogate.dsl.blocks.common import DENSE_BLOCK_NAME_REMAP
+from surogate.dsl.blocks.nemotron_h import NEMOTRON_MAMBA_BLOCK_REMAP
 from surogate.dsl.modules import GenericMLP, Mamba2Mixer, RMSNorm
 
 # Mamba-2 as the reference implementation has it: conv1d bias on, in/out projection bias off. The model sets the
@@ -14,52 +16,15 @@ from surogate.dsl.modules import GenericMLP, Mamba2Mixer, RMSNorm
 MAMBA_CONV_BIAS = True
 MAMBA_PROJ_BIAS = False
 
-_MIXER_NAMES = (
-    "in_proj_weight",
-    "in_proj_bias",
-    "conv_weight",
-    "conv_bias",
-    "A_log",
-    "D_param",
-    "dt_bias",
-    "gated_norm_weight",
-    "out_proj_weight",
-    "out_proj_bias",
-    "x_flat",
-    "projected_flat",
-    "projected",
-    "gate",
-    "conv_input",
-    "dt",
-    "conv_out",
-    "hidden_states",
-    "ssm_B",
-    "ssm_C",
-    "ssm_out",
-    "ssm_out_flat",
-    "ssm_state",
-    "gated_out",
-    "gated_flat",
-    "out_flat",
-    "out",
-)
-
-# Dense-block names for the two norms (ln1/res_ffn, ln2/res_att), Nemotron-H names for the mixer.
+# Upstream's names: dense-block names for the two norms (ln1/res_ffn, ln2/res_att) and the SwiGLU, Nemotron-H's for
+# the mixer (its mixer_ prefix stripped), so a mixer activation upstream adds is renamed here too. The mixer's own
+# x_flat and out get a mamba_ prefix to stay apart from the block-level names.
 TLC_MAMBA_FFN_BLOCK_REMAP: dict[str, str] = {
-    "attn_norm_weight": "ln1_weight",
-    "attn_norm_res": "res_ffn",
-    "attn_norm_y": "ln1",
-    "attn_norm_rstd": "ln1_rstd",
-    "mlp_norm_weight": "ln2_weight",
-    "mlp_norm_res": "res_att",
-    "mlp_norm_y": "ln2",
-    "mlp_norm_rstd": "ln2_rstd",
-    **{f"mixer_{name}": name for name in _MIXER_NAMES},
+    **{k: v for k, v in DENSE_BLOCK_NAME_REMAP.items() if k.startswith(("attn_norm_", "mlp_"))},
+    **{k: v for k, v in NEMOTRON_MAMBA_BLOCK_REMAP.items() if k.startswith("mixer_")},
     "mixer_x_flat": "mamba_x_flat",
     "mixer_out": "mamba_out",
     "mixer_out_flat": "mamba_out_flat",
-    "mlp_act": "swiglu",
-    "mlp_act_flat": "swiglu_flat",
 }
 
 
@@ -67,6 +32,7 @@ class TLCMambaFFNBlock(nn.Block):
     """A0 layer: RMSNorm -> Mamba-2 mixer -> RMSNorm -> SwiGLU, with the residual carried as in upstream hybrids.
 
     It declares no BlockSchema; the native buffer plan treats schemas as optional (checked on the GPU host, G0).
+    The model-level layer 1 of A0-split traces this same block (dsl.models).
     """
 
     _name_remap_ = TLC_MAMBA_FFN_BLOCK_REMAP

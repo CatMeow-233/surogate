@@ -1,4 +1,4 @@
-"""The compiled IR of every P0 row passes the graph checks of surogate_tlc.ir (README: "DSL 模型与 IR 检查").
+"""The compiled IR of every P0 row passes the graph checks of surogate_tlc.ir (docs/model.md: DSL 模型与 IR 检查).
 
 Covers the op table, single assignment, defined-before-use, rank-2 moe_softmax and same-dtype concat/mul, the
 DSL hazards these checks exist for (two layer stacks, one module called twice, a `when=` parameter without its

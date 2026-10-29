@@ -1,4 +1,4 @@
-"""Token shards (surogate_tlc.data.shards, README: "数据 shard"): header fields, positions, mask bits, windows,
+"""Token shards (surogate_tlc.data.shards, docs/data.md: 数据 shard): header fields, positions, mask bits, windows,
 padding, max id < vocab_size, the ValidTokenCount accounting and the manifest.
 
 Header fields are read with upstream's parser (surogate.distill.sidecar), and the writer is compared byte for byte
@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from surogate_tlc import files
 from surogate_tlc.data import corpus, shards
 from surogate_tlc.data import tokenizer as tok
 
@@ -121,14 +122,17 @@ def test_manifest(built, corpus_spec, trained_tokenizer):
         "special_ids": SPECIAL,
     }
     assert manifest["corpus"] == {
-        "spec_sha256": corpus.file_sha256(corpus_spec),
+        "spec_sha256": files.file_sha256(corpus_spec),
         "seed": 7,
         "val_fraction": 0.25,
         "train_files": 2,
         "decontam": None,
     }
     for s in manifest["shards"]:
-        assert s["sha256"] == corpus.file_sha256(out / s["file"])
+        assert s["sha256"] == files.file_sha256(out / s["file"])
+        # Rows are written document by document, source by source: one contiguous range per source.
+        assert sum(part["rows"] for part in s["sources"]) == s["rows"]
+        assert [part["first_row"] for part in s["sources"]] == [0, *np.cumsum([p["rows"] for p in s["sources"]][:-1])]
     sources = manifest["sources"]
     assert [s["name"] for s in sources] == ["code", "text"]
     assert all(s["url"] and s["license"] and s["downloaded"] and s["files"] for s in sources)
@@ -143,6 +147,10 @@ def test_manifest(built, corpus_spec, trained_tokenizer):
             assert totals[key] == sum(s[key][split] for s in sources)
         assert totals["pad_fraction"] == round(1 - totals["real_tokens"] / totals["tokens"], 6)
     assert sum(s["documents"]["train"] for s in sources) == 22 and sum(s["documents"]["val"] for s in sources) == 5
+    for source in sources:
+        for split in ("train", "val"):
+            ranges = [p for s in manifest["shards"] if s["split"] == split for p in s["sources"]]
+            assert sum(p["rows"] for p in ranges if p["name"] == source["name"]) == source["rows"][split]
     assert sum(s["train_token_share"] for s in sources) == pytest.approx(1, abs=1e-5)
     assert len(shards.manifest_sha256(out)) == 64
 

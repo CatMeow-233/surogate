@@ -1,22 +1,20 @@
-"""`python -m surogate_tlc` (README: 命令行): the TLC commands, and the hand-over of every other command to upstream's
-CLI after register()."""
+"""`python -m surogate_tlc` (README: 命令行): the commands on model directories, each from the one command table."""
 
 import json
 import os
 import shutil
 import subprocess
 import sys
-import types
 from pathlib import Path
 
+import numpy as np
 import pytest
 from surogate_tlc import modeldir
-from surogate_tlc.__main__ import main
-from surogate_tlc.data import tokenizer
+from surogate_tlc.__main__ import COMMANDS, main
+from surogate_tlc.eval import samples
 
 SRC = Path(__file__).resolve().parents[2] / "src"
 REPO = Path(__file__).resolve().parents[4]
-COMMANDS = ("init", "train-tokenizer", "build-data", "train", "eval", "export")
 
 
 def test_module_help_lists_the_commands(tmp_path):
@@ -24,7 +22,14 @@ def test_module_help_lists_the_commands(tmp_path):
     command = [sys.executable, "-B", "-m", "surogate_tlc", "--help"]
     result = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=300)
     assert result.returncode == 0, result.stderr
-    assert all(name in result.stdout for name in COMMANDS)
+    assert all(name in result.stdout for name in COMMANDS) and set(COMMANDS) == {
+        "init",
+        "train",
+        "eval",
+        "probe",
+        "sample",
+        "export",
+    }
 
 
 def test_init_writes_an_initialised_model_directory(tmp_path, trained_tokenizer, capsys):
@@ -36,14 +41,6 @@ def test_init_writes_an_initialised_model_directory(tmp_path, trained_tokenizer,
     assert json.loads((out / modeldir.META_FILE).read_text())["init_seed"] == 5
     with pytest.raises(SystemExit, match="is not empty"):
         main(["init", "A1", str(out), "--tokenizer", str(trained_tokenizer), "--seed", "5"])
-
-
-def test_train_tokenizer_and_build_data_take_the_module_arguments(tmp_path, corpus_spec, capsys):
-    tok = tmp_path / "tok"
-    assert main(["train-tokenizer", str(corpus_spec), str(tok), "--vocab-size", "300"]) == 0
-    assert json.loads(capsys.readouterr().out)["sha256"] == tokenizer.tokenizer_sha256(tok)
-    assert main(["build-data", str(corpus_spec), str(tok), str(tmp_path / "data"), "--seq-len", "64"]) == 0
-    assert json.loads((tmp_path / "data" / "manifest.json").read_text())["format"]["seq_len"] == 64
 
 
 def test_export_writes_a_model_directory(tmp_path, small_model, capsys):
@@ -62,18 +59,30 @@ def test_train_reports_problems_without_training(run_yaml, capsys):
     assert "lora must be False" in capsys.readouterr().err
 
 
-def test_other_commands_reach_the_surogate_cli_after_register(monkeypatch):
-    seen = {}
+def test_eval_writes_its_result(small_model, shard_dirs, tmp_path, monkeypatch, capsys):
+    from surogate_tlc.eval import loss
 
-    def cli_main():
-        from transformers import AutoConfig
+    uniform = lambda inputs, targets, positions: np.where(targets == -100, 0.0, -1.0)  # noqa: E731
+    monkeypatch.setattr(loss, "native_scorer", lambda *a, **k: uniform)
+    out = tmp_path / "eval.json"
+    assert main(["eval", str(small_model), str(shard_dirs[64]), "--batch", "4", "--out", str(out)]) == 0
+    assert json.loads(capsys.readouterr().out) == json.loads(out.read_text())
+    assert json.loads(out.read_text())["loss"] == pytest.approx(1.0)
 
-        from surogate.dsl.py_compiler import list_registered_models
 
-        seen["argv"] = list(sys.argv)
-        seen["tlc"] = "TLCModel" in list_registered_models() and AutoConfig.for_model("tlc").model_type == "tlc"
+def test_sample_runs_greedy_on_fixed_prompts(small_model, shard_dirs, tmp_path, monkeypatch, capsys):
+    calls = []
 
-    monkeypatch.setitem(sys.modules, "surogate.cli.main", types.SimpleNamespace(cli_main=cli_main))
-    monkeypatch.setattr(sys, "argv", ["python -m surogate_tlc"])
-    assert main(["sft", "run.yaml"]) == 0
-    assert seen == {"argv": ["surogate", "sft", "run.yaml"], "tlc": True}
+    def next_logits(inputs, last):
+        calls.append(inputs.shape)
+        logits = np.zeros((inputs.shape[0], 320), np.float32)
+        logits[:, 40] = 1.0  # always the same token
+        return logits
+
+    monkeypatch.setattr(samples, "native_next_logits", lambda *a, **k: next_logits)
+    out = tmp_path / "samples.json"
+    assert main(["sample", str(small_model), str(shard_dirs[64]), "--max-new", "3", "--out", str(out)]) == 0
+    written = json.loads(out.read_text())
+    assert [s["prompt"] for s in written["samples"]] == [text for _, text in samples.PROMPTS]
+    assert all(s["tokens"] == [40, 40, 40] for s in written["samples"])
+    assert set(calls) == {(8, 64)}

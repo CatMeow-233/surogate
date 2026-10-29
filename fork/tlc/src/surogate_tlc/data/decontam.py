@@ -1,7 +1,8 @@
-"""Decontamination of the corpus against HumanEval, MBPP and EvalPlus (README: 去污染).
+"""Decontamination of the corpus against HumanEval, MBPP and EvalPlus (docs/data.md: 去污染).
 
-Every document is scanned with four candidate rules (v0.7 §9, review C11). Only high-precision evidence removes a
-document; the rest is flagged and goes to the sampled manual audit.
+Every document is scanned with four candidate rules. Only high-precision evidence removes a document; the rest is
+flagged and goes to the sampled manual audit, because a false removal costs training data silently while a flag
+costs one look.
 
 - `code13`: coverage of a benchmark solution's informative 13-grams of the identifier-abstracted Python token
   stream (identifiers become ID, string and number literals STR and NUM, comments and docstrings are dropped). A
@@ -11,13 +12,15 @@ document; the rest is flagged and goes to the sampled manual audit.
 - `text8`: coverage of a benchmark description's lowercased word 8-grams (MBPP's text, HumanEval's docstring) by
   the document's words, for items with at least MIN_TEXT_GRAMS.
 - `ast`: a function of the document whose alpha-renamed, literal-normalised AST equals a benchmark function's
-  (ast_hash; functions of fewer than MIN_AST_NODES nodes are ignored, they match everything).
+  (ast_hash: every bound name, parameter, keyword argument, except-as and import-as name is renamed in visiting
+  order; functions of fewer than MIN_AST_NODES nodes are ignored, they match everything).
 - `name`: a function named like a benchmark's distinctive entry point.
 
-A text document is scanned as text, and its markdown code blocks as code. The report (scan_corpus) lists every
-removed and flagged document with the sha256 of its text and the hits; a corpus spec that names the report under
-`decontam` drops the removed documents (surogate_tlc.data.corpus). calibrate() plants alpha-renamed benchmark
-solutions into corpus documents and measures recall and the false-positive rate (v0.7 gate G6).
+A text document is scanned as text, and its markdown code blocks (data.corpus.fences, as the shards frame them) as
+code. The report (scan_corpus) lists every removed and flagged document with the sha256 of its text and the hits; a
+corpus spec that names the report under `decontam` drops the removed documents (surogate_tlc.data.corpus).
+calibrate() plants alpha-renamed benchmark solutions into corpus documents and measures recall and the
+false-positive rate (gate G6).
 """
 
 from __future__ import annotations
@@ -42,25 +45,24 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..modeldir import dump_json, write_text_atomic
-from .corpus import DECONTAM_VERSION, Corpus, documents, file_sha256, load_corpus
+from ..files import dump_json, file_sha256, text_sha256, write_text_atomic
+from .corpus import DECONTAM_VERSION, Corpus, documents, fences, load_corpus
 
 CODE_N, TEXT_N = 13, 8
 MIN_CODE_GRAMS, MIN_TEXT_GRAMS, MIN_AST_NODES = 15, 5, 40
 MIN_WORDS_PER_GRAM = 4
 FLAG_COVERAGE = 0.5
-# Removal thresholds: high precision on the calibration in README "去污染".
+# Removal thresholds: high precision on the calibration recorded in docs/measurements.md.
 REMOVE = {"code13": 0.8, "text8": 0.8}
 GENERIC_NAMES = {"main", "solve", "solution", "func", "test", "check", "helper", "compute", "process", "run"}
 AUDIT_SAMPLE = 20
 BUILTINS = frozenset(dir(builtins))
 WORD = re.compile(r"[a-z0-9]+")
 IDENTIFIER = re.compile(r"(?<![.\w])[A-Za-z_]\w*\b")  # not an attribute name
-FENCE = "```"
 
 
 @dataclass(frozen=True)
-class Item:
+class BenchmarkItem:
     id: str  # "<file stem>/<task_id>"
     code: str
     text: str
@@ -85,7 +87,7 @@ def _docstrings(code: str) -> str:
     return "\n".join(doc for n in nodes if (doc := ast.get_docstring(n)))
 
 
-def _item(stem: str, record: dict[str, Any]) -> Item:
+def _item(stem: str, record: dict[str, Any]) -> BenchmarkItem:
     """HumanEval(+) records hold a signature-and-docstring prompt plus a body; MBPP and MBPP+ hold whole code and a
     description."""
     task = record.get("task_id")
@@ -100,10 +102,10 @@ def _item(stem: str, record: dict[str, Any]) -> Item:
     else:
         raise ValueError(f"{stem}/{task}: neither canonical_solution nor code")
     name = record.get("entry_point") or next(iter(re.findall(r"^\s*def\s+(\w+)", code, re.M)), None)
-    return Item(f"{stem}/{task}", code, text, name)
+    return BenchmarkItem(f"{stem}/{task}", code, text, name)
 
 
-def load_benchmarks(directory: Path) -> tuple[list[Item], list[dict[str, Any]]]:
+def load_benchmarks(directory: Path) -> tuple[list[BenchmarkItem], list[dict[str, Any]]]:
     """Items of every *.jsonl, *.jsonl.gz and *.json file in `directory`, and per file its name, sha256 and size."""
     paths = sorted(p for p in Path(directory).iterdir() if p.name.endswith((".jsonl", ".jsonl.gz", ".json")))
     if not paths:
@@ -159,8 +161,9 @@ def text_grams(text: str) -> set[tuple[str, ...]]:
 
 
 class _Alpha(ast.NodeTransformer):
-    """Names and parameters become v0, v1, ... in visiting order; constants their type name; functions F; docstrings,
-    annotations and return annotations go."""
+    """Bound names become v0, v1, ... in visiting order: names, parameters, keyword arguments (which name a
+    parameter), except-as, import-as and global/nonlocal names. Constants become their type name, functions F;
+    docstrings, annotations and return annotations go. Attribute names and imported module names stay."""
 
     def __init__(self) -> None:
         self.names: dict[str, str] = {}
@@ -173,6 +176,26 @@ class _Alpha(ast.NodeTransformer):
 
     def visit_arg(self, node: ast.arg) -> ast.AST:
         return ast.copy_location(ast.arg(arg=self._name(node.arg)), node)
+
+    def visit_keyword(self, node: ast.keyword) -> ast.AST:
+        value = self.visit(node.value)
+        arg = None if node.arg is None else self._name(node.arg)  # None: **kwargs
+        return ast.copy_location(ast.keyword(arg=arg, value=value), node)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> ast.AST:
+        node.type = None if node.type is None else self.visit(node.type)
+        node.name = None if node.name is None else self._name(node.name)
+        node.body = [self.visit(stmt) for stmt in node.body]
+        return node
+
+    def visit_alias(self, node: ast.alias) -> ast.AST:
+        return ast.copy_location(ast.alias(name=node.name, asname=node.asname and self._name(node.asname)), node)
+
+    def _declared(self, node: ast.Global | ast.Nonlocal) -> ast.AST:
+        node.names = [self._name(name) for name in node.names]
+        return node
+
+    visit_Global = visit_Nonlocal = _declared
 
     def visit_Constant(self, node: ast.Constant) -> ast.AST:
         return ast.copy_location(ast.Constant(value=type(node.value).__name__), node)
@@ -220,25 +243,14 @@ def function_hashes(src: str, min_nodes: int = MIN_AST_NODES) -> list[tuple[str,
 
 
 def code_blocks(text: str) -> str:
-    """The markdown code blocks of a text document, joined (the fence rule of data.shards.segments)."""
-    blocks, lines, inside = [], [], False
-    for line in text.splitlines(keepends=True):
-        fence = line.strip()
-        if (inside and fence == FENCE) or (not inside and fence.startswith(FENCE)):
-            if inside:
-                blocks.append("".join(lines))
-            lines, inside = [], not inside
-        elif inside:
-            lines.append(line)
-    if inside:
-        blocks.append("".join(lines))
-    return "\n".join(blocks)
+    """The markdown code blocks of a text document, joined (data.corpus.fences, the shards' framing)."""
+    return "\n".join(chunk for in_code, chunk in fences(text) if in_code)
 
 
 class Index:
     """The benchmark side of the four rules."""
 
-    def __init__(self, items: Sequence[Item]) -> None:
+    def __init__(self, items: Sequence[BenchmarkItem]) -> None:
         self.ids = [item.id for item in items]
         self.code: dict[tuple[str, ...], list[int]] = defaultdict(list)
         self.text: dict[tuple[str, ...], list[int]] = defaultdict(list)
@@ -294,10 +306,6 @@ def removing(hits: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     return [h for h in hits if h["rule"] == "ast" or h.get("coverage", 0) >= REMOVE.get(h["rule"], 2)]
 
 
-def text_sha256(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
 _INDEX: Index | None = None
 
 
@@ -330,7 +338,7 @@ def rename(code: str) -> str:
     )
 
 
-def calibrate(index: Index, items: Sequence[Item], hosts: Sequence[str], *, plants: int = 40, seed: int = 0):
+def calibrate(index: Index, items: Sequence[BenchmarkItem], hosts: Sequence[str], *, plants: int = 40, seed: int = 0):
     """Recall on `plants` alpha-renamed benchmark solutions appended to random host code documents, and the share
     of the unchanged hosts that would be removed (false positives) or flagged."""
     rng = random.Random(seed)
@@ -358,7 +366,7 @@ def calibrate(index: Index, items: Sequence[Item], hosts: Sequence[str], *, plan
 def scan_corpus(
     corpus: Corpus, benchmark_dir: Path, *, jobs: int = 1, plants: int = 0, hosts: int = 2000, seed: int = 0
 ) -> dict[str, Any]:
-    """The decontamination report of every document of `corpus` (README: 去污染)."""
+    """The decontamination report of every document of `corpus` (docs/data.md: 去污染)."""
     items, files = load_benchmarks(benchmark_dir)
     index = Index(items)
     docs = ((doc.key, doc.source.name, doc.source.kind, doc.text) for doc in documents(corpus))

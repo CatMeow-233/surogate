@@ -1,11 +1,13 @@
-"""Decontamination (surogate_tlc.data.decontam, README: 去污染) on toy benchmark files in the HumanEval, MBPP and
-EvalPlus formats: the four rules, removal versus flags, the report and its use by a corpus spec."""
+"""Decontamination (surogate_tlc.data.decontam, docs/data.md: 去污染) on toy benchmark files in the HumanEval, MBPP
+and EvalPlus formats: the four rules, removal versus flags, the report and its use by a corpus spec."""
 
+import ast
 import gzip
 import json
 from collections import Counter
 
 import pytest
+from surogate_tlc import files
 from surogate_tlc.data import corpus, decontam, shards
 
 HE_PROMPT = '''from typing import List
@@ -99,6 +101,43 @@ def test_identifier_abstraction():
     assert decontam.rename("for item in data: print(item)") == "for zz_meti in zz_atad: print(zz_meti)"
 
 
+@pytest.mark.parametrize(
+    "a, b",
+    [
+        ("def f(a, b):\n    return a\nx = f(a='p', b='q')\n", "def g(c, d):\n    return c\ny = g(c='p', d='q')\n"),
+        ("try:\n    f()\nexcept E as err:\n    g(err)\n", "try:\n    f()\nexcept E as e2:\n    g(e2)\n"),
+        ("import numpy as np\nnp.zeros(3)\n", "import numpy as xp\nxp.zeros(3)\n"),
+        ("def f():\n    global n\n    n = 1\n", "def f():\n    global m\n    m = 1\n"),
+    ],
+    ids=["keyword arguments", "except-as", "import-as", "global"],
+)
+def test_ast_hash_renames_every_binding(a, b):
+    assert decontam.ast_hash(ast.parse(a)) == decontam.ast_hash(ast.parse(b))
+
+
+def test_ast_hash_keeps_attributes_and_modules():
+    assert decontam.ast_hash(ast.parse("x.size\n")) != decontam.ast_hash(ast.parse("x.shape\n"))
+    assert decontam.ast_hash(ast.parse("import os\n")) != decontam.ast_hash(ast.parse("import sys\n"))
+
+
+def test_code_blocks_are_the_shards_fences(trained_tokenizer):
+    """Decontamination scans as code exactly what the shards frame as code, line ends other than \\n included."""
+    from surogate_tlc.data import tokenizer
+
+    text = "intro\u2028```python\ndef secret_solution_fn(x):\n    return x\n```\nafter\x0c```\nmore\n"
+    special = tokenizer.special_ids(tokenizer.load(trained_tokenizer))
+    pieces = shards.segments(text, "text", special)
+    start, end = special[tokenizer.CODE_START], special[tokenizer.CODE_END]
+    framed, inside = [], False
+    for piece in pieces:
+        if piece in (start, end):
+            inside = piece == start
+        elif inside and isinstance(piece, str):
+            framed.append(piece)
+    assert decontam.code_blocks(text) == "\n".join(framed)
+    assert "secret_solution_fn" not in decontam.code_blocks(text)  # "intro\u2028```python" is not a fence line
+
+
 def test_rules(benchmarks):
     index = decontam.Index(decontam.load_benchmarks(benchmarks)[0])
     renamed = CLEAN + "\n\n" + decontam.rename(HE_PROMPT + HE_SOLUTION)
@@ -156,7 +195,7 @@ def test_report_and_corpus(benchmarks, tmp_path, trained_tokenizer, capsys):
     assert [d.key for d in corpus.documents(c, dropped)] == ["code/code/clean.py", "code/code/named.py"]
     assert dropped == {("code", "decontaminated"): 1}
     assert len(list(corpus.documents(corpus.load_corpus(spec, decontam=False)))) == 3
-    record = {"report": "decontam.json", "sha256": corpus.file_sha256(report), "removed": 1}
+    record = {"report": "decontam.json", "sha256": files.file_sha256(report), "removed": 1}
     assert corpus.decontam_record(c) == record
     manifest = shards.build_shards(c, trained_tokenizer, tmp_path / "data", seq_len=64)
     assert manifest["corpus"]["decontam"] == record and manifest["sources"][0]["dropped"] == {"decontaminated": 1}

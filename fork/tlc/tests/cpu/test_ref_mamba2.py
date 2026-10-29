@@ -1,4 +1,4 @@
-"""The Mamba-2 reference fork/tlc/prototypes/ref_mamba2.py (README: "初始化" and G1): its three evaluation orders
+"""The Mamba-2 reference fork/tlc/prototypes/ref_mamba2.py (docs/model.md: 初始化, 数值参照): its three evaluation orders
 agree, it reads exactly the weights init writes, its assumptions match the compiled IR, an initialised A0 starts
 near the uniform loss, and its CLI writes the G1(b) goldens.
 """

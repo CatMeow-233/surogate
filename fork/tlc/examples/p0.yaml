@@ -1,0 +1,72 @@
+# TLC P0 run configuration, one file for every row so that A0, A1 and A1h share every hyperparameter:
+#   TLC_ROW=A0 python -m surogate_tlc train fork/tlc/examples/p0.yaml --stage smoke
+# An upstream SFT config plus the `tlc` table (fork/tlc/docs/training.md, 训练驱动). The runbook
+# (fork/tlc/docs/runbook.md) prepares $TLC_RUNS: tokenizer, shards and a model directory per row.
+# The run directory is <output_dir>/<stage>, or <stage>-mb<B> with --microbatch B.
+model: ${TLC_RUNS}/models/${TLC_ROW}
+output_dir: ${TLC_RUNS}/train/${TLC_ROW}
+run_name: tlc-${TLC_ROW}
+
+sequence_len: 512
+# 32 x 512 tokens per microbatch, no recompute: at 2 x 512 the step is bound by kernel launches.
+# gradient_accumulation_steps follows from tlc.tokens_per_update.
+per_device_train_batch_size: 32
+gpus: 1
+recipe: bf16
+recompute: false
+use_cuda_graphs: true
+
+# Software-gate settings, not tuned: the learning rate is swept per architecture in Phase 1.
+optimizer: adamw
+learning_rate: 1.0e-3
+lr_scheduler_type: cosine
+final_lr_fraction: 0.1
+warmup_steps: 30
+# No weight decay: the native AdamW decays every parameter, A_log, dt_bias and D among them, which the Mamba-2
+# reference excludes; decay would pull them toward the native-default state the fork's initialisation avoids.
+weight_decay: 0.0
+adamw_beta2: 0.95
+max_grad_norm: 1.0
+train_seed: 1
+eval_seed: 1
+
+logging_steps: 1
+log_gpu_util: 10
+save_total_limit: 3
+resume_from_checkpoint: true
+
+tlc:
+  data: ${TLC_RUNS}/data
+  tokens_per_update: 16384
+  stages:
+    # G3: 10-step smoke run; its checkpoint at step 5 serves the G2 resume check.
+    smoke:
+      max_steps: 10
+      warmup_steps: 2
+      eval_steps: 5
+      save_steps: 5
+    # G3: 100 steps on one fixed batch (the first 32 rows of train-00000.bin) at a constant learning rate.
+    overfit:
+      max_steps: 100
+      fixed_batch: true
+      lr_scheduler_type: constant
+      warmup_steps: 10
+      eval_steps: 50
+      save_steps: 50
+    # G3: 300-step pilot, 4,915,200 nominal tokens.
+    pilot:
+      max_steps: 300
+      eval_steps: 50
+      save_steps: 100
+    # G0.5: throughput with CUDA graphs and eager; the report gives tokens/s, MFU and peak memory per microbatch.
+    throughput:
+      max_steps: 30
+      warmup_steps: 2
+      eval_steps: 1000
+      save_steps: 1000
+    throughput-eager:
+      max_steps: 30
+      warmup_steps: 2
+      eval_steps: 1000
+      save_steps: 1000
+      use_cuda_graphs: false

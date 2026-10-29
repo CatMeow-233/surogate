@@ -1,4 +1,4 @@
-"""Tokenizer (surogate_tlc.data.tokenizer, README: "Tokenizer") and its native-consistency harness, on CPU.
+"""Tokenizer (surogate_tlc.data.tokenizer, docs/data.md: Tokenizer) and its native-consistency harness, on CPU.
 
 The harness runs here against stand-ins for the native tokenizer: one answered by the Hugging Face tokenizer, and
 damaged ones it must catch. The comparison with the real native tokenizer is a GPU-host test

@@ -1,6 +1,6 @@
-"""The training driver (README: 训练驱动) with a stand-in for the native trainer: the OOM policy keeps the tokens per
-update (plan test 9), failures leave a failure report, resumes keep the run's batch shape, and finished runs and
-checkpoints become model directories."""
+"""The training driver (docs/training.md: 训练驱动) with a stand-in for the native trainer: every attempt trains the
+configured tokens per update and an OOM stops the run instead of shrinking it, failures leave a failure report, a
+resume needs the run's weights, data and settings, and finished runs and checkpoints become model directories."""
 
 import json
 import os
@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 from surogate_tlc import modeldir
 from surogate_tlc.data import shards
+from surogate_tlc.data.shards import manifest, shard_files
 from surogate_tlc.train import config, driver, report
 
 OOM = "Cuda OOM when allocating tensor blocks[0].mamba_scan of shape [32, 512, 768] with dtype bf16 in context fwd."
@@ -62,62 +63,62 @@ def oom_above(microbatch: int):
     return lambda sft: RuntimeError(OOM) if sft["per_device_train_batch_size"] > microbatch else None
 
 
-def test_downshift_keeps_tokens_per_update(run_yaml, monkeypatch):
-    """Plan test 9: every attempt trains 16,384 nominal tokens per update; each downshift is recorded."""
+def test_oom_fails_with_a_failure_report(run_yaml, monkeypatch):
+    """The tokens per update never shrink: an OOM stops the run, and the report names the remedy (a new run)."""
     monkeypatch.delenv(driver.REGRESSION_ENV, raising=False)
-    run = config.load(run_yaml(tlc={"on_oom": "downshift", "max_downshifts": 2}))
-    calls = []
-    record = driver.train(run, factory=factory(calls, **{"raise": oom_above(8)}))
-    shapes = [(c["sft"]["per_device_train_batch_size"], c["sft"]["gradient_accumulation_steps"]) for c in calls]
-    assert shapes == [(32, 1), (16, 2), (8, 4)]
-    assert all(b * ga * c["sft"]["sequence_len"] == 16384 for (b, ga), c in zip(shapes, calls, strict=True))
-    assert [a["tokens_per_update"] for a in record["attempts"]] == [16384] * 3
-    assert [a["status"] for a in record["attempts"]] == ["oom", "oom", "completed"]
-    assert record["downshifts"] == [
-        {"attempt": 0, "from": [32, 1], "to": [16, 2]},
-        {"attempt": 1, "from": [16, 2], "to": [8, 4]},
-    ]
-    assert record["status"] == "completed" and record["sft"]["per_device_train_batch_size"] == 8
-    assert json.loads((run.run_dir / driver.RUN_FILE).read_text()) == record
-    assert driver.REGRESSION_ENV not in os.environ
-
-
-def test_oom_fails_by_default_with_a_failure_report(run_yaml):
     run = config.load(run_yaml())
     calls = []
     with pytest.raises(driver.RunFailed, match="Cuda OOM"):
         driver.train(run, factory=factory(calls, **{"raise": oom_above(8)}))
     record = json.loads((run.run_dir / driver.RUN_FILE).read_text())
-    assert len(calls) == 1 and record["status"] == "failed" and record["downshifts"] == []
+    assert len(calls) == 1 and record["status"] == "failed" and record["attempts"][0]["status"] == "oom"
+    assert [a["tokens_per_update"] for a in record["attempts"]] == [16384]
     failure = record["failure_report"]
-    assert failure["oom"] and failure["no_downshift_because"] == "tlc.on_oom is fail"
+    assert failure["oom"] and failure["remedy"] == "a new run with a smaller --microbatch"
     assert (failure["microbatch"], failure["grad_accum"]) == (32, 1) and "Cuda OOM" in failure["traceback"]
     assert record["attempts"][0]["environment"]["git_commit"]
+    assert driver.REGRESSION_ENV not in os.environ
+
+
+def test_other_failures_and_a_resume(run_yaml):
+    run = config.load(run_yaml())
+    with pytest.raises(driver.RunFailed, match="power cut"):
+        driver.train(run, factory=factory([], save=[5], **{"raise": RuntimeError("power cut")}))
+    record = json.loads((run.run_dir / driver.RUN_FILE).read_text())
+    assert record["failure_report"]["oom"] is False and record["failure_report"]["remedy"] is None
+    assert record["finalized_checkpoints"] == ["step_00000005"]  # what was saved is usable
+    calls = []
+    record = driver.train(run, factory=factory(calls))
+    assert [a["status"] for a in record["attempts"]] == ["failed", "completed"]
+    assert record["attempts"][-1]["resumed_from_step"] == 5 and record["status"] == "completed"
+    assert record["failure_report"] is None
 
 
 @pytest.mark.parametrize(
-    "tlc, behaviour, attempts, reason",
+    "change, message",
     [
-        ({"on_oom": "downshift", "max_downshifts": 1}, {"raise": oom_above(8)}, 2, "tlc.max_downshifts (1) reached"),
-        ({"on_oom": "downshift"}, {"raise": oom_above(8), "save": [5]}, 1, "the run has a checkpoint"),
-        ({"on_oom": "downshift"}, {"raise": ValueError("bad shape")}, 1, "not an out-of-memory error"),
+        ({"learning_rate": 1e-4}, "learning_rate"),
+        ({"max_steps": 20}, "schedule_total_steps"),
+        ({"per_device_train_batch_size": 16}, "per_device_train_batch_size"),
     ],
 )
-def test_when_there_is_no_downshift(run_yaml, tlc, behaviour, attempts, reason):
-    run = config.load(run_yaml(tlc=tlc))
-    calls = []
-    with pytest.raises(driver.RunFailed):
-        driver.train(run, factory=factory(calls, **behaviour))
-    record = json.loads((run.run_dir / driver.RUN_FILE).read_text())
-    assert len(calls) == attempts and record["failure_report"]["no_downshift_because"].startswith(reason)
+def test_resume_refuses_changed_settings(run_yaml, change, message):
+    driver.train(config.load(run_yaml()), factory=factory([], save=[5]))
+    with pytest.raises(driver.RunError, match=message):
+        driver.train(config.load(run_yaml(**change)), factory=factory([]))
+    # Saving and logging may change.
+    record = driver.train(config.load(run_yaml(save_steps=3, logging_steps=2)), factory=factory([]))
+    assert len(record["attempts"]) == 2
 
 
-def test_microbatch_one_cannot_halve(run_yaml):
-    run = config.load(run_yaml(tlc={"on_oom": "downshift"}), microbatch=1)
-    with pytest.raises(driver.RunFailed):
-        driver.train(run, factory=factory([], **{"raise": RuntimeError("CUDA error: out of memory")}))
-    record = json.loads((run.run_dir / driver.RUN_FILE).read_text())
-    assert record["failure_report"]["no_downshift_because"] == "microbatch 1 cannot be halved"
+def test_resume_refuses_other_weights(run_yaml, tmp_path):
+    run = config.load(run_yaml())
+    driver.train(run, factory=factory([], save=[5]))
+    other = tmp_path / "other-model"
+    shutil.copytree(run.model_dir, other)
+    (other / "model.safetensors").write_bytes(b"changed")
+    with pytest.raises(driver.RunError, match="model_weights_sha256"):
+        driver.train(config.load(run_yaml(model=str(other))), factory=factory([]))
 
 
 def test_finished_run_and_checkpoints_are_model_directories(run_yaml, small_model, shard_dirs):
@@ -125,50 +126,33 @@ def test_finished_run_and_checkpoints_are_model_directories(run_yaml, small_mode
     calls = []
     record = driver.train(run, factory=factory(calls, save=[5]))
     data = shard_dirs[512]
-    assert calls[0]["train"] == [str(p) for p in config.shard_files(data, "train")]
-    assert calls[0]["eval"] == [str(p) for p in config.shard_files(data, "val")]
+    assert calls[0]["train"] == [str(p) for p in shard_files(data, "train")]
+    assert calls[0]["eval"] == [str(p) for p in shard_files(data, "val")]
     provenance = {
-        "tokenizer_sha256": config.manifest(data)["tokenizer"]["sha256"],
+        "tokenizer_sha256": manifest(data)["tokenizer"]["sha256"],
         "data_manifest_sha256": shards.manifest_sha256(data),
         "shard_version": shards.SHARD_VERSION,
     }
-    for path, step in ((run.run_dir, 10), (run.run_dir / "step_00000005", 5)):
+    environment = record["attempts"][0]["environment"]
+    for path, step, kind in ((run.run_dir, 10, "run"), (run.run_dir / "step_00000005", 5, "checkpoint")):
         modeldir.check_model_dir(path)
         meta = json.loads((path / modeldir.META_FILE).read_text())
-        assert meta | provenance == meta and meta["step"] == step and meta["init_seed"] == 0
+        assert meta | provenance == meta and meta["step"] == step and meta["init_seed"] == 0 and meta["kind"] == kind
+        assert meta["run"] == {
+            "settings_sha256": record["identity"]["settings_sha256"],
+            "config_sha256": record["attempts"][0]["config_sha256"],
+            "git_commit": environment["git_commit"],
+            "git_dirty": environment["git_dirty"],
+        }
     assert record["finalized_checkpoints"] == ["step_00000005"]
     summary = record["attempts"][0]["summary"]
     assert summary["steps"] == [1, 10] and summary["first_loss"] == pytest.approx(9.6)
     assert summary["tokens_per_second"] == 163840 and summary["cuda_peak_memory_bytes"] == 123
     assert summary["eval_loss"] == [[5, 9.1]]
-    split = config.manifest(data)["splits"]["train"]
+    split = manifest(data)["splits"]["train"]
     assert record["data"]["valid_targets_per_update"] == round(16384 * split["valid_targets"] / split["tokens"])
     (row,) = report.runs(run.run_dir.parent)
     assert row["status"] == "completed" and row["tokens_per_second"] == 163840 and row["microbatch"] == 32
-
-
-def test_resume_keeps_the_downshifted_batch_and_the_identity(run_yaml, tmp_path):
-    run = config.load(run_yaml(tlc={"on_oom": "downshift"}))
-
-    def oom_then_power_cut(sft):
-        return RuntimeError(OOM) if sft["per_device_train_batch_size"] > 16 else RuntimeError("power cut")
-
-    def save_after_startup(sft):
-        return [5] if sft["per_device_train_batch_size"] <= 16 else []
-
-    first = factory([], save=save_after_startup, **{"raise": oom_then_power_cut})
-    with pytest.raises(driver.RunFailed, match="power cut"):
-        driver.train(run, factory=first)
-    calls = []
-    record = driver.train(run, factory=factory(calls))
-    assert calls[0]["sft"]["per_device_train_batch_size"] == 16 and calls[0]["sft"]["gradient_accumulation_steps"] == 2
-    assert [a["status"] for a in record["attempts"]] == ["oom", "failed", "completed"]
-    assert record["attempts"][-1]["resumed_from_step"] == 5
-    other = tmp_path / "other-model"
-    shutil.copytree(run.model_dir, other)
-    (other / "model.safetensors").write_bytes(b"changed")
-    with pytest.raises(driver.RunError, match="other weights"):
-        driver.train(config.load(run_yaml(model=str(other), tlc={"on_oom": "downshift"})), factory=factory([]))
 
 
 def test_run_refuses_problems_before_training(run_yaml):
@@ -187,7 +171,7 @@ def test_fixed_batch_holds_the_first_rows(run_yaml, shard_dirs):
     record = driver.train(run, factory=factory(calls))
     fixed = run.run_dir / driver.FIXED_BATCH_FILE
     assert calls[0]["train"] == [str(fixed)]
-    source = config.shard_files(data, "train")[0]
+    source = shard_files(data, "train")[0]
     expected = [a[:rows] for a in shards.served_rows(shards.read_shard(source), 64)]
     got = shards.served_rows(shards.read_shard(fixed), 64)
     assert all(np.array_equal(a, b) for a, b in zip(expected, got, strict=True))
@@ -211,6 +195,7 @@ def test_is_oom(error, oom):
 
 def test_environment_fingerprint():
     env = report.environment()
+    assert (report.REPO / ".git").exists()
     head = subprocess.run(["git", "-C", str(report.REPO), "rev-parse", "HEAD"], capture_output=True, text=True)
     assert env["git_commit"] == head.stdout.strip() and isinstance(env["git_dirty"], bool)
     assert set(env["packages"]) == set(report.PACKAGES) and env["packages"]["torch"]

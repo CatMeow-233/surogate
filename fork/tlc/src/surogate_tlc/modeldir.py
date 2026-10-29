@@ -8,13 +8,12 @@ to checkpoint and export directories after surogate_tlc.checkpoint.finalize_dir 
 from __future__ import annotations
 
 import json
-import os
-import shutil
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from . import hf
+from .files import copy_atomic, dump_json, write_text_atomic
 
 CONFIG_FILE = "config.json"
 META_FILE = "tlc_meta.json"
@@ -42,22 +41,6 @@ def companion_files(path: Path) -> list[str]:
     cfg = json.loads((path / CONFIG_FILE).read_text(encoding="utf-8"))
     tokenizer = [*TOKENIZER_FILES, *(name for name in OPTIONAL_TOKENIZER_FILES if (path / name).is_file())]
     return [CONFIG_FILE, *code_files(cfg), *tokenizer, META_FILE]
-
-
-def write_text_atomic(path: Path, text: str) -> None:
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
-
-
-def copy_atomic(src: Path, dst: Path) -> None:
-    tmp = dst.with_name(f".{dst.name}.tmp")
-    shutil.copyfile(src, tmp)
-    os.replace(tmp, dst)
-
-
-def dump_json(obj: Any) -> str:
-    return json.dumps(obj, indent=2, ensure_ascii=False) + "\n"
 
 
 def write_model_dir(

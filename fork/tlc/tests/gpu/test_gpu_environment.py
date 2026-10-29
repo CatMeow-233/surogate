@@ -1,5 +1,5 @@
 """G0 environment: the native extension and the TLC package come from this checkout, the GPU is an sm_120 part, and
-the environment fingerprint every run records is complete (README: G0)."""
+the environment fingerprint every run records is complete (docs/runbook.md: G0)."""
 
 import json
 from pathlib import Path

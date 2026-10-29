@@ -1,22 +1,26 @@
-"""Binding probes: forced-choice scoring of suite items with teacher-forced log-probabilities (README: 绑定探针).
+"""Binding probes: forced-choice scoring of suite items with teacher-forced log-probabilities (docs/training.md:
+绑定探针).
 
-For every candidate of an item (data.suites.Item) the text prompt + candidate + tail is encoded as one document
+For every candidate of an item (data.items.Item) the text prompt + candidate + tail is encoded as one document
 would be in the shards (data.shards: no special ids from the text, `<|bos|> <|code_start|>` before a prompt that
 starts its document). The candidate's score is the sum of the log-probabilities of the tokens from the first one
 that reaches past the shared context to the one holding the first character of the tail, so a candidate is
 scored as a whole word that ends there; the shared context ends where the earliest candidate's first token
 starts, and an item whose candidates do not share it is not scored. A synthetic item (T1, T2) longer than the
 model's context is not scored either, since cutting it could cut the binding asked about; a natural one (T3) keeps
-its last seq_len tokens, as a shard window would. The item is correct when the gold scores best.
+its last seq_len tokens, as a shard window would. The item is correct when the gold scores best. An item with a
+non-finite score (a diverged checkpoint) is not scored either (`nonfinite`): max() over NaN would pick the first
+candidate, which for T1/T2 is the line1 heuristic.
 
 rows_of(), score_rows() and summarize() need no native code; evaluate_suite() runs them with the native trainer's
 compute_logprobs, the same scorer as eval.loss. summarize() reports per task the accuracy, the chance level, each
-heuristic's accuracy and the floors per stratum (v0.7 §12.2): `floor` is the best heuristic of the stratum,
-`shortcut_floor` the best of those that are not exact there (a heuristic right on every item of the stratum is
-the task's algorithm, as same_name is where nothing shadows); `above_floor` and `above_shortcut_floor` average
-each scored item's correctness minus its stratum's floor. The `disagreement` subset holds the items every
-shortcut heuristic gets wrong; `stale_rate` is the share of choices equal to the reader's previous value of the
-expression when that is a wrong candidate (the salience memo's EV-BIND).
+heuristic's accuracy and the floors per stratum, because accuracy only means something above what a text-level
+shortcut already gets: `floor` is the best heuristic of the stratum, `shortcut_floor` the best of those that are
+not exact there (a heuristic right on every item of the stratum is the task's algorithm, as same_name is where
+nothing shadows); `above_floor` and `above_shortcut_floor` average each scored item's correctness minus its
+stratum's floor. The `disagreement` subset holds the items every shortcut heuristic gets wrong; `stale_rate` is
+the share of choices equal to the reader's previous value of the expression when that is a wrong candidate (a
+model that tracks names but not rebinding picks it).
 """
 
 from __future__ import annotations
@@ -30,17 +34,21 @@ from typing import Any
 
 import numpy as np
 
-from ..data.corpus import file_sha256
-from ..data.shards import manifest_sha256
-from ..data.suites import Item, read_items
-from ..data.tokenizer import BOS, CODE_START, PAD, load, special_ids, tokenizer_sha256
+from ..data.items import Item, read_items
+from ..data.shards import IGNORE, check_tokenizer, manifest_sha256
+from ..data.tokenizer import BOS, CODE_START, PAD, load, special_ids
+from ..files import file_sha256
 from ..modeldir import check_model_dir
-from ..train.config import manifest
-from .loss import IGNORE, Scorer, native_scorer
+from ..native import Scorer, native_scorer
 
 # text -> (token ids, (start, end) character offsets per token)
 Encoder = Callable[[str], tuple[list[int], list[tuple[int, int]]]]
-DISTANCE_BUCKETS = ((128, "<=128"), (512, "128-512"), (2048, "512-2048"), (math.inf, ">2048"))
+# Tokens from the gold's binding to the end of the prompt. `distance` spans the 2048-token context the later phases
+# train with; `distance_512` resolves P0's 512-token context.
+DISTANCE_BUCKETS = {
+    "distance": ((128, "<=128"), (512, "128-512"), (2048, "512-2048"), (math.inf, ">2048")),
+    "distance_512": ((64, "<=64"), (256, "65-256"), (512, "257-512"), (math.inf, ">512")),
+}
 CELLS = {
     "T1": ("pattern", "live", "hops", "overwrites", "depth"),
     "T2": ("pattern", "formals", "distractors", "actuals"),
@@ -128,6 +136,9 @@ def probe(
         if "skip" in p:
             results.append({"id": item.id, "status": p["skip"]})
             continue
+        if not all(math.isfinite(score) for score in per_item[i]):
+            results.append({"id": item.id, "status": "nonfinite", "scores": per_item[i]})
+            continue
         best = max(range(len(item.candidates)), key=lambda c: per_item[i][c])
         choice = item.candidates[best]
         results.append(
@@ -148,15 +159,15 @@ def _mean(values: Sequence[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
 
-def _distance(tokens: int | None) -> str | None:
-    return None if tokens is None else next(label for bound, label in DISTANCE_BUCKETS if tokens <= bound)
+def _distance(tokens: int | None, buckets: tuple) -> str | None:
+    return None if tokens is None else next(label for bound, label in buckets if tokens <= bound)
 
 
 def _groups(item: Item, result: dict[str, Any], key: str) -> list[Any]:
     if key == "heldout":
         return item.strata.get("heldout") or ["none"]
-    if key == "distance":
-        return [_distance(result["distance"])]
+    if key in DISTANCE_BUCKETS:
+        return [_distance(result["distance"], DISTANCE_BUCKETS[key])]
     if key == "pieces":
         return [min(result["pieces"], 4)]  # 4 means 4 or more
     return [item.strata.get(key)]
@@ -205,14 +216,15 @@ def _metrics(pairs: Sequence[tuple[Item, dict[str, Any]]], floors: dict[str, tup
 
 def summarize(items: Sequence[Item], results: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """Per task: the overall metrics, the per-cell floors (`cells`) and the metrics by each stratum key, held-out
-    axis, distance bucket (tokens from the gold's binding to the end of the prompt) and identifier pieces (`by`)."""
+    axis, distance bucket (DISTANCE_BUCKETS) and identifier pieces (`by`). Unscored items count under `skipped`."""
     by_id = {item.id: item for item in items}
     out = {}
     for task in sorted({item.task for item in items}):
         mine = [(by_id[r["id"]], r) for r in results if by_id[r["id"]].task == task]
         scored = [(item, r) for item, r in mine if r["status"] == "scored"]
         floors, cells = _floors(task, scored)
-        keys = sorted({k for item, _ in scored for k in item.strata} - {"heldout"}) + ["heldout", "distance", "pieces"]
+        keys = sorted({k for item, _ in scored for k in item.strata} - {"heldout"})
+        keys += ["heldout", *DISTANCE_BUCKETS, "pieces"]
         by = {}
         for key in keys:
             groups: dict[Any, list] = defaultdict(list)
@@ -242,9 +254,7 @@ def evaluate_suite(
     `scorer` defaults to the native trainer."""
     model_dir, data, suite = Path(model_dir), Path(data), Path(suite)
     check_model_dir(model_dir)
-    info = manifest(data)
-    if info["tokenizer"]["sha256"] != tokenizer_sha256(model_dir):
-        raise ValueError(f"the shards in {data} were built with another tokenizer than {model_dir}'s")
+    info = check_tokenizer(data, model_dir)
     seq_len = info["format"]["seq_len"]
     tokenizer = load(model_dir, ordinary=True)
     special = special_ids(tokenizer)

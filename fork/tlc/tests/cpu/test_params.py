@@ -1,4 +1,4 @@
-"""Parameter counts of the P0 rows, read from IR shapes (README: "P0 的行").
+"""Parameter counts of the P0 rows, read from IR shapes (README: P0 的行).
 
 A0's count pins the fixed Mamba geometry; A1 must stay within 2 % of A0, tied and untied. A closed-form count per
 layer kind cross-checks the IR shapes of every row.
@@ -55,3 +55,18 @@ def test_ir_count_matches_the_layer_formulas(counts, row):
     tied, untied = counts[row]
     assert untied == _closed_form(cfg)
     assert untied - tied == cfg["vocab_size"] * cfg["hidden_size"]  # tying drops exactly the LM head
+
+
+def test_non_embedding_count_and_flops():
+    """The counts a scaling comparison uses: A0 without its embedding, and the estimated forward FLOPs per token
+    (2 x matmul multiply-adds plus the sequence mixers), which grow with the context only for attention layers."""
+    module = ir.compile_ir(hf.row_config("A0"))
+    assert ir.param_count(module, tied=True, embedding=False) == A0_TIED - 16384 * 384 == 25_490_736
+    assert ir.param_count(module, tied=False, embedding=False) == 25_490_736
+    flops = {
+        row: (ir.flops_per_token(hf.row_config(row), 512), ir.flops_per_token(hf.row_config(row), 2048))
+        for row in ("A0", "A1", "A1h")
+    }
+    assert flops["A0"] == (68_419_584, 68_419_584)
+    assert flops["A1"] == (68_321_280, 82_477_056)
+    assert flops["A1h"][0] < flops["A0"][0] < flops["A1h"][1]

@@ -1,6 +1,7 @@
-"""Synthetic binding programs (surogate_tlc.data.synth, README: 合成绑定任务): executed golds, the grid, the four
+"""Synthetic binding programs (surogate_tlc.data.synth, docs/data.md: 合成绑定任务): executed golds, the grid, the four
 split axes between the training stream and the eval halves, and the heuristic floors per pattern."""
 
+import ast
 import itertools
 import json
 import random
@@ -9,7 +10,9 @@ import shutil
 from collections import defaultdict
 
 import pytest
-from surogate_tlc.data import suites, synth
+from surogate_tlc.data import synth
+from surogate_tlc.data.decontam import ast_hash
+from surogate_tlc.data.items import HALVES, SUITE_FILES, read_items
 
 
 @pytest.fixture(scope="module")
@@ -17,7 +20,7 @@ def built(tmp_path_factory):
     """One item per grid cell and half, and about 20k characters of training programs."""
     out = tmp_path_factory.mktemp("synth") / "out"
     manifest = synth.build(out, seed=3, per_task=1, train_chars=20000)
-    halves = {half: suites.read_items(out / suites.SUITE_FILES[half]) for half in suites.HALVES}
+    halves = {half: read_items(out / SUITE_FILES[half]) for half in HALVES}
     return out, manifest, halves
 
 
@@ -44,25 +47,71 @@ def test_build_writes_disjoint_halves_and_a_training_stream(built):
 KEYWORDS = {"assert", "def", "return", "lambda", "str"}
 
 
-@pytest.mark.parametrize("leak", ["eval literal", "held-out identifier", "held-out pattern", "eval ast"])
-def test_check_finds_leaks(built, tmp_path, leak):
-    out, _, halves = built
+def _as_training_program(item) -> str:
+    """The item's program with every identifier renamed into the training pool and every literal into the training
+    literal space: the same alpha-renamed AST, as a generator could have drawn it for the training stream."""
+    names = iter(n for n in synth.POOLS["seen"] if not set(n.split("_")) & KEYWORDS)
+    renamed: dict[str, str] = {}
+    words = ("".join(w) for w in itertools.product("efgh", repeat=4))
+    literals = (w for w in words if not synth.eval_literal(w))
+    text = synth.LITERAL.sub(lambda m: f"'{next(literals)}'", item.program)
+    return synth.IDENTIFIER.sub(
+        lambda m: m.group(0) if m.group(0) in KEYWORDS else renamed.setdefault(m.group(0), next(names)), text
+    )
+
+
+def _with_record(out, tmp_path, record):
     copy = tmp_path / "copy"
     shutil.copytree(out, copy)
-    record = {"text": "y = 'zzzz'\n", "items": []}
-    if leak == "eval literal":
-        words = ("".join(w) for w in itertools.product("abcd", repeat=4))
-        record["text"] = next(f"x = '{w}'\n" for w in words if synth.eval_literal(w))
-    elif leak == "held-out identifier":
-        record["text"] = f"{synth.POOLS['novel'][0]} = 'zzzz'\n"
-    elif leak == "held-out pattern":
-        record["items"] = [{"task": "T1", "pattern": "shadow-closure", "family": "assign", "hash": "0"}]
-    else:
-        record["items"] = [{"task": "T1", "pattern": "flat", "family": "assign", "hash": halves["test"][0].hash}]
     with (copy / synth.TRAIN_FILE).open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
-    with pytest.raises(AssertionError):
-        synth.check(copy)
+    return copy
+
+
+@pytest.mark.parametrize(
+    "leak, message",
+    [
+        ("eval literal", "an eval literal"),
+        ("held-out identifier", "held-out identifiers"),
+        ("held-out pattern", "held-out family or pattern"),
+        ("recorded hash", "its record says"),
+    ],
+)
+def test_check_finds_leaks(built, tmp_path, leak, message):
+    out, _, halves = built
+    text = "y = 'zzzz'\n"
+    info = {"task": "T1", "pattern": "flat", "family": "assign", "hash": ast_hash(ast.parse(text))}
+    if leak == "eval literal":
+        words = ("".join(w) for w in itertools.product("abcd", repeat=4))
+        text = next(f"x = '{w}'\n" for w in words if synth.eval_literal(w))
+        info["hash"] = ast_hash(ast.parse(text))
+    elif leak == "held-out identifier":
+        text = f"{synth.POOLS['novel'][0]} = 'zzzz'\n"
+        info["hash"] = ast_hash(ast.parse(text))
+    elif leak == "held-out pattern":
+        info["pattern"] = "shadow-closure"
+    else:
+        info["hash"] = halves["test"][0].hash  # a recorded hash cannot stand in for the program's
+    with pytest.raises(synth.SplitLeak, match=message):
+        synth.check(_with_record(out, tmp_path, {"text": text, "items": [info]}))
+
+
+@pytest.mark.parametrize("pattern", ["keyword", "mixed", "default"])
+def test_check_finds_an_eval_ast_called_by_keyword(built, tmp_path, pattern):
+    """A training program equal to an eval item up to renaming, keyword arguments included, is a leak."""
+    out, _, halves = built
+    item = next(
+        i
+        for items in halves.values()
+        for i in items
+        if i.task == "T2" and i.strata["pattern"] == pattern and i.strata["family"] not in synth.HELD_OUT_FAMILIES
+    )
+    text = _as_training_program(item)
+    assert "=" in text.splitlines()[-1].split("(", 1)[1]  # the readout call passes a keyword argument
+    assert ast_hash(ast.parse(text)) == item.hash
+    info = {"task": "T2", "pattern": pattern, "family": item.strata["family"], "hash": item.hash}
+    with pytest.raises(synth.SplitLeak, match="eval items have a training program's AST"):
+        synth.check(_with_record(out, tmp_path, {"text": text, "items": [info]}))
 
 
 def test_items_are_executed_and_complete(built):
@@ -87,7 +136,7 @@ def test_every_cell_is_covered_and_fits_2048_tokens(built):
         keys = synth.cells(task)[0].keys()
         found = {tuple(i.strata[k] for k in keys) for i in halves["test"] if i.task == task}
         assert found == {tuple(c.values()) for c in synth.cells(task)}
-    # v0.7: every cell fits T=2048; synthetic code averages well over two characters per token.
+    # Every cell fits a 2048-token context (formal training); synthetic code has well over two characters a token.
     assert max(len(i.prompt) for items in halves.values() for i in items) < 2 * 2048
 
 

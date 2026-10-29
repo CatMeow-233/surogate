@@ -1,4 +1,4 @@
-"""The checkpoint and export contract (README: "checkpoint 与导出").
+"""The checkpoint and export contract (docs/model.md: checkpoint 与导出).
 
 Native checkpoint directories are imitated from what csrc/src/runtime/training/checkpoint.cpp writes; the pins at
 the end fail when upstream changes that layout or the file list its final export copies.
@@ -123,9 +123,20 @@ def test_export_writes_a_model_dir_from_one_checkpoint(model_dir, tmp_path):
 
     with pytest.raises(FileExistsError):
         checkpoint.export(step, model_dir, out)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["ckpt", "export", "model"]  # no temporary directory left
     partial = _native_checkpoint(tmp_path / "ckpt", 20, model_dir, complete=False)
     with pytest.raises(ValueError, match="not a complete native checkpoint"):
         checkpoint.export(partial, model_dir, tmp_path / "export-20")
+
+
+def test_failed_export_leaves_out_unchanged(model_dir, tmp_path):
+    step = _native_checkpoint(tmp_path / "ckpt", 10, model_dir)
+    (step / "config.json").write_text(json.dumps({"hidden_size": 1}))  # the wrong source for this checkpoint
+    (tmp_path / "export").mkdir()
+    with pytest.raises(ValueError, match="disagrees"):
+        checkpoint.export(step, model_dir, tmp_path / "export")
+    assert list((tmp_path / "export").iterdir()) == []
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["ckpt", "export", "model"]
 
 
 def test_run_provenance_reaches_checkpoints_and_exports(model_dir, tmp_path):
@@ -196,5 +207,10 @@ def test_pin_native_checkpoint_layout():
     assert checkpoint.STEP_DIR.fullmatch("step_00000010")
     for written in ('"/config.json"', '"/model.safetensors"', f'"/{checkpoint.NATIVE_DONE_FILE}"'):
         assert written in source, written
-    # checkpoint.json is written after the barrier that follows every shard, so it marks a complete directory.
-    assert source.index("comm.barrier();  // only write checkpoint.json") < source.index('"/checkpoint.json"')
+    # checkpoint.json is written after a barrier that follows every shard and export write, so it marks a complete
+    # directory.
+    save = source[source.index("save_checkpoint(std::string target") : source.index("void load_checkpoint(")]
+    done = save.index('target + "/checkpoint.json"')
+    barrier = save.rindex("comm.barrier();", 0, done)
+    for write in ("write_safetensors(", "model.export_weights(", "model.save_lora_checkpoint("):
+        assert save.rindex(write, 0, done) < barrier, write

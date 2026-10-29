@@ -1,5 +1,5 @@
-"""Run configurations of the training driver (README: 训练驱动): the examples, stages, the derived accumulation and
-the checks made before a run starts."""
+"""Run configurations of the training driver (docs/training.md: 训练驱动): the example, stages, the derived
+accumulation, the training settings a resume must keep and the checks made before a run starts."""
 
 from pathlib import Path
 
@@ -7,8 +7,9 @@ import pytest
 import yaml
 from surogate_tlc.train import config
 
-EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
-ROWS = {"a0.yaml": "A0", "a1.yaml": "A1", "hybrid.yaml": "A1h"}
+EXAMPLE = Path(__file__).resolve().parents[2] / "examples" / "p0.yaml"
+ROWS = ("A0", "A0-split", "A1", "A1h")
+STAGES = {"smoke": 10, "overfit": 100, "pilot": 300, "throughput": 30, "throughput-eager": 30}
 
 
 @pytest.fixture
@@ -17,34 +18,50 @@ def runs(monkeypatch, tmp_path) -> Path:
     return tmp_path
 
 
-@pytest.mark.parametrize("example", sorted(ROWS))
-@pytest.mark.parametrize("stage", ["smoke", "overfit", "pilot"])
+@pytest.mark.parametrize("stage", list(STAGES))
 @pytest.mark.parametrize("microbatch", [None, 2, 8, 32])
-def test_examples_keep_16384_tokens_per_update(runs, example, stage, microbatch):
-    run = config.load(EXAMPLES / example, stage=stage, microbatch=microbatch)
+def test_example_keeps_16384_tokens_per_update(runs, monkeypatch, stage, microbatch):
+    monkeypatch.setenv("TLC_ROW", "A1h")
+    run = config.load(EXAMPLE, stage=stage, microbatch=microbatch)
     microbatch_, accum = run.batch
     assert microbatch_ * accum * run.sft["sequence_len"] * run.sft["gpus"] == run.tokens_per_update == 16384
     assert run.batch == ((32, 1) if microbatch is None else (microbatch, 16384 // 512 // microbatch))
     suffix = "" if microbatch is None else f"-mb{microbatch}"
-    assert run.run_dir == runs / "train" / ROWS[example] / f"{stage}{suffix}"
-    assert run.model_dir == runs / "models" / ROWS[example] and run.data == runs / "data"
+    assert run.run_dir == runs / "train" / "A1h" / f"{stage}{suffix}"
+    assert run.model_dir == runs / "models" / "A1h" and run.data == runs / "data"
 
 
-@pytest.mark.parametrize("example", sorted(ROWS))
-def test_example_stages_and_tlc_defaults(runs, example):
-    stages = {stage: config.load(EXAMPLES / example, stage=stage) for stage in ("smoke", "overfit", "pilot")}
-    assert {stage: run.sft["max_steps"] for stage, run in stages.items()} == {"smoke": 10, "overfit": 100, "pilot": 300}
-    assert {stage: run.fixed_batch for stage, run in stages.items()} == {
-        "smoke": False,
-        "overfit": True,
-        "pilot": False,
-    }
+def test_every_row_trains_with_the_same_settings(runs, monkeypatch):
+    """A0, A1 and A1h are compared at equal hyperparameters: the example differs between rows in paths only."""
+    loaded = {}
+    for row in ROWS:
+        monkeypatch.setenv("TLC_ROW", row)
+        loaded[row] = {stage: config.load(EXAMPLE, stage=stage) for stage in STAGES}
+    for stage in STAGES:
+        settings = [config.settings(by_stage[stage]) for by_stage in loaded.values()]
+        assert {s.pop("model") for s in settings} == {f"{runs}/models/{row}" for row in ROWS}
+        assert all(s == settings[0] for s in settings), stage
+    assert {by_stage["pilot"].sft["run_name"] for by_stage in loaded.values()} == {f"tlc-{row}" for row in ROWS}
+
+
+def test_example_stages(runs, monkeypatch):
+    monkeypatch.setenv("TLC_ROW", "A0")
+    stages = {stage: config.load(EXAMPLE, stage=stage) for stage in STAGES}
+    assert {stage: run.sft["max_steps"] for stage, run in stages.items()} == STAGES
+    assert {stage for stage, run in stages.items() if run.fixed_batch} == {"overfit"}
     assert stages["smoke"].sft["save_steps"] == 5  # the G2 resume check restarts from step 5
+    assert [s for s, run in stages.items() if not run.sft["use_cuda_graphs"]] == ["throughput-eager"]
     for run in stages.values():
-        assert run.on_oom == "fail"
         assert {key: run.sft[key] for key in config.FIXED} == config.FIXED
         assert run.sft["recompute"] is False and run.sft["sequence_len"] == 512
+        assert run.sft["weight_decay"] == 0.0
         assert not set(run.sft) & set(config.FORBIDDEN)
+
+
+def test_example_needs_the_row(runs, monkeypatch):
+    monkeypatch.delenv("TLC_ROW", raising=False)
+    with pytest.raises(ValueError, match="unset environment variable"):
+        config.load(EXAMPLE, stage="smoke")
 
 
 def test_grad_accum():
@@ -65,6 +82,7 @@ def _write(tmp_path: Path, body: dict) -> Path:
     [
         ({"tlc": None}, "needs a `tlc` table"),
         ({"tlc": {"data": "d", "seed": 1}}, "unknown: ['seed']"),
+        ({"tlc": {"data": "d", "on_oom": "fail"}}, "unknown: ['on_oom']"),
         ({"tlc": {"tokens_per_update": 16384}}, "needs `data`"),
         ({"output_dir": "${TLC_UNSET_FOR_TEST}/x"}, "unset environment variable"),
         ({"gradient_accumulation_steps": 4}, "gradient_accumulation_steps must be 1"),
@@ -107,8 +125,6 @@ def test_problems_of_a_valid_run_and_defaults(run_yaml):
         ({"datasets": [{"path": "x"}]}, {}, "datasets is not used"),
         ({"checkpoint_dir": "/elsewhere"}, {}, "checkpoint_dir is not used"),
         ({"max_steps": -1}, {}, "max_steps must be a positive integer"),
-        ({}, {"on_oom": "retry"}, "tlc.on_oom must be one of"),
-        ({}, {"max_downshifts": -1}, "tlc.max_downshifts"),
     ],
 )
 def test_problems_of_settings(run_yaml, sft, tlc, message):
@@ -128,6 +144,19 @@ def test_problems_of_data_and_model(run_yaml, shard_dirs, tokenizer_dir, tmp_pat
     init.init_model_dir(other)
     assert any("another tokenizer" in p for p in config.problems(config.load(run_yaml(model=str(other)))))
     assert any("is missing" in p for p in config.problems(config.load(run_yaml(tlc={"data": str(tmp_path)}))))
+
+
+def test_settings_leave_out_what_a_resume_may_change(run_yaml):
+    base = config.settings(config.load(run_yaml()))
+    assert "output_dir" not in base and base["schedule_total_steps"] == 10 and base["per_device_train_batch_size"] == 32
+    for change in ({"save_steps": 3}, {"eval_steps": 7}, {"logging_steps": 2}):
+        assert config.settings(config.load(run_yaml(**change))) == base, change
+    for change in ({"learning_rate": 1e-4}, {"warmup_steps": 3}, {"max_steps": 20}):
+        assert config.settings(config.load(run_yaml(**change))) != base, change
+    # With a constant learning rate the schedule does not depend on max_steps.
+    constant = config.settings(config.load(run_yaml(lr_scheduler_type="constant")))
+    assert config.settings(config.load(run_yaml(lr_scheduler_type="constant", max_steps=20))) == constant
+    assert config.settings(config.load(run_yaml(), microbatch=16)) != base
 
 
 def test_fixed_batch_needs_enough_rows(run_yaml, shard_dirs):

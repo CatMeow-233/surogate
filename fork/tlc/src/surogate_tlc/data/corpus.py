@@ -1,14 +1,17 @@
 """The corpus spec: which sources make up the TLC corpus, where they came from, and the train/val split.
 
-A spec is a TOML file (README: "语料"). Its top level holds the split settings, `seed` and `val_fraction`, and
+A spec is a TOML file (docs/data.md: 语料). Its top level holds the split settings, `seed` and `val_fraction`, and
 optionally `decontam`, a decontamination report (surogate_tlc.data.decontam) whose removed documents are dropped;
 each `[[source]]` table names one source with its provenance and its input files, given as globs relative to the
 spec file. A `.jsonl` file holds one document per line in the field "text", plus an optional "group" (for example the
-repository) that keeps related documents in the same split; any other file is one document.
+repository) that keeps related documents in the same split; any other file is one document. A source that a fork
+tool generated (data.synth) says `generated = true`: it trains like any other source, but the natural-code suite
+(data.natural) never draws items from it.
 
 Documents are normalised the same way for the tokenizer and the shards: newlines follow Python's universal
 newlines (\r\n and a lone \r become \n), so that later label alignment by UTF-8 byte offsets sees the text the
-model trains on. Empty documents and documents that are not valid UTF-8 are dropped and counted.
+model trains on. Empty documents and documents that are not valid UTF-8 are dropped and counted. fences() is the one
+reading of markdown code fences in text documents, for the shards' framing and for decontamination alike.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ import hashlib
 import itertools
 import json
 import math
+import re
 import tomllib
 from collections import Counter
 from collections.abc import Iterator, Mapping
@@ -26,10 +30,13 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-DECONTAM_VERSION = 1  # surogate_tlc.data.decontam's report version
+from ..files import file_sha256, text_sha256
+
+DECONTAM_VERSION = 2  # surogate_tlc.data.decontam's report version
 KINDS = ("code", "text")
 SOURCE_KEYS = ("name", "kind", "files", "url", "license", "downloaded", "filters")
-OPTIONAL_SOURCE_KEYS = ("revision", "stage")
+OPTIONAL_SOURCE_KEYS = ("revision", "stage", "generated")
+FENCE = "```"
 SPLITS = ("train", "val")
 # Builder rules recorded with the provenance, next to each source's own filters.
 RULES = (
@@ -46,6 +53,7 @@ class Source:
     kind: str
     files: tuple[Path, ...]
     provenance: dict[str, Any]
+    generated: bool = False  # written by a fork tool (data.synth); no natural-code probe items come from it
 
 
 @dataclass(frozen=True)
@@ -78,9 +86,12 @@ def _source(table: dict[str, Any], base: Path) -> Source:
         raise ValueError(f"source {name!r}: missing keys {missing}, unknown keys {unknown}")
     if table["kind"] not in KINDS:
         raise ValueError(f"source {name!r}: kind must be one of {KINDS}, got {table['kind']!r}")
-    for key in ("name", "url", "license", *(k for k in OPTIONAL_SOURCE_KEYS if k in table)):
+    for key in ("name", "url", "license", *(k for k in ("revision", "stage") if k in table)):
         if not isinstance(table[key], str) or not table[key]:
             raise ValueError(f"source {name!r}: {key} must be a non-empty string")
+    generated = table.get("generated", False)
+    if not isinstance(generated, bool):
+        raise ValueError(f"source {name!r}: generated must be true or false")
     if not isinstance(table["filters"], list) or not all(isinstance(f, str) for f in table["filters"]):
         raise ValueError(f"source {name!r}: filters must be a list of strings (may be empty)")
     downloaded = table["downloaded"]
@@ -93,7 +104,8 @@ def _source(table: dict[str, Any], base: Path) -> Source:
         files.update(p.resolve() for p in matched)
     provenance = {key: table.get(key) for key in ("url", "revision", "license")}
     provenance |= {"downloaded": downloaded, "stage": table.get("stage"), "filters": list(table["filters"])}
-    return Source(name, table["kind"], tuple(sorted(files)), provenance)
+    provenance["generated"] = generated
+    return Source(name, table["kind"], tuple(sorted(files)), provenance, generated)
 
 
 def load_corpus(path: Path, *, decontam: bool = True) -> Corpus:
@@ -127,6 +139,28 @@ def load_corpus(path: Path, *, decontam: bool = True) -> Corpus:
 
 def normalize(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def fences(text: str) -> list[tuple[bool, str]]:
+    """A normalised text document as (in_code, chunk) pieces split at its markdown code fences, fence lines dropped.
+
+    A line that starts with ``` (after leading whitespace) opens a code block; inside a block, a line that is exactly
+    ``` closes it; a block still open at the end of the document ends there. Lines end at "\n" only (str.splitlines
+    would also split at U+2028 and friends). Every piece but the last ends at a fence line, so consecutive pieces
+    alternate between text and code.
+    """
+    out: list[tuple[bool, str]] = []
+    lines: list[str] = []
+    in_code = False
+    for line in re.split(r"(?<=\n)", text):
+        fence = line.strip()
+        if (in_code and fence == FENCE) or (not in_code and fence.startswith(FENCE)):
+            out.append((in_code, "".join(lines)))
+            lines, in_code = [], not in_code
+        else:
+            lines.append(line)
+    out.append((in_code, "".join(lines)))
+    return out
 
 
 def _decode(data: bytes) -> str | None:
@@ -177,7 +211,7 @@ def source_documents(corpus: Corpus, source: Source, dropped: Counter | None = N
                 text = normalize(text)
                 reason = None if text else "empty"
             if not reason and key in corpus.removed:
-                if hashlib.sha256(text.encode()).hexdigest() != corpus.removed[key]:
+                if text_sha256(text) != corpus.removed[key]:
                     raise ValueError(f"{key} changed since the decontamination report {corpus.decontam}; rescan")
                 reason = "decontaminated"
             if reason:
@@ -199,21 +233,13 @@ def sample(corpus: Corpus, limit: int) -> list[Document]:
     return out[:limit]
 
 
-def unit_hash(seed: int, key: str) -> int:
-    """64 uniform bits from (seed, key)."""
+def unit_hash(seed: int | str, key: str) -> int:
+    """64 uniform bits from (seed, key); the seed may also be a salt string."""
     return int.from_bytes(hashlib.sha256(f"{seed}\0{key}".encode()).digest()[:8], "little")
 
 
 def split_of(corpus: Corpus, doc: Document) -> str:
     return "val" if unit_hash(corpus.seed, doc.group) < corpus.val_fraction * 2**64 else "train"
-
-
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as f:
-        for block in iter(lambda: f.read(1 << 20), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def decontam_record(corpus: Corpus) -> dict[str, Any] | None:

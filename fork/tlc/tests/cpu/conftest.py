@@ -26,46 +26,6 @@ for module, expected in ((surogate, REPO / "surogate"), (surogate_tlc, SRC / "su
     if Path(module.__file__).resolve().parent != expected:
         raise RuntimeError(f"{module.__name__} was imported from {module.__file__}, not from {expected}")
 
-SPECIAL_TOKENS = ("<|pad|>", "<|bos|>", "<|eos|>", "<|code_start|>", "<|code_end|>")
-CORPUS = (
-    "def add(a, b):\n    return a + b\n",
-    "for i in range(10):\n    total += i\n",
-    "class Stack:\n    def push(self, item):\n        self.items.append(item)\n",
-    "The little coder reads English and writes Python.\n",
-)
-
-
-@pytest.fixture(scope="session")
-def tokenizer_dir(tmp_path_factory) -> Path:
-    """A small byte-level BPE tokenizer with TLC's special tokens: pad, bos and eos have ids 0, 1 and 2."""
-    from tokenizers import Tokenizer, decoders, models, pre_tokenizers, processors, trainers
-
-    tokenizer = Tokenizer(models.BPE())
-    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
-    tokenizer.decoder = decoders.ByteLevel()
-    trainer = trainers.BpeTrainer(
-        vocab_size=320,
-        special_tokens=list(SPECIAL_TOKENS),
-        initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
-        show_progress=False,
-    )
-    tokenizer.train_from_iterator(CORPUS, trainer)
-    tokenizer.post_processor = processors.ByteLevel(trim_offsets=False)
-    out = tmp_path_factory.mktemp("tokenizer")
-    tokenizer.save(str(out / "tokenizer.json"))
-    tokenizer_config = {
-        "tokenizer_class": "PreTrainedTokenizerFast",
-        "pad_token": "<|pad|>",
-        "bos_token": "<|bos|>",
-        "eos_token": "<|eos|>",
-        "additional_special_tokens": ["<|code_start|>", "<|code_end|>"],
-        "model_max_length": 512,
-        "chat_template": "{% for m in messages %}{{ bos_token }}{{ m['content'] }}{{ eos_token }}{% endfor %}",
-    }
-    (out / "tokenizer_config.json").write_text(json.dumps(tokenizer_config, indent=2), encoding="utf-8")
-    return out
-
-
 CORPUS_SPEC = """\
 seed = 7
 val_fraction = 0.25
@@ -136,6 +96,15 @@ def trained_tokenizer(tmp_path_factory, corpus_spec) -> Path:
     from surogate_tlc.data import corpus, tokenizer
 
     return tokenizer.train_tokenizer(corpus.load_corpus(corpus_spec), tmp_path_factory.mktemp("tok"), vocab_size=300)
+
+
+@pytest.fixture(scope="session")
+def tokenizer_dir(tmp_path_factory, corpus_spec) -> Path:
+    """Another tokenizer of the same recipe (GPT-2 pre-tokenizer): the same special ids, another tokenizer.json."""
+    from surogate_tlc.data import corpus, tokenizer
+
+    c = corpus.load_corpus(corpus_spec)
+    return tokenizer.train_tokenizer(c, tmp_path_factory.mktemp("tok-gpt2"), pretokenizer="gpt2", vocab_size=300)
 
 
 @pytest.fixture

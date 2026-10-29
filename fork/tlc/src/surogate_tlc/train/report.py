@@ -5,14 +5,15 @@ log (a JSON array, csrc/src/runtime/training/logging.cpp) and the regression art
 SUROGATE_REGRESSION_ARTIFACT names a path (loss curve, step time percentiles, peak device memory, block-schema
 summary). The CPU pin tests fix the fields read here.
 
-`python -m surogate_tlc.train.report DIR` prints one JSON line per run record under DIR (README: G3).
+`python -m surogate_tlc.train.report DIR [--peak-tflops X]` prints one JSON line per run record under DIR (gates
+G0.5 and G3): the model FLOPs utilisation needs the GPU's dense bf16 peak, which the runbook takes from the GPU's
+data sheet.
 """
 
 from __future__ import annotations
 
 import argparse
 import importlib.metadata
-import importlib.util
 import json
 import platform
 import subprocess
@@ -21,9 +22,18 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from ..data.corpus import file_sha256
+from ..files import read_json
+from ..ir import flops_per_token
+from ..native import extension_fingerprint
 
-REPO = Path(__file__).resolve().parents[5]
+
+def _checkout() -> Path:
+    """The git checkout this package runs from (editable install or the source tree)."""
+    here = Path(__file__).resolve()
+    return next((p for p in here.parents if (p / ".git").exists()), here.parent)
+
+
+REPO = _checkout()
 RUN_FILE = "tlc_run.json"  # the run record, in the run directory
 SUMMARY_KEYS = ("steps", "first_loss", "last_loss", "eval_loss", "tokens_per_second", "cuda_peak_memory_bytes")
 PACKAGES = ("torch", "transformers", "tokenizers", "safetensors", "numpy", "surogate-tlc")
@@ -42,17 +52,6 @@ def _version(name: str) -> str | None:
         return importlib.metadata.version(name)
     except importlib.metadata.PackageNotFoundError:
         return None
-
-
-def _native() -> dict[str, Any] | None:
-    """The training extension this process would load, by path and content; it is not imported."""
-    try:
-        spec = importlib.util.find_spec("surogate._surogate")
-    except ImportError:
-        spec = None
-    if spec is None or not spec.origin:
-        return None
-    return {"path": spec.origin, "sha256": file_sha256(Path(spec.origin))}
 
 
 def _gpu() -> dict[str, Any] | None:
@@ -75,7 +74,8 @@ def _gpu() -> dict[str, Any] | None:
 
 
 def environment() -> dict[str, Any]:
-    """Environment fingerprint (v0.6 §12.8): commit, interpreter, package versions, native build, GPU and driver."""
+    """Environment fingerprint: commit, interpreter, package versions, native build, GPU and driver, so that a result
+    can be traced to the code and machine that produced it."""
     status = _run("git", "-C", str(REPO), "status", "--porcelain")
     return {
         "git_commit": _run("git", "-C", str(REPO), "rev-parse", "HEAD"),
@@ -83,7 +83,7 @@ def environment() -> dict[str, Any]:
         "python": sys.version.split()[0],
         "platform": platform.platform(),
         "packages": {name: _version(name) for name in PACKAGES},
-        "native": _native(),
+        "native": extension_fingerprint(),
         "gpu": _gpu(),
     }
 
@@ -110,33 +110,42 @@ def summarize(regression: Path, log: Path | None, tokens_per_update: int) -> dic
     return out
 
 
-def runs(root: Path) -> list[dict[str, Any]]:
-    """The latest attempt of every run record under `root`, flattened for a results table."""
+def runs(root: Path, *, peak_tflops: float | None = None) -> list[dict[str, Any]]:
+    """The latest attempt of every run record under `root`, flattened for a results table. With the GPU's dense bf16
+    peak, the model FLOPs utilisation: tokens/s x training FLOPs per token (3 x forward, ir.flops_per_token) / peak."""
     out = []
     for path in sorted(Path(root).rglob(RUN_FILE)):
-        record = json.loads(path.read_text(encoding="utf-8"))
+        record = read_json(path)
         attempt = record["attempts"][-1] if record["attempts"] else {}
         summary = attempt.get("summary") or {}
-        out.append(
-            {
-                "run_dir": str(path.parent),
-                "stage": record["stage"],
-                "status": record["status"],
-                "microbatch": attempt.get("microbatch"),
-                "grad_accum": attempt.get("grad_accum"),
-                "tokens_per_update": record["tokens_per_update"],
-                "valid_targets_per_update": (record.get("data") or {}).get("valid_targets_per_update"),
-                "downshifts": len(record["downshifts"]),
-                **{key: summary.get(key) for key in SUMMARY_KEYS},
-            }
-        )
+        sft = record.get("sft") or {}
+        row = {
+            "run_dir": str(path.parent),
+            "stage": record["stage"],
+            "status": record["status"],
+            "microbatch": attempt.get("microbatch"),
+            "grad_accum": attempt.get("grad_accum"),
+            "use_cuda_graphs": sft.get("use_cuda_graphs"),
+            "tokens_per_update": record["tokens_per_update"],
+            "valid_targets_per_update": (record.get("data") or {}).get("valid_targets_per_update"),
+            **{key: summary.get(key) for key in SUMMARY_KEYS},
+        }
+        config = Path(record["model_dir"]) / "config.json"
+        if config.is_file() and sft.get("sequence_len"):
+            row["forward_flops_per_token"] = flops_per_token(read_json(config), sft["sequence_len"])
+            if peak_tflops and row["tokens_per_second"]:
+                training = 3 * row["forward_flops_per_token"] * row["tokens_per_second"]
+                row["mfu"] = round(training / (peak_tflops * 1e12), 4)
+        out.append(row)
     return out
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m surogate_tlc.train.report", description=runs.__doc__)
     parser.add_argument("root", type=Path, help=f"directory searched for {RUN_FILE}")
-    for row in runs(parser.parse_args(argv).root):
+    parser.add_argument("--peak-tflops", type=float, help="the GPU's dense bf16 peak (data sheet), for the MFU")
+    args = parser.parse_args(argv)
+    for row in runs(args.root, peak_tflops=args.peak_tflops):
         print(json.dumps(row))
     return 0
 

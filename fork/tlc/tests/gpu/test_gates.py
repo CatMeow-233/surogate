@@ -1,7 +1,7 @@
-"""Gates G0 (kernels in place), G1 and G2 on the native trainer, with the model directories and shards the runbook
-prepares under $TLC_RUNS (fork/tlc/README.md, 运行手册). Select a gate with -k g0, -k g1a, ..., -k g2.
+"""Gates G0 (kernels in place), G1, G2 and the G3 sampler on the native trainer, with the model directories and
+shards the runbook prepares under $TLC_RUNS (fork/tlc/docs/runbook.md). Select a gate with -k g0, -k g1n1, ...
 
-Thresholds marked [P] in the README are provisional: when one fails, record the measured value and stop at that
+Thresholds marked [P] in the runbook are provisional: when one fails, record the measured value and stop at that
 gate; do not loosen it to pass.
 """
 
@@ -17,12 +17,15 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from safetensors.torch import load_file
+from surogate_tlc.data.shards import IGNORE
+from surogate_tlc.native import SAMPLING_LORA, native_trainer
 from surogate_tlc.train import config, driver
 
 TLC = Path(__file__).resolve().parents[2]
 ROWS = ("A0", "A1", "A1h")
-PREFIXES = (1, 2, 7, 64, 511)
-IGNORE = -100
+CHUNK = 128  # chunk_size of the P0 Mamba geometry
+PREFIXES = (1, 2, 7, CHUNK - 1, CHUNK, CHUNK + 1, 511)
 
 
 def _cfg(runs: Path, row: str) -> dict:
@@ -30,10 +33,10 @@ def _cfg(runs: Path, row: str) -> dict:
 
 
 @contextmanager
-def native(runs: Path, row: str, tmp_path: Path, *, batch: int = 2, seq_len: int = 512):
-    wrapper = driver.native_trainer(
-        runs / "models" / row, runs / "data", tmp_path / f"native-{row}", batch=batch, seq_len=seq_len
-    )
+def native(model: Path, runs: Path, tmp_path: Path, *, batch: int = 2, seq_len: int = 512, settings=None):
+    out = tmp_path / f"native-{model.name}"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    wrapper = native_trainer(model, runs / "data", out, batch=batch, seq_len=seq_len, settings=settings)
     try:
         yield wrapper.trainer
     finally:
@@ -47,17 +50,20 @@ def logprobs(trainer, ids: np.ndarray, targets: np.ndarray, positions: np.ndarra
     return np.asarray(trainer.compute_logprobs(ids, targets, use_lora=False, position_ids=positions)).copy()
 
 
+def _positions(ids: np.ndarray) -> np.ndarray:
+    return np.ascontiguousarray(np.broadcast_to(np.arange(ids.shape[1], dtype=np.int32), ids.shape))
+
+
 def gradients(trainer, ids: np.ndarray, targets: np.ndarray) -> dict[str, np.ndarray]:
     """Parameter gradients of one forward and backward on a fresh trainer (gradients accumulate across steps)."""
     import torch
 
-    positions = np.ascontiguousarray(np.broadcast_to(np.arange(ids.shape[1], dtype=np.int32), ids.shape))
-    trainer.step(np.ascontiguousarray(ids), np.ascontiguousarray(targets), positions)
+    trainer.step(np.ascontiguousarray(ids), np.ascontiguousarray(targets), _positions(ids))
     return {name: torch.from_dlpack(view).float().cpu().numpy() for name, view in trainer.get_gradients(0).items()}
 
 
-def random_batch(vocab: int, batch: int, seq_len: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
-    ids = np.random.default_rng(seed).integers(0, vocab, size=(batch, seq_len), dtype=np.int32)
+def random_batch(vocab: int, batch: int, seq_len: int, seed: int, low: int = 0) -> tuple[np.ndarray, np.ndarray]:
+    ids = np.random.default_rng(seed).integers(low, vocab, size=(batch, seq_len), dtype=np.int32)
     return ids, np.concatenate([ids[:, 1:], np.full((batch, 1), IGNORE, np.int32)], 1)
 
 
@@ -74,7 +80,7 @@ def test_g0_one_step_is_finite(runs, row, tmp_path):
 
     cfg = _cfg(runs, row)
     expected = set(param_shapes(compile_ir(cfg))) - ({"lm_head"} if cfg["tie_word_embeddings"] else set())
-    with native(runs, row, tmp_path) as trainer:
+    with native(runs / "models" / row, runs, tmp_path) as trainer:
         grads = gradients(trainer, *random_batch(cfg["vocab_size"], 2, 512, seed=0))
     assert expected <= set(grads), sorted(expected - set(grads))
     assert not [name for name, g in grads.items() if not np.isfinite(g).all()]
@@ -82,11 +88,12 @@ def test_g0_one_step_is_finite(runs, row, tmp_path):
 
 
 @pytest.mark.parametrize("row", ROWS)
-def test_g1a_future_tokens_do_not_change_the_past(runs, row, tmp_path):
-    """Changing every token from position p on leaves the log-probabilities before p bit for bit."""
+def test_g1n1_future_tokens_do_not_change_the_past(runs, row, tmp_path):
+    """Changing every token from position p on leaves the log-probabilities before p bit for bit; p around the
+    scan's chunk boundary."""
     vocab = _cfg(runs, row)["vocab_size"]
     ids, targets = random_batch(vocab, 1, 512, seed=1)
-    with native(runs, row, tmp_path) as trainer:
+    with native(runs / "models" / row, runs, tmp_path) as trainer:
         for prefix in PREFIXES:
             changed = ids.copy()
             changed[0, prefix:] = (changed[0, prefix:] + 1) % vocab
@@ -96,12 +103,32 @@ def test_g1a_future_tokens_do_not_change_the_past(runs, row, tmp_path):
                 assert not np.array_equal(out[0, prefix:511], out[1, prefix:511]), prefix
 
 
+@pytest.mark.parametrize("row", ROWS)
+def test_g1n3_gradients_ignore_tokens_after_the_last_target(runs, row, tmp_path):
+    """With targets only up to position t, the parameter gradients do not move when tokens after t change. The
+    native backward accumulates with atomics, so the comparison allows twice the spread of a repeated run."""
+    vocab, t = _cfg(runs, row)["vocab_size"], CHUNK + 1
+    ids, targets = random_batch(vocab, 2, 512, seed=9)
+    targets[:, t:] = IGNORE  # the last target is token t, at position t - 1
+    changed = ids.copy()
+    changed[:, t + 1 :] = (changed[:, t + 1 :] + 1) % vocab
+    runs_ = []
+    for batch in (ids, ids, changed):
+        with native(runs / "models" / row, runs, tmp_path / str(len(runs_))) as trainer:
+            runs_.append(gradients(trainer, batch, targets))
+    first, repeat, other = runs_
+    spread = max(float(np.abs(first[k] - repeat[k]).max()) for k in first)
+    moved = max(float(np.abs(first[k] - other[k]).max()) for k in first)
+    print(json.dumps({"row": row, "g1n3_repeat_spread": spread, "g1n3_change": moved}))
+    assert moved <= 2 * spread
+
+
 def test_g1b_matches_the_reference_goldens(runs, tmp_path):
     golden = np.load(runs / "goldens" / "A0.npz")
     weights = (runs / "models" / "A0" / "model.safetensors").read_bytes()
     assert json.loads(str(golden["meta"]))["model_safetensors_sha256"] == hashlib.sha256(weights).hexdigest()
     ids, targets = golden["input_ids"], golden["targets"]
-    with native(runs, "A0", tmp_path, batch=ids.shape[0], seq_len=ids.shape[1]) as trainer:
+    with native(runs / "models" / "A0", runs, tmp_path, batch=ids.shape[0], seq_len=ids.shape[1]) as trainer:
         out = logprobs(trainer, ids, targets)
     error, tolerance = float(np.abs(out - golden["logprobs"]).max()), float(golden["tolerance"])
     print(json.dumps({"g1b_max_abs_error": error, "tolerance": tolerance}))
@@ -130,7 +157,7 @@ def test_g1c_packing(runs, row, isolated, tmp_path):
         return ids, targets, positions
 
     packed, alone = row_of(docs), [row_of([doc]) for doc in docs]
-    with native(runs, row, tmp_path) as trainer:
+    with native(runs / "models" / row, runs, tmp_path) as trainer:
         both = logprobs(trainer, *(np.stack([a, a]) for a in packed))[0]
         single = logprobs(trainer, *(np.stack(parts) for parts in zip(*alone, strict=True)))
     errors = [float(np.abs(both[:199] - single[0, :199]).max()), float(np.abs(both[200:499] - single[1, :299]).max())]
@@ -154,7 +181,7 @@ def test_g1d_split_first_layer_is_equivalent(runs, tmp_path):
     ids, targets = golden["input_ids"], golden["targets"]
     results = {}
     for row in ("A0", "A0-split"):
-        with native(runs, row, tmp_path, batch=ids.shape[0], seq_len=ids.shape[1]) as trainer:
+        with native(runs / "models" / row, runs, tmp_path, batch=ids.shape[0], seq_len=ids.shape[1]) as trainer:
             results[row] = (logprobs(trainer, ids, targets), gradients(trainer, ids, targets))
     (lp, grads), (split_lp, split_grads) = results["A0"], results["A0-split"]
     assert float(np.abs(lp - split_lp).max()) <= float(golden["tolerance"])
@@ -166,14 +193,21 @@ def test_g1d_split_first_layer_is_equivalent(runs, tmp_path):
 
 
 @pytest.mark.parametrize("row", ROWS)
-def test_g2_initial_loss_is_near_ln_vocab(runs, row, tmp_path):
-    """Random tokens on the initial weights: CE within 0.25 of ln V (README 初始化: 9.78 predicted for A0)."""
-    vocab = _cfg(runs, row)["vocab_size"]
-    ids, targets = random_batch(vocab, 2, 512, seed=2)
-    with native(runs, row, tmp_path) as trainer:
+def test_g2_initial_loss(runs, row, tmp_path):
+    """Random tokens on the initial weights: CE within 0.1 of ln V + var(logits)/2, logit std below 1. The final
+    norm leaves each token's hidden state with mean square 1 at initialisation, so var(logits) is hidden x the
+    mean square of the LM head (the tied embedding); it is estimated from the weights, since the native trainer
+    returns target log-probabilities only."""
+    cfg = _cfg(runs, row)
+    weights = load_file(runs / "models" / row / "model.safetensors")
+    head = weights["model.embed_tokens.weight" if cfg["tie_word_embeddings"] else "lm_head.weight"].double()
+    variance = cfg["hidden_size"] * float(head.square().mean())
+    expected = math.log(cfg["vocab_size"]) + variance / 2
+    ids, targets = random_batch(cfg["vocab_size"], 2, 512, seed=2)
+    with native(runs / "models" / row, runs, tmp_path) as trainer:
         loss = -float(logprobs(trainer, ids, targets)[targets != IGNORE].mean())
-    print(json.dumps({"row": row, "g2_initial_loss": loss, "ln_vocab": math.log(vocab)}))
-    assert abs(loss - math.log(vocab)) < 0.25
+    print(json.dumps({"row": row, "g2_initial_loss": loss, "expected": expected, "logit_std": math.sqrt(variance)}))
+    assert abs(loss - expected) <= 0.1 and math.sqrt(variance) < 1
 
 
 def test_g2_gradients_point_where_the_reference_does(runs, tmp_path):
@@ -185,7 +219,7 @@ def test_g2_gradients_point_where_the_reference_does(runs, tmp_path):
 
     cfg = _cfg(runs, "A0")
     ids, targets = random_batch(cfg["vocab_size"], 2, 128, seed=3)
-    with native(runs, "A0", tmp_path, batch=2, seq_len=128) as trainer:
+    with native(runs / "models" / "A0", runs, tmp_path, batch=2, seq_len=128) as trainer:
         native_grads = gradients(trainer, ids, targets)
     reference = ref_mamba2.Reference(runs / "models" / "A0")
     for weight in reference.w.values():
@@ -201,10 +235,53 @@ def test_g2_gradients_point_where_the_reference_does(runs, tmp_path):
     assert min(found.values()) >= 0.99  # [P]
 
 
-def test_g2_resume_reproduces_the_next_steps(runs, tmp_path, monkeypatch):
-    """A0 smoke stage: a run resumed from its step-5 checkpoint repeats steps 6..10 of the uninterrupted run."""
+def _conditional_entropy(ids: np.ndarray) -> float:
+    pairs, current = {}, {}
+    for a, b in zip(ids[:, :-1].ravel().tolist(), ids[:, 1:].ravel().tolist(), strict=True):
+        pairs[a, b] = pairs.get((a, b), 0) + 1
+        current[a] = current.get(a, 0) + 1
+    total = sum(pairs.values())
+    return -sum(n / total * math.log(n / current[a]) for (a, _), n in pairs.items())
+
+
+@pytest.mark.parametrize("row", ("A0", "A1"))
+def test_g2_overfits_a_small_alphabet_batch(runs, row, tmp_path):
+    """One fixed batch over 64 token ids, whose H(next | current) is at least 1.5 nats: no model that sees only
+    the current token gets below that, so fitting it shows the sequence mixer works. The control with the mixers
+    ablated runs on the reference (prototypes/g2_suite.py, gate G2.3); the native graph cannot be ablated."""
+    from surogate import _surogate
+
+    ids, targets = random_batch(5 + 64, 2, 512, seed=5, low=5)  # ids 5..68: no special token
+    bound = _conditional_entropy(ids)
+    assert bound >= 1.5
+    losses = []
+    with native(runs / "models" / row, runs, tmp_path) as trainer:
+        for step in range(200):
+            trainer.step(ids, targets, _positions(ids))
+            optimizer = _surogate.OptimizerConfig(
+                optimizer="adamw",
+                learning_rate=1e-3,
+                weight_decay=0.0,
+                grad_clip=1.0,
+                adamw_beta1=0.9,
+                adamw_beta2=0.95,
+                adamw_epsilon=1e-8,
+            )
+            losses.append(float(trainer.update_with_config(optimizer, step + 1)["loss"]))
+    print(json.dumps({"row": row, "g2_overfit_bound": bound, "g2_overfit_loss": losses[::20] + losses[-1:]}))
+    assert losses[-1] < 0.05  # [P]
+
+
+def test_g2_resume_reproduces_the_next_steps_and_the_logits(runs, tmp_path, monkeypatch):
+    """A0 smoke stage, run twice: once straight through, once from the step-5 checkpoint of the first. Steps 6..10
+    lose the same (native backward atomics: 1e-3), the final weights give the same logits within the G1(b)
+    tolerance, and a finalized checkpoint exported against a model directory of another seed keeps its own
+    weights bit for bit, with the tied embedding stored once."""
+    from surogate_tlc import checkpoint, hf, init, modeldir
+
     monkeypatch.setenv("TLC_RUNS", str(runs))
-    run = config.load(TLC / "examples" / "a0.yaml", stage="smoke")
+    monkeypatch.setenv("TLC_ROW", "A0")
+    run = config.load(TLC / "examples" / "p0.yaml", stage="smoke")
 
     def at(out: Path) -> config.Run:
         return dataclasses.replace(run, sft={**run.sft, "output_dir": str(out)})
@@ -218,4 +295,48 @@ def test_g2_resume_reproduces_the_next_steps(runs, tmp_path, monkeypatch):
     after = {step: loss for step, loss in resumed["attempts"][-1]["summary"]["loss"]}
     print(json.dumps({"g2_resume": {step: [before[step], after[step]] for step in after}}))
     assert sorted(after) == [6, 7, 8, 9, 10]
-    assert max(abs(before[step] - after[step]) for step in after) <= 1e-3  # v0.7 G2.6 tolerance
+    assert max(abs(before[step] - after[step]) for step in after) <= 1e-3
+
+    golden = np.load(runs / "goldens" / "A0.npz")
+    ids, targets = golden["input_ids"], golden["targets"]
+    scored = {}
+    for name in ("full", "resumed"):
+        with native(tmp_path / name, runs, tmp_path / f"score-{name}", batch=ids.shape[0]) as trainer:
+            scored[name] = logprobs(trainer, ids, targets)
+    assert float(np.abs(scored["full"] - scored["resumed"]).max()) <= float(golden["tolerance"])  # [P]
+
+    other_seed = modeldir.write_model_dir(
+        tmp_path / "seed2", hf.row_config("A0"), runs / "tokenizer", init_seed=init_seed_of(runs) + 1
+    )
+    init.init_model_dir(other_seed)
+    exported = checkpoint.export(tmp_path / "full" / "step_00000005", other_seed, tmp_path / "export")
+    names = set(load_file(exported / "model.safetensors"))
+    assert "lm_head.weight" not in names and "model.embed_tokens.weight" in names
+    assert modeldir.check_model_dir(exported)["tie_word_embeddings"] is True
+    for name, path in (("step", tmp_path / "full" / "step_00000005"), ("export", exported)):
+        with native(path, runs, tmp_path / f"reload-{name}", batch=ids.shape[0]) as trainer:
+            scored[name] = logprobs(trainer, ids, targets)
+    assert np.array_equal(scored["step"], scored["export"])
+
+
+def init_seed_of(runs: Path) -> int:
+    return json.loads((runs / "models" / "A0" / "tlc_meta.json").read_text())["init_seed"]
+
+
+@pytest.mark.parametrize("row", ROWS)
+def test_g3_sampler_computes_the_base_model(runs, row, tmp_path):
+    """The sampler's trainer (rank-1 LoRA with B = 0, for next_token_logits) gives the next-token distribution of
+    the base model: its log-softmax at each target matches compute_logprobs without LoRA."""
+    vocab = _cfg(runs, row)["vocab_size"]
+    ids, targets = random_batch(vocab, 8, 512, seed=6)
+    last = np.array([5, 127, 128, 129, 300, 400, 500, 510], np.int32)
+    with native(runs / "models" / row, runs, tmp_path / "base", batch=8) as trainer:
+        base = logprobs(trainer, ids, targets)
+    with native(runs / "models" / row, runs, tmp_path / "lora", batch=8, settings=SAMPLING_LORA) as trainer:
+        logits = np.asarray(trainer.next_token_logits(np.ascontiguousarray(ids), last), np.float64)
+    shifted = logits - logits.max(-1, keepdims=True)
+    log_softmax = shifted - np.log(np.exp(shifted).sum(-1, keepdims=True))
+    sampled = log_softmax[np.arange(8), targets[np.arange(8), last]]
+    error = float(np.abs(sampled - base[np.arange(8), last]).max())
+    print(json.dumps({"row": row, "g3_sampler_max_abs_error": error}))
+    assert error <= 2e-2  # [P]

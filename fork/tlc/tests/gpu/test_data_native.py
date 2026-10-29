@@ -1,6 +1,6 @@
-"""G0 data checks against the native extension: the tokenizer harness with the native tokenizer, and what the native
-DataLoader serves from TLC shards. Neither needs the GPU itself, only the native build; at G0 scale the tokenizer
-check is the `check` command (README: G0).
+"""G0 data checks against the native extension: the tokenizer harness with the native tokenizer, what the native
+DataLoader serves from TLC shards, and that a loader restored to a saved position continues bit for bit. None needs
+the GPU itself, only the native build; at G0 scale the tokenizer check is the `check` command (docs/runbook.md: G0).
 """
 
 import json
@@ -79,3 +79,32 @@ def test_native_data_loader_serves_the_rows(tmp_path, spec):
             served[tuple(inputs[0]), tuple(targets[0]), tuple(positions[0])] += 1
         assert served == expected
         assert sum(n * sum(t != -100 for t in row[1]) for row, n in served.items()) == entry["valid_targets"]
+
+
+def test_native_data_loader_resumes_from_its_position(tmp_path, spec):
+    """What a checkpoint saves of the loader (seed, epoch, file and chunk index) restores the same next batches."""
+    from surogate._surogate import DataLoader
+
+    c = corpus.load_corpus(spec)
+    trained = tok.train_tokenizer(c, tmp_path / "tok", vocab_size=300)
+    seq_len = 32
+    shards.build_shards(c, trained, tmp_path / "shards", seq_len=seq_len, train_files=2)
+    files = [str(p) for p in shards.shard_files(tmp_path / "shards", "train")]
+
+    def batches(loader, n):
+        out = []
+        for _ in range(n):
+            if not loader.has_next():
+                loader.advance_epoch()
+            arrays = [np.zeros((1, seq_len), dtype=np.int32) for _ in range(3)]
+            loader.load_batch(*arrays)
+            out.append(np.concatenate(arrays))
+        return out
+
+    loader = DataLoader(files, seq_len, seed=7)
+    batches(loader, 5)
+    state = (loader.seed, loader.epoch(), loader.file_index(), loader.chunk_index())
+    expected = batches(loader, 12)  # crosses into the next file or epoch
+    restored = DataLoader(files, seq_len, seed=7)
+    restored.set_state(*state)
+    assert all(np.array_equal(a, b) for a, b in zip(batches(restored, 12), expected, strict=True))

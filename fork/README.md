@@ -23,7 +23,13 @@
 
 ## 首次准备环境
 
-`fork/dev test experimental` 和 `fork/dev exp-train` 自己创建并使用隔离的 `fork/.venv-experimental`，只需要 uv。其余 Python 命令（`fork/dev test cpu`、`fork/dev test patches`、`fork/dev test tlc`、同步的检查步骤）默认使用仓库根目录的 `.venv`，可以用 `FORK_PY` 指向别的解释器。
+各环境的用途：
+
+| 环境 | 用途 |
+|---|---|
+| `fork/.venv-experimental` | 实验训练器 `fork/experimental`（不含原生扩展），由 `fork/dev test experimental` 和 `fork/dev exp-train` 自己创建，只需要 uv；TLC 的纯 PyTorch 原型 `fork/tlc/prototypes`（不打包）也可以在这里运行 |
+| `fork/.venv-tlc` | GPU 主机上的 TLC 包 `fork/tlc`：以 editable 方式装入，需要原生训练器，见 [tlc/docs/runbook.md 的 G0](tlc/docs/runbook.md#g0-环境) |
+| 仓库根目录的 `.venv`（或 `FORK_PY`） | 其余 Python 命令：`fork/dev test cpu`、`fork/dev test patches`、`fork/dev test tlc`、同步的检查步骤。TLC 的 CPU 测试只从检出目录导入 `fork/tlc/src`，不在这里安装 TLC 包，也不需要原生扩展 |
 
 - GPU 主机：按上游 [README.md](../README.md) 中 “For development” 的步骤创建 `.venv`（`uv venv --python 3.12`，然后 `uv pip install -e .`，会完整构建原生扩展）。之后修改训练侧 C++ 时用 `fork/dev build train`，它只重建 `_surogate` 并把 `.so` 复制进 `.venv`。
 - 只用 CPU：与 fork CI 相同，不构建原生扩展。无法访问 download.pytorch.org 时改装 PyPI 的 `torch==2.11.0`，并在运行 `fork/dev test experimental` 时设置 `FORK_TORCH_INDEX=pypi`。
@@ -33,8 +39,6 @@ python3.12 -m venv .venv
 .venv/bin/pip install 'torch==2.11.0+cpu' --index-url https://download.pytorch.org/whl/cpu
 .venv/bin/pip install -r fork/tools/requirements-cpu-lane.txt
 ```
-
-TLC 包 `fork/tlc` 在 GPU 主机上另用带原生构建的 `fork/.venv-tlc`，见 [tlc/README.md 的“环境”](tlc/README.md#环境)。
 
 ## 代码在哪里
 
@@ -46,7 +50,7 @@ TLC 包 `fork/tlc` 在 GPU 主机上另用带原生构建的 `fork/.venv-tlc`，
 | 命令行 | | `surogate/cli` | 命令 `surogate` = `surogate.cli.main:cli_main`（根目录 `pyproject.toml` 的 `[project]` 表中的 `scripts`），子命令表 `COMMAND_MAPPING` 在 `surogate/cli/main.py` |
 | fork：GRPO 补丁调用的代码 | | `surogate/_fork`（随原生 wheel 发布） | 由 `surogate/grpo/trainer.py` 在函数内导入（ledger T6、T7） |
 | fork：原生代码 | `fork/native`：CMake 挂接、头文件、C++ 测试 | | `csrc/CMakeLists.txt` 中紧跟 `surogate-common` 的 `target_link_libraries` 之后的两行挂接点，见 [native/README.md](native/README.md) |
-| TLC 实验 | 无 | 独立 fork 包 `fork/tlc`：代码 `fork/tlc/src/surogate_tlc`，测试 `fork/tlc/tests/cpu` 与 `fork/tlc/tests/gpu`，纯 PyTorch 原型 `fork/tlc/prototypes`（不打包），打包 `fork/tlc/pyproject.toml`（不发布，也不进原生 wheel） | editable 安装进 `fork/.venv-tlc` 后运行 `python -m surogate_tlc <子命令>`（训练、评测、模型目录与数据），示例配置在 `fork/tlc/examples`；CPU 测试 `fork/dev test tlc`；说明与 GPU 运行手册见 [tlc/README.md](tlc/README.md) |
+| TLC 实验 | 无 | 独立 fork 包 `fork/tlc`：代码 `fork/tlc/src/surogate_tlc`，测试 `fork/tlc/tests/cpu` 与 `fork/tlc/tests/gpu`，纯 PyTorch 原型 `fork/tlc/prototypes`（不打包），打包 `fork/tlc/pyproject.toml`（不发布，也不进原生 wheel） | editable 安装进 `fork/.venv-tlc` 后运行 `python -m surogate_tlc <命令>`（模型目录、训练与评测）和 `python -m surogate_tlc.data.<工具>`（数据），运行配置为 `fork/tlc/examples/p0.yaml`；CPU 测试 `fork/dev test tlc`；说明见 [tlc/README.md](tlc/README.md)，GPU 运行手册见 [tlc/docs/runbook.md](tlc/docs/runbook.md) |
 | 实验训练 | 无 | 独立项目 `fork/experimental`：代码 `fork/experimental/src/surogate/experimental`，测试 `fork/experimental/tests`，文档 `fork/experimental/docs`，示例 `fork/experimental/examples`，打包 `fork/experimental/pyproject.toml` 与 `fork/experimental/build_release.py` | `python -m surogate.experimental.train` 或脚本 `surogate-experimental-train`（`fork/experimental/pyproject.toml` 的 `[project.scripts]`）；从检出目录运行用 `fork/dev exp-train`；发布工作流 `.github/workflows/experimental-release.yml` |
 
 更细的位置由 `fork/tools/gen_maps.py` 从当前代码生成：
@@ -99,7 +103,7 @@ GRPO 补丁（T6–T8）调用的 fork 代码位于 `surogate/_fork`，上游文
 - [docs/performance.md](docs/performance.md)：fork 的性能改动、测量方法和开关，包括 LoRA 融合输入梯度和 GRPO 周期计时指标。
 - [native/README.md](native/README.md)：fork 原生代码（C++ 与 CMake）的目录、`csrc/CMakeLists.txt` 中两行挂接点的约定，以及 OpenMP 接线测试的运行方法。
 - [docs/upstream-errata.md](docs/upstream-errata.md)：上游已知的失效引用、过时配置和测试缺陷；fork 不修改这些上游文件，只记录绕行方法。
-- [tlc/README.md](tlc/README.md)：TLC 包的目录、命令行、模型目录与 checkpoint 契约、初始化与 Mamba-2 数值参照、语料 spec、去污染、合成绑定任务、tokenizer 与数据 shard、训练驱动（运行配置、OOM 策略、运行记录）、评测（loss 与绑定探针）、GPU 预算和 RTX 5090 运行手册。
+- [tlc/README.md](tlc/README.md)：TLC 包的目录、环境、命令行与 P0 的行；[tlc/docs/](tlc/docs/) 中是模型目录与 checkpoint 契约、初始化与 Mamba-2 数值参照（model.md），语料、去污染、合成绑定任务、tokenizer 与数据 shard（data.md），训练驱动与评测（training.md），RTX 5090 运行手册与 GPU 预算（runbook.md），以及实测记录（measurements.md）。
 - [experimental/README.md](experimental/README.md) 与 [experimental/docs/training.md](experimental/docs/training.md)：实验训练器的安装、配置和发布产物。
 
 ## 规则
@@ -107,5 +111,5 @@ GRPO 补丁（T6–T8）调用的 fork 代码位于 `surogate/_fork`，上游文
 1. fork 自有文件放在 `fork/` 下，例外只能是 ledger `[owned]` 中列出的路径。
 2. 对上游文件的每一处修改都属于一个 ledger topic；新增或删除修改时在同一个提交里更新 ledger。提交前运行 `fork/dev map` 和 `fork/dev check`。
 3. 同步上游只用 `fork/dev sync`：merge，不 rebase，也不用 GitHub 的 “Sync fork”。
-4. 实验代码只在 `fork/` 下的隔离虚拟环境中运行：实验训练器 `fork/experimental` 用 `.venv-experimental`（不含原生扩展）；TLC 包 `fork/tlc` 需要原生训练器，以 editable 方式装进带原生构建的 `.venv-tlc`；TLC 的纯 PyTorch 原型 `fork/tlc/prototypes` 不打包，在 `.venv-experimental` 或任一 CPU torch 环境中运行。它们的测试用 `fork/dev test experimental` 和 `fork/dev test tlc`（CPU，不需要原生扩展）。不要在仓库根目录执行 `uv run` 或 `uv sync`。
+4. 实验代码只在 `fork/` 下的隔离虚拟环境中运行（各环境见上文“首次准备环境”）；只从检出目录导入、不安装任何包的 CPU 测试可以用 `FORK_PY` 指定的解释器（默认根目录的 `.venv`）。不要在仓库根目录执行 `uv run` 或 `uv sync`。
 5. 提交、推送和 Release 只面向 `CatMeow-233/surogate`，不向上游推送或创建 PR。

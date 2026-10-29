@@ -1,261 +1,37 @@
-"""Binding probe items, their heuristic floors, and the natural-code suite T3 (README: 绑定探针).
+"""T3, the natural-code binding probe: the next local identifier in held-out Python (docs/training.md: 绑定探针).
 
-An item asks for one continuation of a prompt: eval.probes scores every candidate after the prompt with the model
-and counts the item correct when the gold candidate scores best (v0.7 §12.2, review SD-01).
-
-- T1 value tracking and T2 formal-actual correspondence come from data.synth: the prompt is a program up to its
-  readout `assert EXPR == `, the candidates are the string literals of the prompt, the gold is the value of EXPR.
-- T3 is natural code: the prompt is a held-out document up to a load of a local variable, the candidates are the
-  locals bound before it in the function, the gold is the loaded name.
-
-Every item carries the predictions of the heuristic floors. For T1 and T2 they come from a scope-blind reader of
-the program text (literal_heuristics): `recent` (the last literal of the prompt), `line1` (the first literal),
-`same_name` (EXPR resolved through the latest textual binding of each name, ignoring scopes; a call's keyword
-arguments bind its parameters' names), `first_bound` (the same through the earliest bindings), `stale` (the value
-the reader gave EXPR before its last change) and `position` (a call's returned parameter taken by argument
-position, keywords ignored). For T3: `recent` (the most recently mentioned local) and `frequent` (the most
-loaded so far). eval.probes reports the best of them per stratum as the floor.
+The prompt is a val-split code document up to a load of a function's local, the candidates are the locals mentioned
+before it in the function, and the gold is the loaded name. Only functions whose locals a textual reading resolves
+are used (the static subset: no global/nonlocal, no del of a name, no reflection on the namespace), and no function
+whose alpha-renamed AST also occurs in the train split. Sources marked `generated` in the corpus spec (the synthetic
+binding programs of data.synth) give no items: T3 measures natural code, and the synthetic suites have their own
+T1/T2. The heuristic floors are `recent` (the most recently mentioned local) and `frequent` (the most loaded so far).
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
-import dataclasses
-import io
 import json
 import math
 import random
 import symtable
 import sys
-import tokenize
 import warnings
 from collections import Counter
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
-from ..modeldir import dump_json, write_text_atomic
-from .corpus import Corpus, documents, file_sha256, load_corpus, split_of, unit_hash
+from ..files import MANIFEST_FILE, dump_json, file_sha256, write_text_atomic
+from .corpus import Corpus, documents, load_corpus, split_of, unit_hash
 from .decontam import function_hashes
+from .items import HALVES, SUITE_FILES, SUITE_VERSION, Item, write_items
 
-SUITE_VERSION = 1
-TASKS = ("T1", "T2", "T3")
-HALVES = ("dev", "test")
-SUITE_FILES = {half: f"{half}.jsonl" for half in HALVES}
-MANIFEST_FILE = "manifest.json"
 T3_MAX_PROMPT_CHARS = 16000  # the prompt keeps the document's tail up to the load, from a line start
 T3_PER_DOCUMENT = 8
 CANDIDATE_BUCKETS = ((2, "2"), (4, "3-4"), (8, "5-8"), (16, "9-16"), (math.inf, ">16"))
 REFLECTION = {"eval", "exec", "locals", "globals", "vars", "getattr", "setattr", "delattr"}
-
-
-@dataclasses.dataclass
-class Item:
-    id: str
-    task: str
-    prompt: str
-    candidates: list[str]
-    gold: str
-    tail: str  # the text after the candidate to the end of its line, the same for every candidate
-    heuristics: dict[str, str | None]
-    strata: dict[str, Any]
-    anchor: int | None = None  # offset in prompt of the binding the gold comes from (distance buckets)
-    query: tuple[int, int] | None = None  # [start, end) in prompt of the identifier asked about (piece count)
-    start: int = 0  # offset of prompt in its document; 0: the prompt starts the document (framing tokens)
-    program: str | None = None  # T1/T2: the whole program, its readout completed with the gold
-    hash: str | None = None  # T1/T2: data.decontam.ast_hash of the program
-
-    def problems(self) -> list[str]:
-        out = []
-        if self.task not in TASKS:
-            out.append(f"task {self.task!r}")
-        if self.gold not in self.candidates or len(set(self.candidates)) != len(self.candidates):
-            out.append("the gold must be one of distinct candidates")
-        if not self.tail:
-            out.append("empty tail")
-        return [f"{self.id}: {p}" for p in out]
-
-
-def write_items(path: Path, items: Iterable[Item]) -> int:
-    lines = [json.dumps(dataclasses.asdict(item), ensure_ascii=False) for item in items]
-    write_text_atomic(Path(path), "".join(line + "\n" for line in lines))
-    return len(lines)
-
-
-def read_items(path: Path) -> list[Item]:
-    items = []
-    with Path(path).open(encoding="utf-8") as f:
-        for line in f:
-            record = json.loads(line)
-            if record.get("query") is not None:
-                record["query"] = tuple(record["query"])
-            items.append(Item(**record))
-    return items
-
-
-def string_literals(src: str) -> list[str]:
-    """The source text of the string literals of `src`, in order; tokens up to a tokenizer error count."""
-    out = []
-    try:
-        for t in tokenize.generate_tokens(io.StringIO(src).readline):
-            if t.type == tokenize.STRING:
-                out.append(t.string)
-    except (tokenize.TokenError, IndentationError, SyntaxError):
-        pass
-    return out
-
-
-# The scope-blind reader of T1/T2 programs.
-
-Pos = tuple[int, int]
-
-
-@dataclasses.dataclass
-class _Function:
-    pos: Pos
-    name: str
-    params: list[str]
-    defaults: dict[str, ast.expr]
-    returns: ast.expr | None
-
-
-class _Reader:
-    """Textual bindings before a readout, read as if the program had one flat namespace."""
-
-    def __init__(self, tree: ast.Module, readout: ast.stmt) -> None:
-        self.events: list[tuple[Pos, str, ast.expr]] = []
-        self.functions: list[_Function] = []
-        self.stop = (readout.lineno, readout.col_offset)
-        self._collect(tree.body)
-
-    def _collect(self, stmts: Sequence[ast.stmt]) -> None:
-        for s in stmts:
-            if (s.lineno, s.col_offset) >= self.stop:
-                return
-            end = (s.end_lineno, s.end_col_offset)
-            if isinstance(s, ast.FunctionDef):
-                returns = next((x.value for x in s.body if isinstance(x, ast.Return)), None)
-                self._function((s.lineno, s.col_offset), s.name, s.args, returns)
-                self._collect(s.body)
-            elif isinstance(s, ast.Assign):
-                for target in s.targets:
-                    self._bind(target, s.value, end)
-            elif isinstance(s, ast.AnnAssign) and s.value is not None:
-                self._bind(s.target, s.value, end)
-
-    def _function(self, pos: Pos, name: str, args: ast.arguments, returns: ast.expr | None) -> None:
-        params = [a.arg for a in args.args]
-        defaults = dict(zip(params[len(params) - len(args.defaults) :], args.defaults, strict=True))
-        self.functions.append(_Function(pos, name, params, defaults, returns))
-        self.events += [(pos, p, d) for p, d in defaults.items()]
-
-    def _bind(self, target: ast.expr, value: ast.expr, end: Pos) -> None:
-        if isinstance(target, ast.Name):
-            if isinstance(value, ast.Lambda):
-                self._function(end, target.id, value.args, value.body)
-            self.events.append((end, target.id, value))
-        elif isinstance(target, ast.Tuple) and isinstance(value, ast.Tuple) and len(target.elts) == len(value.elts):
-            for t, v in zip(target.elts, value.elts, strict=True):
-                self._bind(t, v, end)
-
-    def _latest(self, name: str, before: Pos, first: bool = False) -> tuple[Pos, str, ast.expr] | None:
-        found = [e for e in self.events if e[1] == name and e[0] < before]
-        return (found[0] if first else found[-1]) if found else None
-
-    def function(self, name: str, before: Pos) -> _Function | None:
-        return next((f for f in reversed(self.functions) if f.name == name and f.pos < before), None)
-
-    def resolve(self, expr: ast.expr | None, before: Pos, *, first: bool = False, overlay=None, depth: int = 0):
-        """The literal (source text) `expr` reads as, or None."""
-        overlay = overlay or {}
-        if expr is None or depth > 64:
-            return None
-        if isinstance(expr, ast.Constant):
-            return repr(expr.value) if isinstance(expr.value, str) else None
-        if isinstance(expr, ast.Name):
-            if expr.id in overlay:
-                return self.resolve(overlay[expr.id][1], overlay[expr.id][0], first=first, depth=depth + 1)
-            event = self._latest(expr.id, before, first)
-            if event is None:
-                return None
-            return self.resolve(event[2], event[0], first=first, overlay=overlay, depth=depth + 1)
-        if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name):
-            fn = self.function(expr.func.id, before)
-            if fn is None:
-                return None
-            call = (expr.end_lineno, expr.end_col_offset)
-            keywords = {kw.arg: (before, kw.value) for kw in expr.keywords if kw.arg}
-            return self.resolve(fn.returns, call, first=first, overlay=keywords, depth=depth + 1)
-        return None
-
-    def position(self, expr: ast.expr) -> str | None:
-        """A call's returned parameter mapped by argument position over all arguments, keywords included."""
-        before = self.stop
-        while isinstance(expr, ast.Name):
-            event = self._latest(expr.id, before)
-            if event is None:
-                return None
-            before, _, expr = event
-        if not (isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name)):
-            return None
-        fn = self.function(expr.func.id, before)
-        if fn is None or not isinstance(fn.returns, ast.Name):
-            return None
-        call, name = (expr.end_lineno, expr.end_col_offset), fn.returns.id
-        while name not in fn.params and (event := self._latest(name, call)) and isinstance(event[2], ast.Name):
-            name = event[2].id
-        if name not in fn.params:
-            return None
-        k, args = fn.params.index(name), [*expr.args, *(kw.value for kw in expr.keywords)]
-        if k < len(args):
-            return self.resolve(args[k], before)
-        return self.resolve(fn.defaults.get(name), fn.pos)
-
-    def history(self, expr: ast.expr) -> list[str]:
-        """The values the reader gives `expr` after each binding, consecutive repeats dropped."""
-        out: list[str] = []
-        for pos, _, _ in self.events:
-            value = self.resolve(expr, (pos[0], pos[1] + 1))
-            if value is not None and (not out or out[-1] != value):
-                out.append(value)
-        return out
-
-
-def readout_statement(tree: ast.Module, line: int) -> ast.Assert:
-    found = [n for n in ast.walk(tree) if isinstance(n, ast.Assert) and n.lineno == line]
-    if len(found) != 1 or not isinstance(found[0].test, ast.Compare):
-        raise ValueError(f"line {line} is not an `assert EXPR == VALUE` readout")
-    return found[0]
-
-
-def readout_prompt(program: str, line: int) -> tuple[str, str]:
-    """(prompt, answer) of the readout `assert EXPR == ANSWER` on `line` of an ASCII `program`: the prompt is the
-    program up to ANSWER."""
-    readout = readout_statement(ast.parse(program), line)
-    answer = readout.test.comparators[0]
-    start = sum(len(text) for text in program.splitlines(keepends=True)[: line - 1])
-    return program[: start + answer.col_offset], program[start + answer.col_offset : start + answer.end_col_offset]
-
-
-def literal_heuristics(program: str, line: int) -> dict[str, str | None]:
-    """The T1/T2 heuristic predictions for the readout `assert EXPR == ...` on `line` of `program`."""
-    tree = ast.parse(program)
-    readout = readout_statement(tree, line)
-    reader, expr = _Reader(tree, readout), readout.test.left
-    literals = string_literals(readout_prompt(program, line)[0])
-    history = reader.history(expr)
-    return {
-        "recent": literals[-1] if literals else None,
-        "line1": literals[0] if literals else None,
-        "same_name": reader.resolve(expr, reader.stop),
-        "first_bound": reader.resolve(expr, reader.stop, first=True),
-        "stale": history[-2] if len(history) >= 2 else None,
-        "position": reader.position(expr),
-    }
-
-
-# T3: the next local identifier in natural code.
 
 
 def _own_nodes(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.AST]:
@@ -453,14 +229,14 @@ def train_function_hashes(corpus: Corpus) -> set[str]:
 
 
 def build_natural(corpus: Corpus, out: Path, *, limit: int = 4000, seed: int = 0) -> dict[str, Any]:
-    """T3 dev and test halves from the val split's code documents (README: 绑定探针)."""
+    """T3 dev and test halves from the val split's natural code documents (sources not marked `generated`)."""
     out = Path(out)
     if out.exists() and any(out.iterdir()):
         raise FileExistsError(f"{out} is not empty")
     exclude = train_function_hashes(corpus)
     halves: dict[str, list[Item]] = {half: [] for half in HALVES}
     for doc in documents(corpus):
-        if doc.source.kind != "code" or split_of(corpus, doc) != "val":
+        if doc.source.kind != "code" or doc.source.generated or split_of(corpus, doc) != "val":
             continue
         rng = random.Random(f"{seed}\0{doc.key}")
         half = HALVES[unit_hash(seed, "half\0" + doc.group) % 2]
@@ -474,10 +250,15 @@ def build_natural(corpus: Corpus, out: Path, *, limit: int = 4000, seed: int = 0
     manifest = {
         "tlc_suite_version": SUITE_VERSION,
         "tasks": ["T3"],
-        "corpus": {"spec_sha256": file_sha256(corpus.path), "split": "val", "seed": corpus.seed},
+        "corpus": {
+            "spec_sha256": file_sha256(corpus.path),
+            "split": "val",
+            "seed": corpus.seed,
+            "sources": [s.name for s in corpus.sources if s.kind == "code" and not s.generated],
+        },
         "seed": seed,
         "rules": [
-            "documents: code sources of the corpus's val split; dev or test by sha256(seed, group)",
+            "documents: code sources not marked generated, val split; dev or test by sha256(seed, group)",
             "functions of the static subset (no global/nonlocal, del of a name, eval/exec/locals/getattr...)",
             "functions whose alpha-renamed AST equals a train-split function's are left out",
             f"at most {T3_PER_DOCUMENT} loads per document: loads of a local bound earlier in the function's text, "
@@ -485,12 +266,12 @@ def build_natural(corpus: Corpus, out: Path, *, limit: int = 4000, seed: int = 0
         ],
         "files": files,
     }
-    (out / MANIFEST_FILE).write_text(dump_json(manifest), encoding="utf-8")
+    write_text_atomic(out / MANIFEST_FILE, dump_json(manifest))
     return manifest
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m surogate_tlc.data.suites", description="write the T3 suite")
+    parser = argparse.ArgumentParser(prog="python -m surogate_tlc.data.natural", description=__doc__.split("\n")[0])
     parser.add_argument("corpus", type=Path, help="corpus spec (TOML)")
     parser.add_argument("out", type=Path, help="output directory (absent or empty)")
     parser.add_argument("--limit", type=int, default=4000, help="items per half")

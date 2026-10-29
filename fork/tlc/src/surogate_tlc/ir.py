@@ -44,10 +44,11 @@ def native_op_names(repo: Path) -> frozenset[str]:
 def symbol_values(config: Mapping[str, Any]) -> dict[str, int]:
     """Values of the symbolic dimensions in IR parameter shapes, as the native parameter store defines them."""
     hq, hkv, head = config.get("num_query_heads", 0), config.get("num_kv_heads", 0), config.get("head_size", 0)
+    ff = config.get("d_ff", 0)
     return {
         "C": config["d_model"],
-        "M": config["d_ff"],
-        "MUp": 2 * config["d_ff"],
+        "M": ff,
+        "MUp": 2 * ff,
         "AttnDim": hq * head,
         "QKV": (hq + 2 * hkv) * head,
     }
@@ -67,9 +68,39 @@ def param_shapes(module: Mapping[str, Any]) -> dict[str, tuple[int, ...]]:
     return shapes
 
 
-def param_count(module: Mapping[str, Any], *, tied: bool) -> int:
-    """Trainable parameters; with `tied` the LM head shares the embedding and does not count."""
-    return sum(math.prod(shape) for name, shape in param_shapes(module).items() if not (tied and name == "lm_head"))
+EMBEDDINGS = ("embedding", "lm_head")
+
+
+def param_count(module: Mapping[str, Any], *, tied: bool, embedding: bool = True) -> int:
+    """Trainable parameters; with `tied` the LM head shares the embedding and does not count. embedding=False
+    leaves out the embedding and the LM head (the non-embedding count that scaling comparisons use)."""
+    return sum(
+        math.prod(shape)
+        for name, shape in param_shapes(module).items()
+        if not (tied and name == "lm_head") and (embedding or name not in EMBEDDINGS)
+    )
+
+
+def flops_per_token(cfg: Mapping[str, Any], seq_len: int) -> int:
+    """Estimated forward FLOPs per token of config.json `cfg` at context `seq_len`: 2 x the multiply-adds of every
+    matmul, plus the sequence mixers (the chunked SSD scan and the depthwise conv of a Mamba layer; QK^T and AV of a
+    causal attention layer, about 2 x seq_len x query width). Training costs about 3 x this. An estimate for budgets
+    and MFU, not a kernel count: norms, activations and the loss are left out."""
+    d, ffn, vocab = cfg["hidden_size"], cfg["intermediate_size"], cfg["vocab_size"]
+    total = 2 * d * vocab  # LM head
+    for kind in cfg["tlc_layer_pattern"]:
+        total += 2 * (d * 2 * ffn + ffn * d)  # SwiGLU: fused up|gate, then down
+        if kind == "M":
+            heads, state, groups = cfg["mamba_num_heads"], cfg["ssm_state_size"], cfg["n_groups"]
+            inner, chunk, kernel = heads * cfg["mamba_head_dim"], cfg["chunk_size"], cfg["conv_kernel"]
+            total += 2 * (d * (2 * inner + 2 * groups * state + heads) + inner * d)  # in_proj, out_proj
+            total += 4 * inner * state + 2 * chunk * (groups * state + inner)  # SSD states and intra-chunk terms
+            total += 2 * kernel * (inner + 2 * groups * state)  # depthwise conv
+        else:
+            query = cfg["num_attention_heads"] * cfg["head_dim"]
+            kv = cfg["num_key_value_heads"] * cfg["head_dim"]
+            total += 2 * (d * query + d * 2 * kv + query * d) + 2 * seq_len * query
+    return total
 
 
 def ir_problems(module: Mapping[str, Any], native_ops: Collection[str]) -> list[str]:

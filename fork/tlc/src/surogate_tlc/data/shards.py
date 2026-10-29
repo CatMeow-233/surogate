@@ -1,11 +1,11 @@
 """Token shards for the native trainer: BIN.TOK v3 files with one document per row, and their manifest.
 
 `mamba_ssm_scan` does not reset its state between packed documents, so no row holds more than one document, for
-every P0 row alike (README: "数据 shard"):
+every P0 row alike (docs/data.md: 数据 shard):
 
 - Framing: a code document is <|bos|> <|code_start|> text <|code_end|> <|eos|>; a text document is <|bos|> text
-  <|eos|>, with its markdown code fences turned into the code markers (segments()). Text is encoded with
-  special-token strings as plain text, so a document never yields a special id by itself.
+  <|eos|>, with its markdown code fences (data.corpus.fences) turned into the code markers (segments()). Text is
+  encoded with special-token strings as plain text, so a document never yields a special id by itself.
 - A framed document longer than a row is cut into windows of seq_len tokens. Consecutive windows share one token,
   so every token but a document's first is a target exactly once. Each window is a row padded at the end with
   <|pad|>; positions run 0..seq_len-1 in every row.
@@ -15,7 +15,9 @@ every P0 row alike (README: "数据 shard"):
   manifest sums them per shard (`valid_targets`, the epoch total of the trainer's ValidTokenCount).
 
 The file layout is that of upstream surogate.train.tokenize.TokenizedDataFileWriter (masking=True,
-non_overlapping=True), byte for byte (CPU test). That module imports the native extension, so it is not used here.
+non_overlapping=True), byte for byte (CPU test). That module imports the native extension, so it is not used here;
+reading uses upstream's numpy-only header parser (surogate.distill.sidecar). The manifest records, per shard, the row
+range each source occupies (documents are written source by source), so that evaluation can report a loss per source.
 """
 
 from __future__ import annotations
@@ -24,8 +26,8 @@ import argparse
 import itertools
 import json
 import os
-import re
 import sys
+import time
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
@@ -35,15 +37,17 @@ from typing import Any
 import numpy as np
 from tokenizers import Tokenizer
 
+from surogate.distill.sidecar import read_token_shard_header
+
 from .. import hf
-from ..modeldir import dump_json
+from ..files import MANIFEST_FILE, dump_json, file_sha256, read_json
 from .corpus import (
     RULES,
     Corpus,
     Document,
     decontam_record,
     documents,
-    file_sha256,
+    fences,
     load_corpus,
     provenance,
     split_of,
@@ -54,34 +58,29 @@ from .tokenizer import BOS, CODE_END, CODE_START, EOS, PAD, load, special_ids, t
 MAGIC = b"BIN.TOK\n"
 FORMAT_VERSION = 3
 HEADER_BYTES = 1024
-MANIFEST_FILE = "manifest.json"
-FENCE = "```"
 # Bump when framing, windowing or the row layout changes.
 SHARD_VERSION = 1
 ENCODE_BATCH = 256
+# The target id the native DataLoader and compute_logprobs skip.
+IGNORE = -100
 
 
 def segments(text: str, kind: str, special: dict[str, int]) -> list[str | int]:
     """A framed document: text pieces to encode, and special ids between them.
 
-    In a text document a line that starts with ``` (after leading whitespace) opens a code block, and inside a block
-    a line that is exactly ``` closes it; the fence lines are replaced by <|code_start|> and <|code_end|>. A block
-    still open at the end of the document is closed there.
+    In a text document the fence lines of data.corpus.fences() are replaced by <|code_start|> and <|code_end|>; a
+    block still open at the end of the document is closed there.
     """
     bos, eos, start, end = (special[token] for token in (BOS, EOS, CODE_START, CODE_END))
     if kind == "code":
         return [bos, start, text, end, eos]
+    pieces = fences(text)
     out: list[str | int] = [bos]
-    lines: list[str] = []
-    in_code = False
-    for line in re.split(r"(?<=\n)", text):  # str.splitlines would also split at U+2028 and friends
-        fence = line.strip()
-        if (in_code and fence == FENCE) or (not in_code and fence.startswith(FENCE)):
-            out += ["".join(lines), end if in_code else start]
-            lines, in_code = [], not in_code
-        else:
-            lines.append(line)
-    out += ["".join(lines), *([end] if in_code else []), eos]
+    for i, (in_code, chunk) in enumerate(pieces):
+        out.append(chunk)
+        if i + 1 < len(pieces):  # the fence line after this piece
+            out.append(end if in_code else start)
+    out += [*([end] if pieces[-1][0] else []), eos]
     return [piece for piece in out if piece != ""]
 
 
@@ -112,11 +111,12 @@ class ShardWriter:
             raise ValueError(f"seq_len must be a positive multiple of 8, got {seq_len}")
         self.path, self.seq_len, self.vocab_size, self.pad_id = Path(path), seq_len, vocab_size, pad_id
         self.lengths: list[int] = []
+        self.sources: list[dict[str, Any]] = []  # contiguous row ranges: {"name", "first_row", "rows"}
         self._tmp = self.path.with_name(f".{self.path.name}.tmp")
         self._file = self._tmp.open("wb")
         self._file.write(b"*" * (HEADER_BYTES - 1) + b"\n")  # the header goes in last, as upstream does it
 
-    def add_row(self, ids: Sequence[int]) -> None:
+    def add_row(self, ids: Sequence[int], source: str | None = None) -> None:
         if not 1 <= len(ids) <= self.seq_len:
             raise ValueError(f"a row holds 1..{self.seq_len} tokens, got {len(ids)}")
         row = np.full(self.seq_len, self.pad_id, dtype="<i4")
@@ -126,6 +126,11 @@ class ShardWriter:
         if (len(self.lengths) + 1) * self.seq_len >= 2**31:
             raise ValueError(f"{self.path} would reach 2**31 tokens; use more train files")
         self._file.write(row.tobytes())
+        if source is not None:
+            if self.sources and self.sources[-1]["name"] == source:
+                self.sources[-1]["rows"] += 1
+            else:
+                self.sources.append({"name": source, "first_row": len(self.lengths), "rows": 1})
         self.lengths.append(len(ids))
 
     def close(self) -> dict[str, Any]:
@@ -150,6 +155,7 @@ class ShardWriter:
             "real_tokens": real,
             "valid_targets": real - len(lengths),
             "pad_fraction": _fraction(n_tokens - real, n_tokens),
+            "sources": self.sources,
         }
 
 
@@ -168,32 +174,33 @@ class Shard:
 
 def read_shard(path: Path) -> Shard:
     """Read a BIN.TOK v3 file (memory-mapped)."""
-    header = np.fromfile(path, dtype="<i4", count=HEADER_BYTES // 4)
-    if header[:2].tobytes() != MAGIC or header[2] != FORMAT_VERSION or header[3] != 4:
+    header = read_token_shard_header(str(path))
+    if header.version != FORMAT_VERSION or header.bytes_per_token != 4:
         raise ValueError(f"{path} is not a BIN.TOK v{FORMAT_VERSION} file with 4-byte tokens")
-    n, vocab_size, has_masks, non_overlapping = (int(v) for v in header[4:8])
-    data = np.memmap(path, dtype="<i4", mode="r", offset=HEADER_BYTES, shape=(2 * n,))
+    n = header.n_tokens
+    data = np.memmap(path, dtype="<i4", mode="r", offset=header.tokens_offset, shape=(2 * n,))
     masks = None
-    if has_masks:
-        bits = np.memmap(path, dtype=np.uint8, mode="r", offset=HEADER_BYTES + 8 * n, shape=((n + 7) // 8,))
+    if header.has_masks:
+        offset = header.position_ids_offset + 4 * n
+        bits = np.memmap(path, dtype=np.uint8, mode="r", offset=offset, shape=((n + 7) // 8,))
         masks = np.unpackbits(bits, bitorder="little")[:n].astype(bool)
-    return Shard(vocab_size, bool(non_overlapping), data[:n], data[n:], masks)
+    return Shard(header.vocab_size, header.non_overlapping, data[:n], data[n:], masks)
 
 
 def served_rows(shard: Shard, seq_len: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Inputs, targets and positions [rows, seq_len] of every row, as the native DataLoader serves them.
 
     Follows load_seq in csrc/src/runtime/training/dataloader.cpp for a non-overlapping shard with mask bits: the
-    target of position i is the file's next token, -100 where the mask bit of position i is clear, and -100 at
-    the last position of a row. The count of targets other than -100 is the trainer's ValidTokenCount.
+    target of position i is the file's next token, IGNORE where the mask bit of position i is clear, and IGNORE at
+    the last position of a row. The count of targets other than IGNORE is the trainer's ValidTokenCount.
     """
     if not shard.non_overlapping or shard.masks is None:
         raise ValueError("expects a non-overlapping shard with mask bits")
     rows = len(shard.tokens) // seq_len
     shape = (rows, seq_len)
     inputs = np.asarray(shard.tokens[: rows * seq_len]).reshape(shape)
-    targets = np.concatenate([inputs[:, 1:], np.full((rows, 1), -100, dtype=inputs.dtype)], axis=1)
-    targets[~shard.masks[: rows * seq_len].reshape(shape)] = -100
+    targets = np.concatenate([inputs[:, 1:], np.full((rows, 1), IGNORE, dtype=inputs.dtype)], axis=1)
+    targets[~shard.masks[: rows * seq_len].reshape(shape)] = IGNORE
     return inputs, targets, np.asarray(shard.positions[: rows * seq_len]).reshape(shape)
 
 
@@ -225,7 +232,7 @@ def build_shards(
         rows = windows(ids, seq_len)
         writer = writers[split, unit_hash(corpus.seed, "shard\0" + doc.key) % train_files if split == "train" else 0]
         for row in rows:
-            writer.add_row(row)
+            writer.add_row(row, doc.source.name)
         counted = {"documents": 1, "characters": len(doc.text), "rows": len(rows), "real_tokens": sum(map(len, rows))}
         for key, n in counted.items():
             counts[doc.source.name][split, key] += n
@@ -268,7 +275,8 @@ def build_shards(
             *RULES,
             "framing: code <|bos|> <|code_start|> text <|code_end|> <|eos|>; text <|bos|> text <|eos|>",
             "in text documents, a line starting with ``` opens a code block (<|code_start|>) and, inside one, a line "
-            "that is exactly ``` closes it (<|code_end|>); an open block is closed at the end of the document",
+            "that is exactly ``` closes it (<|code_end|>); an open block is closed at the end of the document; "
+            "lines end at \\n only",
             "special-token strings inside a document are encoded as plain text",
             "one document per row: windows of seq_len tokens, consecutive windows share one token, end padding",
         ],
@@ -285,6 +293,23 @@ def manifest_sha256(out: Path) -> str:
     return file_sha256(Path(out) / MANIFEST_FILE)
 
 
+def manifest(data: Path) -> dict[str, Any]:
+    return read_json(Path(data) / MANIFEST_FILE)
+
+
+def shard_files(data: Path, split: str) -> list[Path]:
+    """The shards of `split` in a shard directory, in the order the native DataLoader reads them."""
+    return sorted(Path(data).glob(f"{split}-*.bin"))
+
+
+def check_tokenizer(data: Path, model_dir: Path) -> dict[str, Any]:
+    """The manifest of shard directory `data`; ValueError when its tokenizer is not `model_dir`'s."""
+    info = manifest(data)
+    if info["tokenizer"]["sha256"] != tokenizer_sha256(model_dir):
+        raise ValueError(f"the shards in {data} were built with another tokenizer than {model_dir}'s")
+    return info
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m surogate_tlc.data.shards", description=__doc__.split("\n")[0])
     parser.add_argument("corpus", type=Path, help="corpus spec (TOML)")
@@ -293,10 +318,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--seq-len", type=int, default=hf.CONTEXT_LENGTH)
     parser.add_argument("--train-files", type=int, default=1)
     args = parser.parse_args(argv)
-    manifest = build_shards(
+    start = time.process_time()
+    built = build_shards(
         load_corpus(args.corpus), args.tokenizer, args.out, seq_len=args.seq_len, train_files=args.train_files
     )
-    print(json.dumps({"out": str(args.out), "manifest_sha256": manifest_sha256(args.out), **manifest["splits"]}))
+    # Process CPU time of the single-threaded builder: tokenize, frame and write (the per-core data rate).
+    seconds = time.process_time() - start
+    real = sum(split["real_tokens"] for split in built["splits"].values())
+    timing = {"cpu_seconds": round(seconds, 1), "real_tokens_per_cpu_second": round(real / max(seconds, 1e-9))}
+    summary = {"out": str(args.out), "manifest_sha256": manifest_sha256(args.out), **built["splits"], **timing}
+    print(json.dumps(summary))
     return 0
 
 

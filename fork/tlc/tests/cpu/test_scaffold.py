@@ -4,6 +4,7 @@ native wheel ships `surogate/` whole, the experimental wheel `surogate.experimen
 """
 
 import fnmatch
+import re
 import subprocess
 import sys
 import tomllib
@@ -47,3 +48,18 @@ def test_tlc_code_is_not_in_the_native_or_experimental_wheel():
     experimental = _pyproject(REPO / "fork" / "experimental" / "pyproject.toml")
     include = experimental["tool"]["setuptools"]["packages"]["find"]["include"]
     assert not any(fnmatch.fnmatch("surogate_tlc", pattern) for pattern in include)
+
+
+# Section numbers and finding ids of the planning documents, which are not in the repository: a maintainer could not
+# look them up, and they change with every revision. State the reason, or cite a document under fork/tlc/docs.
+EXTERNAL_CITATION = re.compile(r"\u00a7|\bv0\.\d|\b(?:IMPL|ARC|SD|EV)-[A-Z0-9]+\b|\bO-\d+\b|plan test \d")
+
+
+def test_no_citations_of_documents_outside_the_repository():
+    found = []
+    for path in sorted(TLC.rglob("*")):
+        if path.suffix in {".py", ".md", ".yaml", ".toml"} and "__pycache__" not in path.parts:
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if EXTERNAL_CITATION.search(line):
+                    found.append(f"{path.relative_to(TLC)}:{number}: {line.strip()[:80]}")
+    assert not found, "\n".join(found)

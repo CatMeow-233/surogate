@@ -1,4 +1,4 @@
-"""Initial weights (surogate_tlc.init, README: "初始化"): what model.safetensors holds and how it is distributed.
+"""Initial weights (surogate_tlc.init, docs/model.md: 初始化): what model.safetensors holds and how it is distributed.
 
 The expected tensor names are re-derived here from the per-layer parameter names of one-layer models and the
 model-level mappings, not from init's own naming, so a renamed or added parameter shows up as a mismatch.

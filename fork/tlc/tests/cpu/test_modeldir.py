@@ -119,14 +119,14 @@ def test_write_rejects_an_invalid_config_before_writing(tmp_path, tokenizer_dir)
     "overrides, problem",
     [
         ({"bos_token_id": 3}, "bos_token '<|bos|>' has id 1 in the tokenizer, config.json says 3"),
-        ({"vocab_size": 300}, "tokenizer ids reach {max_id}, but vocab_size is 300"),
+        ({"vocab_size": 200}, "tokenizer ids reach {max_id}, but vocab_size is 200"),
     ],
 )
 def test_config_must_agree_with_the_tokenizer(tmp_path, tokenizer_dir, overrides, problem):
     from tokenizers import Tokenizer
 
     max_id = Tokenizer.from_file(str(tokenizer_dir / "tokenizer.json")).get_vocab_size(with_added_tokens=True) - 1
-    assert max_id >= 300
+    assert max_id >= 200
     with pytest.raises(modeldir.ModelDirError) as error:
         modeldir.write_model_dir(tmp_path / "model", hf.default_config(**overrides), tokenizer_dir)
     assert problem.format(max_id=max_id) in error.value.problems

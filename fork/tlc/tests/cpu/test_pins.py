@@ -1,7 +1,8 @@
-"""Pins on the upstream interfaces P0 builds on (README: "上游接口的 pin"). A failure here means upstream changed
-one of them: check the TLC code that uses it, then update the pin.
+"""Pins on the upstream interfaces P0 builds on (docs/model.md: 上游接口的 pin). A failure here means upstream changed
+one of them: check the TLC code that uses it, then update the pin. Each pin checks what TLC relies on and anchors on
+code rather than comments, so that a harmless upstream edit does not fail it.
 
-Modules that need the native extension (the trainer, the shard writer, the CLI) are read as source.
+Modules that need the native extension (the trainer, the C++ sources) are read as source.
 """
 
 import ast
@@ -39,18 +40,27 @@ def _signature(fn: ast.FunctionDef) -> list[str]:
     return [name if default is None else f"{name}={default}" for name, default in zip(names, defaults, strict=True)]
 
 
-def test_dsl_constructors_tlc_calls():
+def test_dsl_constructors_take_what_tlc_passes():
     from surogate.dsl import nn
     from surogate.dsl.blocks.qwen3 import Qwen3Block
     from surogate.dsl.modules import GenericMLP, Mamba2Mixer
 
-    mamba = "d_model mamba_num_heads mamba_head_dim ssm_state_size n_groups conv_kernel chunk_size eps dt_min dt_max"
-    assert _params(Mamba2Mixer) == [*mamba.split(), "time_step_limit", "use_conv_bias", "use_bias"]
-    assert _params(GenericMLP) == ["d_model", "d_ff", "config"]
-    qwen3 = "d_model num_query_heads num_kv_heads head_size d_ff max_seq eps use_qkv_bias use_qk_norm"
-    assert _params(Qwen3Block) == qwen3.split()
-    stack = "block_configs block_types n_layers per_layer_input_name kv_sharing_map"
-    assert _params(nn.HybridBlockStack) == stack.split()
+    mamba = "d_model mamba_num_heads mamba_head_dim ssm_state_size n_groups conv_kernel chunk_size eps"
+    assert {*mamba.split(), "use_conv_bias", "use_bias", "time_step_limit"} <= set(_params(Mamba2Mixer))
+    assert {"d_model", "d_ff"} <= set(_params(GenericMLP))
+    qwen3 = "d_model num_query_heads num_kv_heads head_size d_ff max_seq eps"
+    assert set(qwen3.split()) <= set(_params(Qwen3Block))
+    assert {"block_configs", "block_types", "n_layers"} <= set(_params(nn.HybridBlockStack))
+
+
+def test_tracer_members_a0_split_uses():
+    """dsl.models traces A0-split's layer 1 under a prefix and drops the mapping templates its modules register."""
+    from surogate.dsl import nn
+
+    assert nn._current_tracer.get() is None  # a ContextVar holding the active Tracer while a model traces
+    assert {"push_prefix", "pop_prefix"} <= set(dir(nn.Tracer))
+    init = ast.unparse(_method(_tree("surogate/dsl/nn.py"), "Tracer", "__init__"))
+    assert "self.hf_mappings: dict[str, Any] = {}" in init
 
 
 def test_dsl_defaults_tlc_relies_on():
@@ -73,21 +83,6 @@ def test_native_op_table_is_parsed():
     assert {"mamba_ssm_scan", "flash_attention", "fused_lm_head_loss", "moe_softmax", "concat", "mul"} <= names
 
 
-def test_cli_main_runs_the_command_module_in_process():
-    """`python -m surogate_tlc` registers the TLC models and hands over to cli_main, so this must stay runpy."""
-    tree = _tree("surogate/cli/main.py")
-    mapping = next(
-        node.value for node in tree.body if isinstance(node, ast.AnnAssign) and node.target.id == "COMMAND_MAPPING"
-    )
-    commands = ast.literal_eval(mapping)
-    assert commands["sft"] == "surogate.cli.sft" and commands["pt"] == "surogate.cli.pt"
-    cli_main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "cli_main")
-    calls = {ast.unparse(node) for node in ast.walk(cli_main) if isinstance(node, ast.Call)}
-    assert "runpy.run_module(module_name, run_name='__main__', alter_sys=True)" in calls
-    assigns = {ast.unparse(node) for node in ast.walk(cli_main) if isinstance(node, ast.Assign)}
-    assert "sys.argv = [module_name] + sys.argv[2:]" in assigns
-
-
 def test_trainer_wrapper_construction():
     tree = _tree("surogate/train/trainer.py")
     assert _signature(_method(tree, "SurogateTrainerWrapper", "__init__")) == [
@@ -96,25 +91,6 @@ def test_trainer_wrapper_construction():
         "eval_files=None",
     ]
     assert _signature(_method(tree, "SurogateTrainerWrapper", "train")) == []
-
-
-def test_tokenized_data_file_writer():
-    tree = _tree("surogate/train/tokenize.py")
-    cls = "TokenizedDataFileWriter"
-    assert _signature(_method(tree, cls, "__init__")) == [
-        "file_name",
-        "vocab_size",
-        "masking=False",
-        "non_overlapping=False",
-    ]
-    assert _signature(_method(tree, cls, "add_document")) == ["tokens", "position_ids", "mask=None"]
-    for name in ("__enter__", "__exit__"):
-        _method(tree, cls, name)
-    header = _method(tree, cls, "_write_header")
-    source = ast.unparse(header)
-    assert "header_str = 'BIN.TOK\\n'" in source and "version = 3" in source
-    fields = "[version, bytes_per_token, self.n_tokens, self.vocab_size, self.has_masks, self.non_overlapping]"
-    assert fields in source
 
 
 CPP_STRING = r'"(?:[^"\\]|\\.)*"'
@@ -132,7 +108,8 @@ def test_native_tokenizer_reads_tlc_split_patterns():
     tokenizer_cpp = (REPO / "csrc/src/tokenizer/tokenizer.cpp").read_text(encoding="utf-8")
     assert hf.MODEL_TYPE not in set(re.findall(r'architecture == "([^"]+)"', tokenizer_cpp))
     assert 'if (obj.at("type") == "Split" && obj.contains("pattern"))' in tokenizer_cpp
-    gpt2_default = _cpp_strings(tokenizer_cpp[tokenizer_cpp.index("If still empty, use GPT-2 default") :])[0]
+    fallback = tokenizer_cpp.index("if (impl.pre_tokenizer_regex.empty())")
+    gpt2_default = _cpp_strings(tokenizer_cpp[tokenizer_cpp.index("impl.pre_tokenizer_regex = {", fallback) :])[0]
     unicode_cpp = (REPO / "csrc/src/tokenizer/unicode.cpp").read_text(encoding="utf-8")
     custom = unicode_cpp[unicode_cpp.index("unicode_regex_split_custom(const std::string& text") :]
     custom = custom[: custom.index("\n}\n")]
@@ -172,9 +149,10 @@ def _config_keys() -> set[str]:
 def test_sft_keys_tlc_sets_are_read_upstream():
     """A misspelt or retired key would be ignored silently and the run would use upstream's default."""
     import yaml
-    from surogate_tlc.train import config, driver
+    from surogate_tlc import native
+    from surogate_tlc.train import config
 
-    used = {*config.FIXED, *driver.SCORING, "gpus", "gradient_accumulation_steps"}
+    used = {*native.FIXED, *native.SCORING, *native.SAMPLING_LORA, "gpus", "gradient_accumulation_steps"}
     for example in sorted((REPO / "fork" / "tlc" / "examples").glob("*.yaml")):
         body = yaml.safe_load(example.read_text(encoding="utf-8"))
         used |= set(body) - {"tlc"}
@@ -184,7 +162,7 @@ def test_sft_keys_tlc_sets_are_read_upstream():
 
 
 def test_sft_config_is_completed_by_an_explicit_post_init():
-    """driver.native_wrapper calls SFTConfig.__post_init__() itself, as TokenizeDatasets does."""
+    """native.native_wrapper calls SFTConfig.__post_init__() itself, as TokenizeDatasets does."""
     init = _method(_tree("surogate/train/tokenize.py"), "TokenizeDatasets", "__init__")
     assert "config.__post_init__()" in {ast.unparse(n) for n in ast.walk(init) if isinstance(n, ast.Call)}
     sft_init = _method(_tree("surogate/core/config/sft_config.py"), "SFTConfig", "__init__")
@@ -208,12 +186,11 @@ def test_trainer_regression_artifact_holds_what_the_summary_reads():
 
 
 def test_native_training_log_is_a_json_array_with_eval_lines():
+    """report.summarize reads `log`, `step` and `loss` of the eval lines."""
     source = (REPO / "csrc/src/runtime/training/logging.cpp").read_text(encoding="utf-8")
     assert 'mLogFile << "[\\n";' in source
-    assert (
-        '{{"log": "eval", "time": "{}", "step": {}, "epoch": {}, "eval_tokens": {}, "duration_ms": {}, "loss": {}}}'
-        in (source)
-    )
+    formats = [f for f in re.findall(r'R"\((.*?)\)"', source) if '"log": "eval"' in f]  # raw string literals
+    assert any('"step": {}' in f and '"loss": {}' in f for f in formats), formats
 
 
 def test_native_out_of_memory_errors():
@@ -226,7 +203,7 @@ def test_native_out_of_memory_errors():
 
 
 def test_tlc_never_calls_train_with_oom_recovery():
-    """It halves the tokens per update once accumulation reaches 16 (support plan E22); the driver replaces it."""
+    """It halves the tokens per update once accumulation reaches 16 and only warns; the driver replaces it."""
     for path in (REPO / "fork" / "tlc" / "src").rglob("*.py"):
         nodes = ast.walk(ast.parse(path.read_text(encoding="utf-8")))
         names = {
@@ -235,8 +212,22 @@ def test_tlc_never_calls_train_with_oom_recovery():
         assert "train_with_oom_recovery" not in names, path
 
 
-def test_compute_logprobs_binding():
+def _binding_args(name: str) -> list[str]:
     source = " ".join((REPO / "csrc/src/binding/binding.cpp").read_text(encoding="utf-8").split())
-    start = source.index('"compute_logprobs",')
-    args = re.findall(r'nb::arg\("(\w+)"\)', source[start : source.index(".def(", start)])
-    assert args == ["input_ids", "targets", "use_lora", "position_ids", "temperatures"]
+    start = source.index(f'"{name}",')
+    return re.findall(r'nb::arg\("(\w+)"\)', source[start : source.index(".def(", start)])
+
+
+def test_compute_logprobs_binding():
+    assert _binding_args("compute_logprobs") == ["input_ids", "targets", "use_lora", "position_ids", "temperatures"]
+
+
+def test_next_token_logits_needs_resident_lora():
+    """eval.samples builds its trainer with native.SAMPLING_LORA because of this check; LoRA B starts at zero."""
+    assert _binding_args("next_token_logits") == ["input_ids", "last_positions"]
+    execution = (REPO / "csrc/src/runtime/dsl/dsl_model_execution.cpp").read_text(encoding="utf-8")
+    body = execution[execution.index("std::vector<float> DslModel::next_token_logits(") :]
+    assert "!lora_enabled()" in body[: body.index("throw std::runtime_error")]
+    manager = (REPO / "csrc/src/runtime/lora/lora_weights_manager.cpp").read_text(encoding="utf-8")
+    init = manager[manager.index("void ModularLoRAWeightsManager::random_init(") :]
+    assert "fill_zero(layer->B, nullptr);" in init[: init.index("\n}\n")]

@@ -1,4 +1,4 @@
-"""The binding-probe path on the native trainer (README: 绑定探针, G3): for A0 on short items of the synthetic dev
+"""The binding-probe path on the native trainer (docs/training.md: 绑定探针, G3): for A0 on short items of the synthetic dev
 suite, the native candidate scores equal those of prototypes/ref_mamba2.py (bf16 storage) within the G1(b)
 tolerance per scored token, through the same rows and sums (surogate_tlc.eval.probes). Needs $TLC_RUNS with
 models/A0, data/, goldens/A0.npz and suites/synth/ from the runbook.
@@ -9,10 +9,10 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from surogate_tlc.data import suites
+from surogate_tlc.data.items import read_items
 from surogate_tlc.data.tokenizer import BOS, CODE_START, PAD, load, special_ids
 from surogate_tlc.eval import probes
-from surogate_tlc.train import driver
+from surogate_tlc.native import native_trainer
 
 TLC = Path(__file__).resolve().parents[2]
 SEQ_LEN, BATCH, ITEMS = 256, 8, 12
@@ -33,7 +33,7 @@ def test_probe_scores_match_the_reference(runs, tmp_path):
         return encoding.ids, encoding.offsets
 
     rows, firsts, owners = [], [], []
-    for item in suites.read_items(runs / "suites" / "synth" / "dev.jsonl"):
+    for item in read_items(runs / "suites" / "synth" / "dev.jsonl"):
         prepared = probes.rows_of(item, encode, [special[BOS], special[CODE_START]], SEQ_LEN)
         if "rows" in prepared and len(item.candidates) <= 6 and len(set(owners)) < ITEMS:
             rows += prepared["rows"]
@@ -41,7 +41,7 @@ def test_probe_scores_match_the_reference(runs, tmp_path):
             owners += [item.id] * len(prepared["rows"])
     assert len(set(owners)) == ITEMS
 
-    wrapper = driver.native_trainer(model, runs / "data", tmp_path / "native", batch=BATCH, seq_len=SEQ_LEN)
+    wrapper = native_trainer(model, runs / "data", tmp_path / "native", batch=BATCH, seq_len=SEQ_LEN)
 
     def native(inputs, targets, positions):
         return np.asarray(wrapper.trainer.compute_logprobs(inputs, targets, use_lora=False, position_ids=positions))

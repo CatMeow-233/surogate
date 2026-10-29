@@ -1,4 +1,4 @@
-"""Corpus spec (surogate_tlc.data.corpus, README: "语料"): validation, documents, provenance and the split."""
+"""Corpus spec (surogate_tlc.data.corpus, docs/data.md: 语料): validation, documents, provenance and the split."""
 
 import hashlib
 import json
@@ -31,8 +31,10 @@ def test_loads_the_fixture_spec(corpus_spec):
         "downloaded": "2026-10-02",
         "stage": "M1",
         "filters": [],
+        "generated": False,
     }
     assert code.provenance["downloaded"] == "2026-10-01"  # a TOML date and an ISO string read alike
+    assert not code.generated and not text.generated
 
 
 @pytest.mark.parametrize(
@@ -48,6 +50,7 @@ def test_loads_the_fixture_spec(corpus_spec):
         (("val_fraction = 0.25", "val_fraction = 1"), "val_fraction must be"),
         (("seed = 7", "seed = -1"), "seed must be"),
         (('name = "text"', 'name = "code"'), "distinct names"),
+        (('stage = "M1"', 'stage = "M1"\ngenerated = "yes"'), "generated must be true or false"),
     ],
 )
 def test_rejects_incomplete_or_wrong_specs(corpus_spec, replace, message):
@@ -106,4 +109,5 @@ def test_provenance_lists_files_with_hashes(corpus_spec):
         "bytes": len(data),
         "sha256": hashlib.sha256(data).hexdigest(),
     }
-    assert set(sources[1]) == {"name", "kind", "url", "revision", "license", "downloaded", "stage", "filters", "files"}
+    keys = {"name", "kind", "url", "revision", "license", "downloaded", "stage", "filters", "generated", "files"}
+    assert set(sources[1]) == keys

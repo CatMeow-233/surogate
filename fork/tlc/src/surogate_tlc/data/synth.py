@@ -1,32 +1,33 @@
 """Synthetic binding programs of a static Python subset: T1 value tracking and T2 formal-actual correspondence
-(README: 合成绑定任务).
+(docs/data.md: 合成绑定任务).
 
 A program binds opaque string literals ('k3f9') to names and ends in a readout `assert EXPR == 'value'`. The value
 is what Python computes: every program is executed, and the readout is then written with the value it captured.
-There is no arithmetic, so the tasks test binding and not execution (review SD-01).
+There is no arithmetic, so the tasks test binding and not the model's ability to execute code.
 
 - T1 patterns: flat, shadow-in (EXPR is a name rebound in the innermost of `depth` nested functions),
   shadow-out (read after the shadowing calls), closure (read in nested functions from the enclosing one),
   shadow-closure (a closure reads the enclosing value after sibling functions shadowed it), call-pos and call-kw
   (the value passes through a function's parameter, positionally or by keyword). Grid: live names, hops (the
-  length of the copy chain from the literal to EXPR) and overwrites (the chain rebound with a new literal).
+  length of the copy chain from the literal to EXPR) and overwrites (the chain rebound with a new literal) - the
+  union of the levels the experiment notebook and the binding-salience memo ask for.
 - T2 patterns: positional, keyword, mixed, default, names-reordered (module variables named like the formals
   passed in another order) and keyword-reordered calls of one of 1 + `distractors` functions with the same formal
   names; grid: formals, distractors, actuals (literals or names).
 
-The training stream and the eval suites are disjoint on four axes (v0.7 §9, the salience memo §2.4.1): template
-family (FAMILIES; HELD_OUT_FAMILIES only in eval), scope pattern (HELD_OUT_PATTERNS only in eval: shadowing
-inside a closure, reordered keyword calls), identifier pool (eval adds `novel`, unseen combinations of seen
-morphemes, and `rare`, strings of letters no training identifier uses) and literal space (a hash bucket of the
-literals, eval only). On top, no training program has the alpha-renamed, literal-normalised AST of an eval item
-(data.decontam.ast_hash): build() rejects and redraws them, and check() verifies all axes.
+The training stream and the eval suites are disjoint on four axes, so that an eval gain cannot come from having
+seen the item's surface form: template family (FAMILIES; HELD_OUT_FAMILIES only in eval), scope pattern
+(HELD_OUT_PATTERNS only in eval: shadowing inside a closure, reordered keyword calls), identifier pool (eval adds
+`novel`, unseen combinations of seen morphemes, and `rare`, strings of letters no training identifier uses) and
+literal space (a hash bucket of the literals, eval only). On top, no training program has the alpha-renamed,
+literal-normalised AST of an eval item (data.decontam.ast_hash): build() rejects and redraws them, and check()
+re-hashes every training program from its text and verifies all axes.
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
-import hashlib
 import itertools
 import json
 import math
@@ -39,27 +40,18 @@ from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
-from ..modeldir import dump_json, write_text_atomic
-from .corpus import file_sha256
+from ..files import MANIFEST_FILE, dump_json, file_sha256, write_text_atomic
+from .corpus import unit_hash
 from .decontam import ast_hash
-from .suites import (
-    HALVES,
-    MANIFEST_FILE,
-    SUITE_FILES,
-    SUITE_VERSION,
-    Item,
-    literal_heuristics,
-    read_items,
-    readout_prompt,
-    string_literals,
-    write_items,
-)
+from .floors import literal_heuristics, readout_prompt, string_literals
+from .items import HALVES, SUITE_FILES, SUITE_VERSION, Item, read_items, write_items
 
-SYNTH_VERSION = 1
+# 2: ast_hash renames keyword-argument names, so the training stream is disjoint from more eval items.
+SYNTH_VERSION = 2
 TRAIN_FILE = "train.jsonl"
 LIVE = (2, 4, 8, 16, 24, 32, 64)
 HOPS = (1, 2, 3, 4)
-OVERWRITES = (0, 1, 2, 4)
+OVERWRITES = (0, 1, 2, 3, 4)
 DEPTHS = (1, 2)
 FORMALS = (2, 3, 4, 6)
 DISTRACTORS = (0, 1, 2)
@@ -82,13 +74,9 @@ REDRAWS = 20
 T2_UNRELATED = 3  # a T2 program also binds up to this many names it never passes
 
 
-def _bucket(text: str, salt: str) -> int:
-    return int.from_bytes(hashlib.sha256(f"{salt}\0{text}".encode()).digest()[:8], "little")
-
-
 def _pools() -> dict[str, tuple[str, ...]]:
     pairs = [f"{a}_{b}" for a, b in itertools.permutations(MORPHEMES, 2)]
-    novel = tuple(p for p in pairs if _bucket(p, "pool") < NOVEL_SHARE * 2**64)
+    novel = tuple(p for p in pairs if unit_hash("pool", p) < NOVEL_SHARE * 2**64)
     seen = MORPHEMES + tuple(p for p in pairs if p not in set(novel))
     rare = tuple("".join(t) for n in (3, 4) for t in itertools.product(RARE_LETTERS, repeat=n))
     return {"seen": seen, "novel": novel, "rare": rare}
@@ -99,7 +87,7 @@ POOLS = _pools()
 
 def eval_literal(text: str) -> bool:
     """Whether a literal's body is in the eval-only space."""
-    return _bucket(text, "literal") % EVAL_LITERAL_BUCKETS == 0
+    return unit_hash("literal", text) % EVAL_LITERAL_BUCKETS == 0
 
 
 class _Draw:
@@ -318,7 +306,7 @@ def program(task: str, cell: dict[str, Any], rng: random.Random, pool: str, spac
 
 
 def cells(task: str, patterns: Sequence[str] | None = None) -> list[dict[str, Any]]:
-    """The difficulty grid of `task` (README: 合成绑定任务)."""
+    """The difficulty grid of `task` (docs/data.md: 合成绑定任务)."""
     if task == "T1":
         return [
             {"pattern": p, "live": live, "hops": hops, "overwrites": o, "depth": depth}
@@ -398,8 +386,9 @@ def train_programs(seed: int, exclude: set[str], redrawn: Counter) -> Iterator[t
 
 
 def training_documents(seed: int, chars: int, exclude: set[str], doc_chars: int = DOC_CHARS):
-    """(documents, redrawn): JSONL records {"text", "items"} of about `chars` characters in all; a document is a
-    module of consecutive programs (v0.7 §9: a generated multi-function module), executed as a whole."""
+    """(documents, redrawn): JSONL records {"text", "items"} of about `chars` characters in all. A document is a
+    module of consecutive programs separated by one blank line, executed as a whole: like a natural source file it
+    defines and calls several functions, and at 512 tokens a row holds most of it."""
     redrawn: Counter = Counter()
     stream = train_programs(seed, exclude, redrawn)
     docs, total = [], 0
@@ -420,36 +409,67 @@ IDENTIFIER = re.compile(r"\b[A-Za-z_]\w*\b")
 LITERAL = re.compile(r"'([a-z0-9]+)'")
 
 
+class SplitLeak(ValueError):
+    """The training stream shares something with the eval halves that the four split axes keep apart."""
+
+    def __init__(self, problems: list[str]) -> None:
+        self.problems = problems
+        super().__init__("the training stream leaks into the eval halves:\n" + "\n".join(f"  - {p}" for p in problems))
+
+
+def programs_of(document: str) -> list[str]:
+    """The programs of a training document (they hold no blank line; one blank line separates them)."""
+    return document.split("\n\n")
+
+
 def check(out: Path) -> dict[str, Any]:
-    """Disjointness of the training stream and the eval halves in `out` (raises AssertionError on a violation)."""
+    """Disjointness of the training stream and the eval halves in `out`; raises SplitLeak listing every violation.
+
+    The training programs are re-hashed from their text, so a recorded hash cannot hide a collision."""
     out = Path(out)
     halves = {half: read_items(out / SUITE_FILES[half]) for half in HALVES}
     evals = [item for items in halves.values() for item in items]
     held = set(POOLS["novel"]) | set(POOLS["rare"])
-    train_hashes, counts = set(), Counter()
+    train_hashes, counts, problems = set(), Counter(), []
     with (out / TRAIN_FILE).open(encoding="utf-8") as f:
-        for line in f:
+        for number, line in enumerate(f, 1):
             record = json.loads(line)
-            for info in record["items"]:
-                assert info["family"] not in HELD_OUT_FAMILIES and info["pattern"] not in HELD_OUT_PATTERNS, info
-                train_hashes.add(info["hash"])
+            where = f"{TRAIN_FILE}:{number}"
+            text, infos = record["text"], record["items"]
+            for info in infos:
+                if info["family"] in HELD_OUT_FAMILIES or info["pattern"] in HELD_OUT_PATTERNS:
+                    problems.append(f"{where}: held-out family or pattern {info['family']}/{info['pattern']}")
                 counts[info["task"]] += 1
-            text = record["text"]
-            names = set(IDENTIFIER.findall(LITERAL.sub("''", text)))
-            assert not held & names, "a held-out identifier in the training stream"
-            assert not any(eval_literal(lit) for lit in LITERAL.findall(text)), "an eval literal in training"
+            texts = programs_of(text)
+            if len(texts) != len(infos):
+                problems.append(f"{where}: {len(texts)} programs, {len(infos)} item records")
+            for program, info in zip(texts, infos, strict=False):
+                digest = ast_hash(ast.parse(program))
+                if digest != info["hash"]:
+                    problems.append(f"{where}: a program hashes to {digest}, its record says {info['hash']}")
+                train_hashes.add(digest)
+            names = held & set(IDENTIFIER.findall(LITERAL.sub("''", text)))
+            if names:
+                problems.append(f"{where}: held-out identifiers {sorted(names)[:3]}")
+            if any(eval_literal(lit) for lit in LITERAL.findall(text)):
+                problems.append(f"{where}: an eval literal")
     shared = [item.id for item in evals if item.hash in train_hashes]
-    assert not shared, f"eval items with a training AST: {shared[:5]}"
+    if shared:
+        problems.append(f"{len(shared)} eval items have a training program's AST, e.g. {shared[:5]}")
     texts = {half: {item.program for item in items} for half, items in halves.items()}
-    assert not texts["dev"] & texts["test"], "a program in both halves"
+    if texts["dev"] & texts["test"]:
+        problems.append(f"{len(texts['dev'] & texts['test'])} programs are in both halves")
     for item in evals:
-        assert not item.problems(), item.problems()
-        assert all(eval_literal(lit[1:-1]) for lit in item.candidates), item.id
+        problems += item.problems()
+        if not all(eval_literal(lit[1:-1]) for lit in item.candidates):
+            problems.append(f"{item.id}: a candidate outside the eval literal space")
+    if problems:
+        raise SplitLeak(problems)
     return {
         "train_items": dict(sorted(counts.items())),
         "train_hashes": len(train_hashes),
         "eval_items": {half: len(items) for half, items in halves.items()},
-        "eval_items_with_a_training_ast": 0,
+        "eval_items_with_a_training_ast": len(shared),
     }
 
 
@@ -499,7 +519,7 @@ def build(out: Path, *, seed: int = 0, per_task: int = 4000, train_chars: int = 
         "files": files,
     }
     manifest["disjoint"] = check(out)
-    (out / MANIFEST_FILE).write_text(dump_json(manifest), encoding="utf-8")
+    write_text_atomic(out / MANIFEST_FILE, dump_json(manifest))
     return manifest
 
 

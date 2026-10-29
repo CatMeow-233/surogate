@@ -1,48 +1,61 @@
-"""Run configurations for the TLC training driver (README: 训练驱动).
+"""Run configurations for the TLC training driver (docs/training.md: 训练驱动).
 
 A run configuration is an upstream SFT config file (keys of surogate.core.config.sft_config.SFTConfig) plus a `tlc`
 table:
 
     tlc:
-      data: DIR                  # shard directory written by `python -m surogate_tlc build-data`
+      data: DIR                  # shard directory written by `python -m surogate_tlc.data.shards`
       tokens_per_update: 16384   # nominal tokens per update = microbatch x accumulation x sequence_len x gpus
-      on_oom: fail               # fail | downshift
-      max_downshifts: 2          # with downshift: how many times the microbatch may halve
       stages:                    # named overrides of the SFT keys, selected with --stage
         overfit: {max_steps: 100, fixed_batch: true}
 
 gradient_accumulation_steps follows from tokens_per_update and the microbatch. A stage may also set `fixed_batch:
-true`: every step then trains on the same rows, one update's worth from the start of the first train shard.
-${VAR} in strings is replaced from the environment. The run directory is <output_dir>/<stage>, with -mb<B> appended
-when the microbatch is given on the command line, so a microbatch sweep never resumes another run's checkpoints.
+true` (STAGE_KEYS): every step then trains on the same rows, one update's worth from the start of the first train
+shard. ${VAR} in strings is replaced from the environment. The run directory is <output_dir>/<stage>, with
+-mb<B> appended when the microbatch is given on the command line, so a microbatch sweep never resumes another run's
+checkpoints. settings() is what a run directory's training depends on; the driver refuses to resume a run whose
+settings changed.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from ..data.shards import MANIFEST_FILE
+from ..data.shards import MANIFEST_FILE, manifest, shard_files
 from ..data.tokenizer import tokenizer_sha256
+from ..hf import positive_int
 from ..modeldir import ModelDirError, check_model_dir
+from ..native import FIXED
 
 TOKENS_PER_UPDATE = 16384
-ON_OOM = ("fail", "downshift")
-TLC_DEFAULTS: dict[str, Any] = {"tokens_per_update": TOKENS_PER_UPDATE, "on_oom": "fail", "max_downshifts": 2}
+TLC_DEFAULTS: dict[str, Any] = {"tokens_per_update": TOKENS_PER_UPDATE}
 TLC_KEYS = {"data", "stages", *TLC_DEFAULTS}
 STAGE_KEYS = {"fixed_batch"}  # the TLC keys a stage may set; its other keys override SFT keys
-# Upstream defaults a from-scratch TLC run must not inherit: LoRA and tokenize-time packing are on by default, and
-# from_scratch would replace the initialised weights with the native initialisation.
-FIXED = {"lora": False, "sample_packing": False, "row_packing": False, "from_scratch": False}
 # Data comes from tlc.data only and P0 has no distillation. Upstream ignores checkpoint_dir (checkpoints always go to
 # output_dir, the run directory), so a value there would mislead.
 FORBIDDEN = ("datasets", "validation_datasets", "checkpoint_dir", "distillation")
+# SFT keys a resumed run may change: where and how often it saves, logs and evaluates, and how long it runs. Every
+# other key shapes the training trajectory. max_steps also sets the length of a non-constant learning-rate schedule,
+# which settings() therefore records on its own.
+RESUMABLE = (
+    "output_dir",
+    "max_steps",
+    "save_steps",
+    "save_total_limit",
+    "eval_steps",
+    "logging_steps",
+    "log_gpu_util",
+    "run_name",
+    "resume_from_checkpoint",
+)
 
 
 @dataclass(frozen=True)
@@ -52,8 +65,6 @@ class Run:
     sft: dict[str, Any]  # upstream SFT settings; output_dir is the run directory
     data: Path
     tokens_per_update: int
-    on_oom: str
-    max_downshifts: int
     fixed_batch: bool = False
 
     @property
@@ -69,10 +80,6 @@ class Run:
         """(microbatch, gradient accumulation)."""
         return self.sft["per_device_train_batch_size"], self.sft["gradient_accumulation_steps"]
 
-    def with_batch(self, microbatch: int, grad_accum: int) -> Run:
-        sft = {**self.sft, "per_device_train_batch_size": microbatch, "gradient_accumulation_steps": grad_accum}
-        return replace(self, sft=sft)
-
 
 def grad_accum(tokens_per_update: int, seq_len: int, gpus: int, microbatch: int) -> int:
     """The accumulation that makes microbatch x accumulation x seq_len x gpus equal tokens_per_update."""
@@ -83,10 +90,6 @@ def grad_accum(tokens_per_update: int, seq_len: int, gpus: int, microbatch: int)
             f"x {seq_len} tokens x {gpus} GPU(s)"
         )
     return rows // microbatch
-
-
-def shard_files(data: Path, split: str) -> list[Path]:
-    return sorted(Path(data).glob(f"{split}-*.bin"))
 
 
 def _expand(value: Any) -> Any:
@@ -117,7 +120,7 @@ def load(path: Path, *, stage: str | None = None, microbatch: int | None = None)
     if stage is not None and stage not in stages:
         raise ValueError(f"{path}: no stage {stage!r}; stages: {sorted(stages)}")
     overrides = dict(stages[stage] or {}) if stage is not None else {}
-    fixed_batch = overrides.pop("fixed_batch", False)  # the only key of STAGE_KEYS
+    stage_tlc = {key: overrides.pop(key) for key in STAGE_KEYS if key in overrides}
     if overrides.keys() & {"tlc", *FORBIDDEN}:
         raise ValueError(f"{path}: stage {stage!r} sets {sorted(overrides.keys() & {'tlc', *FORBIDDEN})}")
     sft.update(overrides)
@@ -143,18 +146,24 @@ def load(path: Path, *, stage: str | None = None, microbatch: int | None = None)
         sft=sft,
         data=Path(tlc["data"]),
         tokens_per_update=tlc["tokens_per_update"],
-        on_oom=tlc["on_oom"],
-        max_downshifts=tlc["max_downshifts"],
-        fixed_batch=fixed_batch,
+        fixed_batch=bool(stage_tlc.get("fixed_batch", False)),
     )
 
 
-def manifest(data: Path) -> dict[str, Any]:
-    return json.loads((Path(data) / MANIFEST_FILE).read_text(encoding="utf-8"))
+def settings(run: Run) -> dict[str, Any]:
+    """What the training trajectory of `run` depends on besides the model and data: the SFT settings other than
+    RESUMABLE, the schedule length (None for a constant learning rate) and the TLC batch settings."""
+    constant = run.sft.get("lr_scheduler_type") == "constant"
+    return {
+        **{key: value for key, value in sorted(run.sft.items()) if key not in RESUMABLE},
+        "schedule_total_steps": None if constant else run.sft.get("max_steps"),
+        "tokens_per_update": run.tokens_per_update,
+        "fixed_batch": run.fixed_batch,
+    }
 
 
-def _positive_int(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+def settings_sha256(values: Mapping[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(values, sort_keys=True, default=str).encode()).hexdigest()
 
 
 def problems(run: Run) -> list[str]:
@@ -162,12 +171,8 @@ def problems(run: Run) -> list[str]:
     sft, out = run.sft, []
     out += [f"{key} is not used by TLC runs; remove it" for key in FORBIDDEN if key in sft]
     out += [f"{key} must be {value}" for key, value in FIXED.items() if sft.get(key) is not value]
-    if not _positive_int(sft.get("max_steps")):
+    if not positive_int(sft.get("max_steps")):
         out.append("max_steps must be a positive integer: every run has a fixed length")
-    if run.on_oom not in ON_OOM:
-        out.append(f"tlc.on_oom must be one of {ON_OOM}, got {run.on_oom!r}")
-    if not (isinstance(run.max_downshifts, int) and run.max_downshifts >= 0):
-        out.append(f"tlc.max_downshifts must be a non-negative integer, got {run.max_downshifts!r}")
     microbatch, accum = run.batch
     seq_len, gpus = sft["sequence_len"], sft["gpus"]
     if microbatch * accum * seq_len * gpus != run.tokens_per_update:

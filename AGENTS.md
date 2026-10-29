@@ -9,7 +9,7 @@ Maintainers: start at [fork/README.md](fork/README.md). 维护者请从 [fork/RE
 1. fork 自有文件放在 `fork/` 下，例外只能是 `fork/patches/ledger.toml` 的 `[owned]` 中列出的路径。
 2. 对上游文件的每一处修改都属于 ledger 中的一个 topic（`[[topic]]`）；增删此类修改的提交同时更新 ledger。提交前运行 `fork/dev map` 和 `fork/dev check`（fork CI 的 `check` job 运行同样的检查）。
 3. 同步上游只用 `fork/dev sync`：merge，不 rebase，也不用 GitHub 的 “Sync fork”。
-4. 实验代码只在 `fork/` 下的隔离虚拟环境中运行：实验训练器 `fork/experimental` 用 `.venv-experimental`（不含原生扩展）；TLC 包 `fork/tlc` 需要原生训练器，以 editable 方式装进带原生构建的 `.venv-tlc`；TLC 的纯 PyTorch 原型 `fork/tlc/prototypes` 不打包，在 `.venv-experimental` 或任一 CPU torch 环境中运行。它们的测试用 `fork/dev test experimental` 和 `fork/dev test tlc`（CPU，不需要原生扩展）。不要在仓库根目录执行 `uv run` 或 `uv sync`。
+4. 实验代码只在 `fork/` 下的隔离虚拟环境中运行（各环境见 [fork/README.md 的“首次准备环境”](fork/README.md#首次准备环境)）；只从检出目录导入、不安装任何包的 CPU 测试可以用 `FORK_PY` 指定的解释器（默认根目录的 `.venv`）。不要在仓库根目录执行 `uv run` 或 `uv sync`。
 
 ## 第一准则：模块化与可维护性
 

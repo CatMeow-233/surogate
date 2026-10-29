@@ -1,11 +1,13 @@
 """TLC's tokenizer, a joint English + Python byte-level BPE, and its consistency check against the native one.
 
-- Pre-tokenization: one of PRETOKENIZERS, the candidates of v0.7 §3.5, then the byte-level mapping. The default,
-  "qwen2", is Qwen2's split pattern: GPT-2's family with the Unicode classes \\p{L} and \\p{N}, and every digit a
-  piece of its own, so numbers are spelt digit by digit. For a model_type it does not know, such as "tlc", the
-  native tokenizer (csrc/src/tokenizer) reads the pattern from tokenizer.json, or uses GPT-2's when there is none
-  ("gpt2"). It has hand-written splitters for these two patterns and runs any other one, "python" included,
-  through its std::regex fallback. There is no normaliser, so decode(encode(text)) == text.
+- Pre-tokenization: one of PRETOKENIZERS, then the byte-level mapping. The choice is open (docs/data.md: Tokenizer):
+  "gpt2" and "python" are regex candidates of the experiment notebook (GPT-2's pattern, and an identifier-aware
+  pattern after its pyaware2 with Unicode letter classes); "qwen2", the default, is Qwen2's split pattern, GPT-2's
+  family with the Unicode classes \\p{L} and \\p{N} and every digit a piece of its own, the regex the teacher-led
+  training memo pairs with its Qwen-subset vocabulary. For a model_type it does not know, such as "tlc", the native
+  tokenizer (csrc/src/tokenizer) reads the pattern from tokenizer.json, or uses GPT-2's when there is none. It has
+  hand-written splitters for the qwen2 and GPT-2 patterns and runs any other one, "python" included, through its
+  std::regex fallback. There is no normaliser, so decode(encode(text)) == text.
 - Special tokens, ids 0-4: <|pad|>, <|bos|>, <|eos|>, <|code_start|>, <|code_end|>; the pad, bos and eos ids of
   hf.default_config() are these.
 - The chat template renders <|bos|>, the message contents, then <|eos|> unless a generation prompt is asked
@@ -13,7 +15,7 @@
 
 The tokenizer is trained on the train split of a corpus spec (surogate_tlc.data.corpus), so validation documents
 stay unseen. compare() runs texts through this tokenizer and a native one; on the GPU host the native one is
-surogate._surogate.Tokenizer (README: G0).
+surogate._surogate.Tokenizer (docs/runbook.md: G0).
 """
 
 from __future__ import annotations
@@ -29,8 +31,8 @@ from typing import Any
 from tokenizers import Regex, Tokenizer, decoders, models, pre_tokenizers, processors, trainers
 
 from .. import hf
-from ..modeldir import dump_json
-from .corpus import RULES, Corpus, decontam_record, documents, file_sha256, load_corpus, provenance, sample, split_of
+from ..files import dump_json, file_sha256
+from .corpus import RULES, Corpus, decontam_record, documents, load_corpus, provenance, sample, split_of
 
 PAD, BOS, EOS, CODE_START, CODE_END = SPECIAL_TOKENS = (
     "<|pad|>",
@@ -40,9 +42,9 @@ PAD, BOS, EOS, CODE_START, CODE_END = SPECIAL_TOKENS = (
     "<|code_end|>",
 )
 VOCAB_SIZE = 16384
-# Pre-tokenizer candidates (v0.7 §3.5) by name: a split pattern, or None for the GPT-2 regex built into the
-# byte-level step. "qwen2" is GPT-2's family with single digits; "python" keeps identifiers (with "_") whole and
-# common operators together, after pyaware2, with Unicode letter and digit classes.
+# Pre-tokenizer candidates by name: a split pattern, or None for the GPT-2 regex built into the byte-level step.
+# "qwen2" is GPT-2's family with single digits; "python" keeps identifiers (with "_") whole and common operators
+# together, after the notebook's pyaware2, with Unicode letter and digit classes.
 PRETOKENIZERS = {
     "qwen2": (
         r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}"
@@ -259,10 +261,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(json.dumps({"tokenizer": str(out), "sha256": tokenizer_sha256(out)}))
         return 0
-    from surogate._surogate import Tokenizer as NativeTokenizer
+    from ..native import native_tokenizer
 
     texts = [*EDGE_CASES, *(doc.text for doc in sample(load_corpus(args.corpus), args.limit))]
-    problems = compare(args.model_dir, texts, NativeTokenizer.from_pretrained(str(args.model_dir)))
+    problems = compare(args.model_dir, texts, native_tokenizer(args.model_dir))
     print("\n".join(problems) if problems else f"consistent on {len(texts)} texts")
     return 1 if problems else 0
 

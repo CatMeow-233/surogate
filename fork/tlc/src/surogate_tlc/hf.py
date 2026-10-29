@@ -1,12 +1,13 @@
 """The config.json contract of P0 rows: the TLC schema, its transformers class and the checks.
 
 The native trainer reads config.json itself and accepts several wrong configs without an error (a missing
-head count, a partial GDN geometry, a list-valued layer pattern), so every fork entry point checks a config
-with check_config() before it builds or loads a model.
+head count, a list-valued layer pattern), and the DSL fails late on others (a missing norm epsilon), so every fork
+entry point checks a config with check_config() before it builds or loads a model.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from importlib import resources
 from typing import Any
@@ -19,7 +20,7 @@ __all__ = [
     "config_problems",
     "configuration_source",
     "default_config",
-    "is_tlc",
+    "positive_int",
     "row_config",
 ]
 
@@ -27,14 +28,15 @@ ARCHITECTURE = "TLCForCausalLM"
 MODEL_TYPE = TLCConfig.model_type
 CONFIGURATION_FILE = "configuration_tlc.py"
 AUTO_MAP = {"AutoConfig": "configuration_tlc.TLCConfig"}
+# The one context length P0 trains and checks (rows of the shards, max_position_embeddings, the tokenizer's
+# model_max_length). Formal training at 2048 is an open owner decision; it changes this constant.
 CONTEXT_LENGTH = 512
 
-# tlc_layer_pattern alphabet. A GDN layer kind added later must require every GDN_KEYS entry: without them the
-# GDN kernel falls back to the attention geometry and compiles anyway.
+# tlc_layer_pattern alphabet. A GDN layer kind (a later phase) must require all four linear_* geometry keys: without
+# them the GDN kernel falls back to the attention geometry and compiles anyway.
 LAYER_KINDS = {"M": "mamba", "A": "attention"}
 MAMBA_KEYS = ("mamba_num_heads", "mamba_head_dim", "ssm_state_size", "n_groups", "conv_kernel", "chunk_size")
 ATTENTION_KEYS = ("num_attention_heads", "num_key_value_heads", "head_dim")
-GDN_KEYS = ("linear_num_key_heads", "linear_num_value_heads", "linear_key_head_dim", "linear_value_head_dim")
 TOKEN_ID_KEYS = ("bos_token_id", "eos_token_id", "pad_token_id")
 # true: layer 1 is traced as model-level ops ahead of the layer stack (the A0-split row). Absent means false.
 SPLIT_KEY = "tlc_split_first_layer"
@@ -65,12 +67,8 @@ def configuration_source() -> str:
     return resources.files(__package__).joinpath(CONFIGURATION_FILE).read_text(encoding="utf-8")
 
 
-def is_tlc(cfg: Mapping[str, Any]) -> bool:
-    return cfg.get("model_type") == MODEL_TYPE or ARCHITECTURE in (cfg.get("architectures") or ())
-
-
 def default_config(**overrides: Any) -> dict[str, Any]:
-    """A0 as TLC v0.6 proposes it: 12 x 384, SwiGLU 1024, vocabulary 16384, context 512, MAMBA_GEOMETRY.
+    """A0: 12 layers of width 384, SwiGLU 1024, vocabulary 16384, context CONTEXT_LENGTH, MAMBA_GEOMETRY.
 
     The special token ids must match the tokenizer; check_model_dir() compares them.
     """
@@ -112,38 +110,12 @@ def row_config(row: str, **overrides: Any) -> dict[str, Any]:
     return cfg
 
 
-def _positive_int(value: Any) -> bool:
+def positive_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
-def _common_problems(cfg: Mapping[str, Any]) -> list[str]:
-    """Rules for every P0 row, TLC or not."""
-    problems = []
-    for key in ("vocab_size", "hidden_size", "num_hidden_layers", "intermediate_size"):
-        if not _positive_int(cfg.get(key)):
-            problems.append(f"{key} must be a positive integer, got {cfg.get(key)!r}")
-    if cfg.get("max_position_embeddings") != CONTEXT_LENGTH:
-        problems.append(f"max_position_embeddings must be {CONTEXT_LENGTH}, got {cfg.get('max_position_embeddings')!r}")
-    if not isinstance(cfg.get("tie_word_embeddings"), bool):
-        problems.append("tie_word_embeddings must be given as true or false")
-    vocab = cfg.get("vocab_size")
-    for key in TOKEN_ID_KEYS:
-        value = cfg.get(key)
-        if not (isinstance(value, int) and not isinstance(value, bool) and value >= 0):
-            problems.append(f"{key} must be a non-negative integer, got {value!r}")
-        elif _positive_int(vocab) and value >= vocab:
-            problems.append(f"{key}={value} is outside the vocabulary (vocab_size={vocab})")
-    # The native head_size() divides by num_attention_heads when head_dim is 0, attention layers or not.
-    if not (_positive_int(cfg.get("num_attention_heads")) or _positive_int(cfg.get("head_dim"))):
-        problems.append("num_attention_heads or head_dim must be positive, even without attention layers")
-    gdn = [key for key in GDN_KEYS if key in cfg]
-    if gdn and len(gdn) != len(GDN_KEYS):
-        missing = sorted(set(GDN_KEYS) - set(gdn))
-        problems.append(f"a GDN geometry needs all of {', '.join(GDN_KEYS)}; missing {', '.join(missing)}")
-    return problems
-
-
-def _tlc_problems(cfg: Mapping[str, Any]) -> list[str]:
+def config_problems(cfg: Mapping[str, Any]) -> list[str]:
+    """Every rule `cfg` breaks; [] for a config.json every fork entry point accepts."""
     problems = []
     if cfg.get("architectures") != [ARCHITECTURE]:
         problems.append(f"architectures must be [{ARCHITECTURE!r}], got {cfg.get('architectures')!r}")
@@ -151,6 +123,27 @@ def _tlc_problems(cfg: Mapping[str, Any]) -> list[str]:
         problems.append(f"model_type must be {MODEL_TYPE!r}, got {cfg.get('model_type')!r}")
     if cfg.get("auto_map") != AUTO_MAP:
         problems.append(f"auto_map must be {AUTO_MAP!r}, so that a process without the fork can read the config")
+    for key in ("vocab_size", "hidden_size", "num_hidden_layers", "intermediate_size"):
+        if not positive_int(cfg.get(key)):
+            problems.append(f"{key} must be a positive integer, got {cfg.get(key)!r}")
+    context = cfg.get("max_position_embeddings")
+    if not (positive_int(context) and context == CONTEXT_LENGTH):
+        problems.append(f"max_position_embeddings must be the integer {CONTEXT_LENGTH}, got {context!r}")
+    eps = cfg.get("rms_norm_eps")
+    if not (isinstance(eps, int | float) and not isinstance(eps, bool) and 0 < eps < math.inf):
+        problems.append(f"rms_norm_eps must be a positive number, got {eps!r}")
+    if not isinstance(cfg.get("tie_word_embeddings"), bool):
+        problems.append("tie_word_embeddings must be given as true or false")
+    vocab = cfg.get("vocab_size")
+    for key in TOKEN_ID_KEYS:
+        value = cfg.get(key)
+        if not (isinstance(value, int) and not isinstance(value, bool) and value >= 0):
+            problems.append(f"{key} must be a non-negative integer, got {value!r}")
+        elif positive_int(vocab) and value >= vocab:
+            problems.append(f"{key}={value} is outside the vocabulary (vocab_size={vocab})")
+    # The native head_size() divides by num_attention_heads when head_dim is 0, attention layers or not.
+    if not (positive_int(cfg.get("num_attention_heads")) or positive_int(cfg.get("head_dim"))):
+        problems.append("num_attention_heads or head_dim must be positive, even without attention layers")
     pattern = cfg.get("tlc_layer_pattern")
     if not isinstance(pattern, str):
         problems.append(f"tlc_layer_pattern must be a string (the DSL drops list attributes), got {pattern!r}")
@@ -169,24 +162,16 @@ def _tlc_problems(cfg: Mapping[str, Any]) -> list[str]:
         problems.append(f"{SPLIT_KEY} needs a Mamba first layer and at least one more layer, got {pattern!r}")
     if "M" in pattern:
         problems += [
-            f"{key} must be given as a positive integer" for key in MAMBA_KEYS if not _positive_int(cfg.get(key))
+            f"{key} must be given as a positive integer" for key in MAMBA_KEYS if not positive_int(cfg.get(key))
         ]
         heads, groups = cfg.get("mamba_num_heads"), cfg.get("n_groups")
-        if _positive_int(heads) and _positive_int(groups) and heads % groups:
+        if positive_int(heads) and positive_int(groups) and heads % groups:
             problems.append(f"mamba_num_heads={heads} is not a multiple of n_groups={groups}")
     if "A" in pattern:
-        problems += [f"{key} must be a positive integer" for key in ATTENTION_KEYS if not _positive_int(cfg.get(key))]
+        problems += [f"{key} must be a positive integer" for key in ATTENTION_KEYS if not positive_int(cfg.get(key))]
         q, kv = cfg.get("num_attention_heads"), cfg.get("num_key_value_heads")
-        if _positive_int(q) and _positive_int(kv) and q % kv:
+        if positive_int(q) and positive_int(kv) and q % kv:
             problems.append(f"num_attention_heads={q} is not a multiple of num_key_value_heads={kv}")
-    return problems
-
-
-def config_problems(cfg: Mapping[str, Any]) -> list[str]:
-    """Every rule `cfg` breaks; the TLC rules apply when it names the TLC architecture or model type."""
-    problems = _common_problems(cfg)
-    if is_tlc(cfg):
-        problems += _tlc_problems(cfg)
     return problems
 
 

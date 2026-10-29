@@ -1,17 +1,18 @@
-"""The eval command's loss (README: 评测), with a stand-in for the native scorer: every served row of the split is
-scored once, the loss averages over valid targets, and the unigram baseline counts the train split's targets."""
+"""The eval command's loss (docs/training.md: 评测), with a stand-in for the native scorer: every served row of the
+split is scored once, the loss averages over valid targets (also per source and per kind), and the unigram baseline
+counts the train split's targets."""
 
 import math
 
 import numpy as np
 import pytest
 from surogate_tlc.data import shards
+from surogate_tlc.data.shards import manifest, shard_files
 from surogate_tlc.eval import loss
-from surogate_tlc.train import config
 
 
 def _rows(data, split):
-    parts = [shards.served_rows(shards.read_shard(p), 64) for p in config.shard_files(data, split)]
+    parts = [shards.served_rows(shards.read_shard(p), 64) for p in shard_files(data, split)]
     return [np.concatenate(arrays) for arrays in zip(*parts, strict=True)]
 
 
@@ -42,12 +43,36 @@ def test_evaluate_scores_each_served_row_once(small_model, shard_dirs, batch, ma
     assert np.array_equal(scored, inputs) and result["rows"] == len(inputs)
     assert result["valid_targets"] == int((targets != -100).sum())
     if max_rows is None:
-        assert result["valid_targets"] == config.manifest(data)["splits"]["val"]["valid_targets"]
+        assert result["valid_targets"] == manifest(data)["splits"]["val"]["valid_targets"]
     # The filled rows of the last batch carry no targets.
     assert (np.concatenate([t for _, t in seen])[len(inputs) :] == -100).all()
     assert result["loss"] == pytest.approx(math.log(320)) and result["unigram_loss"] < result["loss"]
     assert result["below_unigram"] is False
     assert result["data_manifest_sha256"] == shards.manifest_sha256(data)
+    # Per source: the row ranges of the manifest; a uniform scorer gives every source the same loss.
+    by_source = result["by_source"]
+    assert sum(v["valid_targets"] for v in by_source.values()) == result["valid_targets"]
+    assert all(v["loss"] == pytest.approx(math.log(320)) for v in by_source.values())
+    assert set(result["by_kind"]) <= {"code", "text"}
+    if max_rows is None:
+        val = {s["name"]: s["real_tokens"]["val"] - s["rows"]["val"] for s in manifest(data)["sources"]}
+        assert {name: v["valid_targets"] for name, v in by_source.items()} == {n: c for n, c in val.items() if c}
+
+
+def test_row_sources_follow_the_documents(shard_dirs, corpus_spec, trained_tokenizer):
+    """The manifest's per-shard source ranges give each served row the source of the document it holds."""
+    from surogate_tlc.data import corpus, tokenizer
+
+    data, c = shard_dirs[64], corpus.load_corpus(corpus_spec)
+    tok = tokenizer.load(trained_tokenizer, ordinary=True)
+    special = tokenizer.special_ids(tok)
+    expected = [
+        doc.source.name
+        for doc, ids in shards.encode(tok, corpus.documents(c), special)
+        if corpus.split_of(c, doc) == "val"
+        for _ in shards.windows(ids, 64)
+    ]
+    assert loss._row_sources(manifest(data), shard_files(data, "val")) == expected
 
 
 def test_evaluate_refuses_another_tokenizer(tmp_path, tokenizer_dir, shard_dirs):
@@ -58,3 +83,17 @@ def test_evaluate_refuses_another_tokenizer(tmp_path, tokenizer_dir, shard_dirs)
     init.init_model_dir(other)
     with pytest.raises(ValueError, match="another tokenizer"):
         loss.evaluate(other, shard_dirs[64], scorer=lambda *a: None)
+
+
+def test_greedy_stops_at_a_stop_id_or_the_row_end():
+    from surogate_tlc.eval.samples import greedy
+
+    def next_position(inputs, last):  # the next token is the next position's index
+        logits = np.zeros((inputs.shape[0], 16), np.float32)
+        logits[np.arange(len(last)), (last + 1) % 16] = 1
+        return logits
+
+    kwargs = {"batch": 1, "pad_id": 0, "stop_ids": {3}, "max_new": 5}
+    assert greedy([[1, 2], [1]], next_position, seq_len=8, **kwargs) == [[2, 3], [1, 2, 3]]
+    assert greedy([[1, 2], [1]], next_position, seq_len=3, **kwargs) == [[2], [1, 2]]
+    assert greedy([[1, 2]], next_position, seq_len=8, **{**kwargs, "max_new": 1}) == [[2]]
