@@ -46,7 +46,7 @@ TLC 包 `fork/tlc` 在 GPU 主机上另用带原生构建的 `fork/.venv-tlc`，
 | 命令行 | | `surogate/cli` | 命令 `surogate` = `surogate.cli.main:cli_main`（根目录 `pyproject.toml` 的 `[project]` 表中的 `scripts`），子命令表 `COMMAND_MAPPING` 在 `surogate/cli/main.py` |
 | fork：GRPO 补丁调用的代码 | | `surogate/_fork`（随原生 wheel 发布） | 由 `surogate/grpo/trainer.py` 在函数内导入（ledger T6、T7） |
 | fork：原生代码 | `fork/native`：CMake 挂接、头文件、C++ 测试 | | `csrc/CMakeLists.txt` 中紧跟 `surogate-common` 的 `target_link_libraries` 之后的两行挂接点，见 [native/README.md](native/README.md) |
-| TLC 实验 | 无 | 独立 fork 包 `fork/tlc`：代码 `fork/tlc/src/surogate_tlc`，测试 `fork/tlc/tests/cpu` 与 `fork/tlc/tests/gpu`，纯 PyTorch 原型 `fork/tlc/prototypes`（不打包），打包 `fork/tlc/pyproject.toml`（不发布，也不进原生 wheel） | editable 安装进 `fork/.venv-tlc` 后 `import surogate_tlc`；CPU 测试 `fork/dev test tlc`；说明与 GPU 运行手册见 [tlc/README.md](tlc/README.md) |
+| TLC 实验 | 无 | 独立 fork 包 `fork/tlc`：代码 `fork/tlc/src/surogate_tlc`，测试 `fork/tlc/tests/cpu` 与 `fork/tlc/tests/gpu`，纯 PyTorch 原型 `fork/tlc/prototypes`（不打包），打包 `fork/tlc/pyproject.toml`（不发布，也不进原生 wheel） | editable 安装进 `fork/.venv-tlc` 后运行 `python -m surogate_tlc <子命令>`（训练、评测、模型目录与数据），示例配置在 `fork/tlc/examples`；CPU 测试 `fork/dev test tlc`；说明与 GPU 运行手册见 [tlc/README.md](tlc/README.md) |
 | 实验训练 | 无 | 独立项目 `fork/experimental`：代码 `fork/experimental/src/surogate/experimental`，测试 `fork/experimental/tests`，文档 `fork/experimental/docs`，示例 `fork/experimental/examples`，打包 `fork/experimental/pyproject.toml` 与 `fork/experimental/build_release.py` | `python -m surogate.experimental.train` 或脚本 `surogate-experimental-train`（`fork/experimental/pyproject.toml` 的 `[project.scripts]`）；从检出目录运行用 `fork/dev exp-train`；发布工作流 `.github/workflows/experimental-release.yml` |
 
 更细的位置由 `fork/tools/gen_maps.py` 从当前代码生成：
@@ -99,7 +99,7 @@ GRPO 补丁（T6–T8）调用的 fork 代码位于 `surogate/_fork`，上游文
 - [docs/performance.md](docs/performance.md)：fork 的性能改动、测量方法和开关，包括 LoRA 融合输入梯度和 GRPO 周期计时指标。
 - [native/README.md](native/README.md)：fork 原生代码（C++ 与 CMake）的目录、`csrc/CMakeLists.txt` 中两行挂接点的约定，以及 OpenMP 接线测试的运行方法。
 - [docs/upstream-errata.md](docs/upstream-errata.md)：上游已知的失效引用、过时配置和测试缺陷；fork 不修改这些上游文件，只记录绕行方法。
-- [tlc/README.md](tlc/README.md)：TLC 包的目录、模型目录与 checkpoint 契约、初始化与 Mamba-2 数值参照、语料 spec、tokenizer 与数据 shard、OOM 策略、GPU 预算和 RTX 5090 运行手册。
+- [tlc/README.md](tlc/README.md)：TLC 包的目录、命令行、模型目录与 checkpoint 契约、初始化与 Mamba-2 数值参照、语料 spec、tokenizer 与数据 shard、训练驱动（运行配置、OOM 策略、运行记录）、评测、GPU 预算和 RTX 5090 运行手册。
 - [experimental/README.md](experimental/README.md) 与 [experimental/docs/training.md](experimental/docs/training.md)：实验训练器的安装、配置和发布产物。
 
 ## 规则

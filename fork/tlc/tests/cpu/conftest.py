@@ -163,3 +163,48 @@ def fresh_python(tmp_path):
         return result.stdout
 
     return run
+
+
+@pytest.fixture(scope="session")
+def small_model(tmp_path_factory, trained_tokenizer) -> Path:
+    """A two-layer A0 model directory with initial weights and the fixture corpus's tokenizer."""
+    from surogate_tlc import hf, init, modeldir
+
+    cfg = hf.row_config("A0", num_hidden_layers=2, tlc_layer_pattern="MM", chunk_size=16, vocab_size=320)
+    path = modeldir.write_model_dir(tmp_path_factory.mktemp("small") / "model", cfg, trained_tokenizer, init_seed=0)
+    init.init_model_dir(path)
+    return path
+
+
+@pytest.fixture(scope="session")
+def shard_dirs(tmp_path_factory, corpus_spec, trained_tokenizer) -> dict[int, Path]:
+    """Shard directories of the fixture corpus with rows of 64 and of 512 tokens, keyed by row length."""
+    from surogate_tlc.data import corpus, shards
+
+    root = tmp_path_factory.mktemp("shards")
+    for seq_len in (64, 512):
+        shards.build_shards(corpus.load_corpus(corpus_spec), trained_tokenizer, root / str(seq_len), seq_len=seq_len)
+    return {seq_len: root / str(seq_len) for seq_len in (64, 512)}
+
+
+@pytest.fixture
+def run_yaml(tmp_path, small_model, shard_dirs):
+    """write(seq_len=512, tlc=None, **sft) -> a run configuration for small_model; sft keys override the defaults
+    (32 x 512 tokens per microbatch, 10 steps), `tlc` entries the tlc table."""
+    import yaml
+
+    def write(seq_len: int = 512, tlc: dict | None = None, **sft) -> Path:
+        body = {
+            "model": str(small_model),
+            "output_dir": str(tmp_path / "runs"),
+            "sequence_len": seq_len,
+            "per_device_train_batch_size": 32,
+            "max_steps": 10,
+            **sft,
+            "tlc": {"data": str(shard_dirs[seq_len]), **(tlc or {})},
+        }
+        path = tmp_path / "run.yaml"
+        path.write_text(yaml.safe_dump(body), encoding="utf-8")
+        return path
+
+    return write

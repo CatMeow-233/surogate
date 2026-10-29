@@ -10,6 +10,7 @@ P0 不修改任何上游文件：TLC 模型在 import 时注册进上游 DSL，�
 |---|---|
 | [pyproject.toml](pyproject.toml) | 包 `surogate-tlc`（src 布局），不发布。运行时需要本仓库构建的原生 `surogate`（训练扩展 `_surogate`）；它故意不写进依赖，免得解析器从索引装上另一个同名发行包 |
 | [src/surogate_tlc/](src/surogate_tlc/) | 包代码。导入它不需要原生扩展 |
+| [examples/](examples/) | 运行配置：A0、A1、A1h 各一个，含 smoke、overfit、pilot 三个阶段 |
 | [tests/cpu/](tests/cpu/) | CPU 测试，用 `fork/dev test tlc` 运行 |
 | [tests/gpu/](tests/gpu/) | GPU 测试，在 GPU 主机上按下文“运行手册”运行；没有 CUDA 时全部跳过 |
 | [prototypes/](prototypes/) | 纯 PyTorch 原型与数值参照，不打包 |
@@ -19,7 +20,7 @@ TLC 代码不进任何其他 wheel：根目录 `pyproject.toml` 的原生 wheel 
 ## 环境
 
 - CPU 测试：`fork/dev test tlc` 用 `FORK_PY` 指定的解释器（默认 `.venv/bin/python`），需要 CPU torch 和 `fork/tools/requirements-cpu-lane.txt`，准备方法见 [fork/README.md 的“首次准备环境”](../README.md#首次准备环境)。测试把仓库根目录和 `fork/tlc/src` 放在 `sys.path` 最前面，只测检出目录中的代码，不在仓库中写入文件。
-- GPU 主机（RTX 5090）：专用环境 `fork/.venv-tlc` 装有原生构建，本包以 editable 方式装入。创建步骤写在下文 G0 中。
+- GPU 主机（RTX 5090）：专用环境 `fork/.venv-tlc` 的依赖与根目录 `.venv` 相同，本包以 editable 方式装入；`surogate` 经一个 `.pth` 文件从本检出导入，原生扩展就是 `fork/dev build train` 复制进 `surogate/` 的那一份。创建步骤见下文 G0。
 - 原型：在 `fork/.venv-experimental` 或任一装有 CPU torch 的环境中运行，见 [prototypes/README.md](prototypes/README.md)。
 
 ## 注册
@@ -30,6 +31,20 @@ TLC 代码不进任何其他 wheel：根目录 `pyproject.toml` 的原生 wheel 
 - 把 `TLCConfig` 注册为 `model_type="tlc"` 的 `AutoConfig`。注册后它优先于目录中的 `auto_map`；不注册时，带 `auto_map` 的目录照样能被读取。
 
 DSL 类名一律带 `TLC` 前缀：注册表按类名做键，同名类会悄悄覆盖上游的定义。CPU 测试检查 `register()` 只新增 `TLCModel`，不替换任何上游条目。
+
+## 命令行
+
+在 GPU 主机上用 `fork/.venv-tlc/bin/python -m surogate_tlc 子命令 ...` 运行（`surogate_tlc.__main__`），`--help` 列出各子命令的参数。
+
+| 子命令 | 作用 |
+|---|---|
+| `init ROW OUT --tokenizer DIR --seed N` | 写出 P0 一行（`A0`、`A0-split`、`A1`、`A1h`）的模型目录及初始权重，即 `write_model_dir()` 加 `init_model_dir()`。`OUT` 必须不存在或为空 |
+| `train-tokenizer ...` | 即 `python -m surogate_tlc.data.tokenizer train ...`，参数相同 |
+| `build-data ...` | 即 `python -m surogate_tlc.data.shards ...`，参数相同 |
+| `train CONFIG [--stage S] [--microbatch B]` | 训练一个运行配置，见下文“训练驱动”。退出码：0 完成；1 训练失败，失败报告在运行记录中；2 配置有问题，没有开始训练 |
+| `eval MODEL DATA [--split val] [--batch 32] [--max-rows N] [--out FILE]` | teacher-forced 的 loss 与 unigram 基线，见下文“评测” |
+| `export CHECKPOINT SOURCE OUT` | 从一个 step 目录导出干净的模型目录（`surogate_tlc.checkpoint.export`） |
+| 其他命令 | 先 `register()`，再交给上游的 `surogate` 命令行，例如 `python -m surogate_tlc sft CONFIG`。上游在同一进程中运行子命令模块，所以它看得到 TLC 模型。上游的 `sft` 会自己 tokenize，并经过 `train_with_oom_recovery`，所以 TLC 的训练用 `train` |
 
 ## P0 的行
 
@@ -86,8 +101,8 @@ TLC 行另外要满足：
 原生训练器把 checkpoint 存到 `<checkpoint_dir>/step_<8 位步数>/`，最后写 `checkpoint.json`。其中的 config.json 只有通用键，没有 `auto_map`、TLC 自有的键和 tokenizer；训练结束时的导出只从源目录复制一份固定的文件清单，不含 `configuration_tlc.py` 和 `tlc_meta.json`。所以每次保存和导出之后都要收尾，`surogate_tlc.checkpoint` 提供：
 
 - `finalize_dir(target, source, meta=None)`：把源模型目录的 config.json、`configuration_tlc.py`、tokenizer 文件和 `tlc_meta.json`（并入 `meta`）复制进 `target`，原生写的 config.json 被源目录的完整版本替换。`target` 中原生写的结构键（架构、模型类型、词表、宽度、层数、FFN 宽度）与源目录不一致时拒绝执行，以免配错源目录；A0-split 的层数允许少 1，因为原生 config 的层数取自 DSL，而 DSL 的层数不含模型级的第 1 层。可重复执行；`tlc_meta.json` 最后写入，中途失败的目录通不过 `check_model_dir()`。
-- `finalize_checkpoints(checkpoint_dir, source)`：对每个已写完 `checkpoint.json` 的 step 目录执行 `finalize_dir`，`tlc_meta.json` 记下 `step`；还在写的目录不动。
-- `export(checkpoint, source, out)`：从一个 step 目录导出干净的模型目录，只带 `model.safetensors` 和收尾文件，不带优化器状态和分片。`out` 必须不存在或为空。
+- `finalize_checkpoints(checkpoint_dir, source, meta=None)`：对每个已写完 `checkpoint.json` 的 step 目录执行 `finalize_dir`，`tlc_meta.json` 并入 `meta` 并记下 `step`；还在写的目录不动。
+- `export(checkpoint, source, out)`：从一个 step 目录导出干净的模型目录，只带 `model.safetensors` 和收尾文件，不带优化器状态和分片；step 目录已收尾时，保留其 `tlc_meta.json` 中的字段（训练驱动写入的数据与 tokenizer 的 sha256）。`out` 必须不存在或为空。
 
 规则：
 
@@ -109,7 +124,7 @@ TLC 行另外要满足：
 
 ## 初始化
 
-`surogate_tlc.init.init_model_dir(path)` 往 `write_model_dir(..., init_seed=...)` 写出的目录中写入 `model.safetensors`，种子取自 `tlc_meta.json` 的 `init_seed`；已有权重文件时拒绝执行，`init_seed` 为 null 时报错。`init_state_dict(cfg, seed=...)` 只生成张量，不写文件。
+`surogate_tlc.init.init_model_dir(path)` 往 `write_model_dir(..., init_seed=...)` 写出的目录中写入 `model.safetensors`（命令 `init` 一次做完这两步），种子取自 `tlc_meta.json` 的 `init_seed`；已有权重文件时拒绝执行，`init_seed` 为 null 时报错。`init_state_dict(cfg, seed=...)` 只生成张量，不写文件。
 
 不用原生侧的初始化：它只按参数名决定初值（bias 为 0、norm 为 1、其余服从正态分布），Mamba-2 因此从 `dt_bias=0`（每个头 dt = softplus(0) = 0.69）、`A_log≈0`（每个头 A = −1）、`D≈0` 开始，所有头衰减相同，跳连关闭。fork 改用 Mamba-2 参照实现的初始化，四行用同一套规则，A0、A1、A1h 的起点可比：
 
@@ -159,7 +174,9 @@ P0 直接依赖下列上游接口；CPU 测试钉住它们，上游改动时测�
 - `Mamba2Mixer`、`GenericMLP`、`Qwen3Block`、`HybridBlockStack` 的构造参数，以及 TLC 依赖的默认值：`Mamba2Mixer` 不 clamp dt；`GenericMLP` 默认是融合的 SwiGLU；`Qwen3Block` 默认开 QK-norm、不带 QKV bias。
 - 原生 op 名表能被解析，且多于 100 个名字。
 - `surogate.cli.main.cli_main` 用 `runpy.run_module(..., run_name="__main__", alter_sys=True)` 在同一进程中运行子命令模块，所以先 `register()` 再交给它，注册对子命令有效。
-- `SurogateTrainerWrapper(config, train_files, eval_files=None)` 与无参数的 `train()`。
+- `SurogateTrainerWrapper(config, train_files, eval_files=None)` 与无参数的 `train()`；`SFTConfig` 要由调用方执行 `__post_init__()`（上游 `TokenizeDatasets` 也是这样做的）；训练驱动和示例配置设置的每个上游键都确实被 `SFTConfig` 读取（拼错或已废弃的键会被忽略，悄悄用上默认值）。
+- 训练器在环境变量 `SUROGATE_REGRESSION_ARTIFACT` 给出路径时写出 regression artifact（loss 曲线、每步时间的分位数、峰值显存、block schema 统计）；原生训练日志是 JSON 数组，验证行带 `step` 与 `loss`。运行记录的摘要读取这些字段。
+- 原生 OOM 的形式：分配器抛出消息为 "Cuda OOM when allocating tensor ..." 的 `std::runtime_error`，activation 栈抛出 `std::bad_alloc`。`compute_logprobs(input_ids, targets, use_lora, position_ids, temperatures)` 的参数顺序。TLC 的代码不调用 `train_with_oom_recovery`。
 - `TokenizedDataFileWriter(file_name, vocab_size, masking=False, non_overlapping=False)`、`add_document(tokens, position_ids, mask=None)` 与 BIN.TOK v3 的文件头。
 - 原生 tokenizer：`tlc` 不在按架构写死正则的名单中，因此从 `tokenizer.json` 读取 split 正则（没有时用 GPT-2 的）；手写 splitter 覆盖 `qwen2` 与 GPT-2 的正则，不覆盖 `python`。
 - 原生 DataLoader 读取 non-overlapping 文件的规则：块数为 token 数 ÷ `seq_len`，目标是下一个 token，position 块紧跟 token 块，mask 位为 0 的目标与每行最后一个目标置为 −100。
@@ -230,63 +247,212 @@ python -m surogate_tlc.data.shards CORPUS.toml TOKENIZER_DIR OUT_DIR --seq-len 5
   - 窗口：超过 `seq_len` 的文档切成 `seq_len` 个 token 的窗口，相邻窗口共享一个 token，因此除文档的首个 token 外，每个 token 恰好作一次目标。每个窗口是一行，末尾用 `<|pad|>` 补齐；每行的 position 为 0..seq_len−1。
   - mask：输入位置 i 的 mask 位为 1，当且仅当它的目标（第 i+1 个 token）是同一行中的真实 token。原生 DataLoader 对 non-overlapping 文件恰好给出这些行，并把每行最后一个位置的目标置为 −100。
 - ValidTokenCount：有 n 个真实 token 的行有 n−1 个有效目标。manifest 按 shard 和按划分记录 `rows`、`tokens`、`real_tokens`、`valid_targets`（一个 epoch 中 ValidTokenCount 之和）和 `pad_fraction`；按来源记录文档数、字符数、行数、真实 token 数、train 中的 token 占比、丢弃计数和 provenance（URL、revision、license、下载日期、过滤规则，以及每个输入文件的大小与 sha256）；`rules` 列出入库与框定规则。
-- 身份：数据的身份是 `manifest.json` 的 sha256（`surogate_tlc.data.shards.manifest_sha256()`），与 `tokenizer_sha256` 一起写进每个结果行（v0.7 IMPL-08）。训练驱动要核对 shard 的 `seq_len` 等于训练配置的 `sequence_len`，manifest 中的 tokenizer sha256 等于模型目录中 `tokenizer.json` 的 sha256。
+- 身份：数据的身份是 `manifest.json` 的 sha256（`surogate_tlc.data.shards.manifest_sha256()`），与 `tokenizer_sha256` 一起写进每个结果行（v0.7 IMPL-08）。训练驱动在开始前核对 shard 的 `seq_len` 等于训练配置的 `sequence_len`，manifest 中的 tokenizer sha256 等于模型目录中 `tokenizer.json` 的 sha256。
 - 原生 DataLoader 依次读取各文件，只在文件内打乱行，所以 train 文档按 hash 分到 `--train-files` 个文件，每个文件都是各来源的随机样本。单个文件少于 2³¹ 个 token。
 - `surogate_tlc.data.shards.served_rows()` 按原生 DataLoader 的读取规则给出每行的输入、目标与 position。CPU 测试用它核对上面的窗口与 ValidTokenCount；GPU 主机上的测试核对它与原生 DataLoader 一致。本环境中用原生 `dataloader.cpp` 编译的 CPU 程序读取本机语料建出的 shard，逐行一致。
 - padding 浪费（`pad_fraction`）超过约 25% 时，再考虑实现文档复位并改用打包 shard，所有行同时切换。本机 stdlib 与仓库文档按整文件切窗时约为 4.6%。
 - 上下文：P0 用 512。v0.7 默认正式训练用 2048（O-1，待 owner 确认）：shard 用 `--seq-len 2048` 生成，模型 config 的 `max_position_embeddings` 也要改，而 `check_config` 目前要求 512。
 
-## OOM 与每次更新的 token 数
+## 训练驱动
 
-- 每次更新固定 16,384 个名义 token（microbatch B × 梯度累积 GA × 512），另行记录非 pad 的有效 token 数。
-- 不用 `train_with_oom_recovery`（`surogate/train/sft.py`）：GA ≥ 16 时它只把 B 减半、GA 不变，每次更新的 token 数悄悄减半，只留一条 warning，最多重试 10 次。驱动直接调用 `SurogateTrainerWrapper(config, train_files, eval_files).train()`（`surogate/train/trainer.py`）。
-- 遇到 OOM，按配置二选一：
-  - 默认立即失败，写 failure_report（峰值显存和实际配置）；
-  - 显式开启降档时，B 减半、GA 加倍（B × GA 不变），写入 provenance；降档次数有上限，到达上限后失败。
-- 降档只改 B 和 GA，不改架构、序列长度或每次更新的名义 token 数。
+`surogate_tlc.train.driver.train()`（命令 `train`）直接调用 `SurogateTrainerWrapper(config, train_files, eval_files).train()`（`surogate/train/trainer.py`），不经过上游的 `sft` 命令。上游 `sft` 先 tokenize 数据集，再用 `train_with_oom_recovery`（`surogate/train/sft.py`）包住训练：OOM 时它把 microbatch 减半，GA 达到 16 以后不再加倍，于是每次更新的 token 数悄悄减半，只留一条 warning。TLC 的数据是 fork 写的 shard，各行比较时每次更新的名义 token 数固定。
+
+### 运行配置
+
+运行配置是上游的 SFT 配置文件（`SFTConfig` 读取的键）加一张 `tlc` 表，由 `surogate_tlc.train.config` 读取。示例 [examples/a0.yaml](examples/a0.yaml)、[examples/a1.yaml](examples/a1.yaml)、[examples/hybrid.yaml](examples/hybrid.yaml) 分别对应 A0、A1、A1h，路径都放在环境变量 `TLC_RUNS` 之下（见运行手册）；字符串中的 `${VAR}` 从环境替换，变量未设置时报错。
+
+```yaml
+tlc:
+  data: ${TLC_RUNS}/data      # build-data 的输出目录
+  tokens_per_update: 16384    # 每次更新的名义 token = microbatch × GA × sequence_len × gpus
+  on_oom: fail                # fail 或 downshift
+  max_downshifts: 2           # downshift 时 microbatch 最多减半几次
+  stages:                     # 用 --stage 选择，覆盖 tlc 表之外的键
+    smoke: {max_steps: 10, save_steps: 5}
+    overfit: {max_steps: 100, fixed_batch: true}
+```
+
+- `gradient_accumulation_steps` 由 `tokens_per_update` 和 microbatch 推出，配置里不写；写了而且不一致就报错。示例的 microbatch 是 32 行 × 512 token、GA 为 1，不开 recompute（梯度检查点），这是 v0.7 §13 的默认值（按 v0.7 的估计，v0.6 的 2 × 16 受 kernel launch 开销限制）。`--microbatch B` 改 microbatch，GA 随之调整。
+- 运行目录是 `<output_dir>/<阶段>`，给出 `--microbatch B` 时是 `<output_dir>/<阶段>-mb<B>`，所以 microbatch 扫描中的各次运行不会接着别人的 checkpoint 训练。checkpoint、上游日志和运行记录 `tlc_run.json` 都在运行目录中。
+- 驱动替配置设定下列值，配置写了别的值就拒绝：`lora: false`、`sample_packing: false`、`row_packing: false`、`from_scratch: false`。上游默认开 LoRA 和 tokenize 期打包；`from_scratch` 会用原生初始化覆盖 fork 写的权重。
+- 不能出现的键：`datasets`、`validation_datasets`（数据只来自 `tlc.data`），`distillation`（P0 没有蒸馏），`checkpoint_dir`（上游不读它，checkpoint 总在 `output_dir` 中，写了只会误导）。`max_steps` 必须是正整数：每次运行的长度固定。
+- 训练前检查（`surogate_tlc.train.config.problems()`，有任何问题就不开始，退出码 2）：模型目录满足契约且带权重；`sequence_len` 等于 shard 的行长，且不超过 `max_position_embeddings`；manifest 中 tokenizer 的 sha256 等于模型目录中 `tokenizer.json` 的 sha256；数据目录中有 `train-*.bin`。
+- 训练文件是 `tlc.data` 中全部的 `train-*.bin`，评测文件是全部的 `val-*.bin`。阶段设 `fixed_batch: true` 时，驱动把第一个 train 文件的前 `tokens_per_update / sequence_len` 行（示例中 32 行）原样写成运行目录中的 `fixed-batch.bin`，每一步都训练这一批行，用于 100 步过拟合。
+- 每次更新中非 pad 的有效目标数（ValidTokenCount 的期望值）写进运行记录：固定 batch 时是这批行的精确值，否则按 manifest 中 train 划分的 `valid_targets / tokens` 折算。上游训练器不按步记录 ValidTokenCount。
+
+### OOM
+
+- 默认（`on_oom: fail`）：OOM 时立即失败，运行记录中写 `failure_report`：错误类型、消息与 traceback、当时的 microbatch 与 GA、显存（`torch.cuda.mem_get_info`）、最后一个 checkpoint，以及不降档的原因。
+- `on_oom: downshift`：microbatch 减半、GA 加倍，每次更新的名义 token 数不变，最多 `max_downshifts` 次；microbatch 为奇数时不降。只在运行还没有 checkpoint 时降档，因为 checkpoint 中数据加载器的位置以 microbatch 为单位，换了 microbatch 就接不上。每次降档都记进运行记录；降档不改架构、序列长度和每次更新的 token 数。
+- 识别 OOM：消息含 "out of memory" 或单词 "OOM" 的 `RuntimeError`（原生分配器的 "Cuda OOM when allocating tensor ..."，CUDA 的 out of memory），以及 `MemoryError`（原生 activation 栈的 `std::bad_alloc`）。其他错误一律直接失败。
+- 在同一进程中重试之前，驱动清除 traceback 对失败 trainer 的引用并回收内存。原生侧 OOM 之后能否在同一进程中重建 trainer，要在 GPU 上确认 [I]；上游的 `train_with_oom_recovery` 也是在同一进程中重试。
+
+### 运行记录与收尾
+
+运行记录 `tlc_run.json`：
+
+- `identity`：初始权重、config.json、tokenizer 和数据 manifest 的 sha256。运行目录中已有记录而身份不同时拒绝运行。
+- `attempts`：每次尝试的 microbatch、GA、名义 token 数、配置文件的 sha256、从哪一步恢复、环境指纹、上游日志的路径、状态，以及完成时的摘要。
+  - 环境指纹（`surogate_tlc.train.report.environment()`）：提交、工作区是否有未提交的改动、Python 与各包的版本、原生扩展的路径与 sha256、GPU 名称、计算能力、显存和驱动版本。
+  - 摘要：loss 曲线、首末 loss、验证 loss、按每步时间中位数折算的 tokens/s（名义 token，含 pad）、峰值显存、block schema 统计。驱动为每次尝试设置环境变量 `SUROGATE_REGRESSION_ARTIFACT`，上游训练器据此写出 `regression-<尝试序号>.json`；摘要取自它和上游日志。
+- `downshifts`、`status`（running、completed、failed）、`failure_report`、`data`（文件、固定 batch 的统计、每次更新的有效目标数）、`sft`（最后一次尝试实际使用的上游设置）。
+
+收尾：训练完成后，驱动对运行目录中每个完整的 step 目录执行 `finalize_checkpoints()`，再对运行目录本身（上游的最终导出）执行 `finalize_dir()`；训练失败时只收尾已有的 checkpoint。`tlc_meta.json` 另记 `tokenizer_sha256`、`data_manifest_sha256` 和 `shard_version`（shard 格式版本，即 `surogate_tlc.data.shards.SHARD_VERSION`，现为 1）。因此运行目录和其中的 step 目录都可以直接用作 `model_dir`；`export` 保留 step 目录 `tlc_meta.json` 中的这些字段。
+
+恢复：再次运行同一条命令时，上游从运行目录中最新的 checkpoint 继续（`resume_from_checkpoint: true`）。运行已有 checkpoint 时，驱动沿用最后一次尝试的 microbatch 与 GA（降档后也是如此）；配置的 microbatch 与第一次尝试不同则拒绝。
+
+`python -m surogate_tlc.train.report DIR` 把 DIR 下每个运行记录的最后一次尝试打印成一行 JSON（阶段、状态、microbatch、GA、有效目标数、降档次数、首末 loss、验证 loss、tokens/s、峰值显存），用于 G3 的记录和下文的 GPU 预算。
+
+## 评测
+
+`python -m surogate_tlc eval MODEL DATA`（`surogate_tlc.eval.loss.evaluate()`）按原生 DataLoader 的读法（`served_rows()`）取 `DATA` 的 val 划分，用原生 `compute_logprobs(use_lora=False)` 打分；loss 是有效目标上的平均负对数概率。基线是 train 划分中目标 token 的 add-one 平滑 unigram 分布下的 loss，v0.7 的 G3 要求验证 loss 低于它（输出中的 `below_unigram`）。模型目录的 tokenizer 必须与 shard 的一致。输出另有行数、有效目标数、困惑度、tokenizer 与数据 manifest 的 sha256。
+
+绑定探针、按角色分层的 loss 等 teacher-forced 指标由后续步骤加入 `surogate_tlc.eval`。P0 没有生成样例：原生 `next_token_logits` 要求 trainer 带 LoRA，TLC 的生成要等 P5-a 的 rollout server（给全量训练的 checkpoint 挂一个零初始化的 rank-1 LoRA）。
 
 ## GPU 预算
 
-G3 测出 tokens/s 之后填写。
+按 G3 的实测填写。tokens/s 取自 `python -m surogate_tlc.train.report` 的输出（名义 token，含 pad；按 `valid_targets_per_update / tokens_per_update` 可折算成有效 token）。
 
 GPU 小时 = Σ 种子数 × 名义 token 数 ÷ 实测 tokens/s × (1 + 评测与保存开销) ÷ 3600。
 
 - 关键比较至少 3 个种子，pilot 可以只用 1 个。
-- G3 在每次更新 16,384 token 不变的前提下测 microbatch 2、8、32（GA 相应为 16、4、1）；每行注明所用档位。
+- G3 在每次更新 16,384 token 不变的前提下测 microbatch 2、8、32（GA 相应为 16、4、1）；tokens/s 只在相同 microbatch 之间比较，每行注明所用档位（v0.7 §13）。
+- v0.7 的 G0.5 还要测 T = 2048；那要等 owner 确认 O-1，并放开 `check_config` 中上下文为 512 的要求。
 
 | 行 | 阶段 | 种子数 | 名义 token（每个种子） | B × GA | 实测 tokens/s | 评测与保存开销 | GPU 小时 |
 |---|---|---|---|---|---|---|---|
-| A0 | 300 步 pilot | 1 | 4,915,200 | 待 G3 | 待 G3 | 待 G3 | 待 G3 |
-| A1 | 300 步 pilot | 1 | 4,915,200 | 待 G3 | 待 G3 | 待 G3 | 待 G3 |
-| A1h | 300 步 pilot | 1 | 4,915,200 | 待 G3 | 待 G3 | 待 G3 | 待 G3 |
+| A0 | 300 步 pilot | 1 | 4,915,200 | 32 × 1 | 待 G3 | 待 G3 | 待 G3 |
+| A1 | 300 步 pilot | 1 | 4,915,200 | 32 × 1 | 待 G3 | 待 G3 | 待 G3 |
+| A1h | 300 步 pilot | 1 | 4,915,200 | 32 × 1 | 待 G3 | 待 G3 | 待 G3 |
 | A0、A1、A1h | 正式训练 | 3 | 待定 | 待 G3 | 待 G3 | 待 G3 | 待 G3 |
 
 ## 运行手册（RTX 5090，G0–G3）
 
-本节由后续步骤填写：每个门槛给出准确的命令、预期输出和未通过时的动作。门槛未通过就停止，不进入下一个门槛。GPU 测试单独运行，不与 `tests/cpu` 在同一次 pytest 中收集：CPU 测试会把仓库根目录放到 `sys.path` 最前面，而 GPU 测试要用环境中装好的原生扩展。
+命令都在 GPU 主机的仓库根目录运行。门槛按顺序进行：某一步的命令以非零退出码结束、或判据不成立，就停止，把输出和运行记录中的 `failure_report` 存进 `$TLC_RUNS/env/`，不进入下一个门槛（v0.7 §14；A0 没有通过 G1 或 G2 时不进入后续阶段）。标 [P] 的阈值是暂定的：不成立时记录实测值并停下，不要放宽阈值。GPU 测试单独运行，不与 `tests/cpu` 在同一次 pytest 中收集：CPU 测试会把仓库根目录放到 `sys.path` 最前面，GPU 测试则用 `fork/.venv-tlc` 的导入路径。
+
+```bash
+set -o pipefail                  # `pytest ... | tee` 保留 pytest 的退出码
+export TLC_RUNS=/data/tlc        # 所有产物的根目录，放在仓库之外
+PY=fork/.venv-tlc/bin/python
+mkdir -p "$TLC_RUNS/env" "$TLC_RUNS/corpus" "$TLC_RUNS/goldens"
+```
+
+语料 spec `$TLC_RUNS/corpus/corpus.toml` 由 owner 按上文“语料”准备（v0.7 §9 的来源表、70/30 配比、合成数据占比）。
 
 ### G0 环境
 
-数据部分（tokenizer 与 shard，命令在仓库根目录运行）：
+1. 原生扩展。根目录 `.venv` 按 [fork/README.md 的“首次准备环境”](../README.md#首次准备环境) 创建（只需一次；首次完整构建需要数小时），然后用本检出重建训练扩展。CMake 按本机 GPU 自动选择 `120a`；之后每次同步上游或修改训练侧 C++，都重新运行 `fork/dev build train`。
 
-```bash
-fork/.venv-tlc/bin/python -m pytest -c fork/tlc/pyproject.toml fork/tlc/tests/gpu/test_data_native.py
-fork/.venv-tlc/bin/python -m surogate_tlc.data.tokenizer check MODEL_DIR CORPUS.toml --limit 10000
-```
+   ```bash
+   uv venv --python 3.12
+   uv pip install -e .
+   fork/dev build train
+   cuobjdump --list-elf surogate/libsurogate-common.so | grep -o 'sm_[0-9]*a*' | sort -u
+   ```
 
-- 第一条：用小语料训练三个预分词候选，与原生 tokenizer 比较，并用原生 DataLoader 读取 shard；预期 4 个测试全部通过。
-- 第二条：用于训练的模型目录和语料 spec，取各来源等量的至少 10k 个文档，加上边界用例；预期输出 `consistent on N texts`，退出码 0。有差异时逐条列出，退出码 1，此时停止，不建 shard。
+   预期最后一条只输出 `sm_120a`。
 
-其余待填写。范围：创建 `fork/.venv-tlc`，`fork/dev build train`（sm_120a），环境指纹，BF16 GEMM，selective scan 的前向与反向，A1 的 flash-attention（head_dim 64）；附带检查原生侧接受四行的图：没有 `BlockSchema` 的 `TLCMambaFFNBlock`、A1h 中带 MLP 的 `A` 层、A0-split 的模型级第 1 层。
+2. `fork/.venv-tlc`。依赖与根目录 `.venv` 相同，并锁定成文件（G0 的“依赖锁定”）；`surogate` 经 `.pth` 文件从本检出导入，所以 `fork/dev build train` 复制进 `surogate/` 的扩展就是 `.venv-tlc` 加载的扩展，不需要第二次原生构建，也不会留下过期的副本。
+
+   ```bash
+   uv venv --python 3.12 fork/.venv-tlc
+   uv pip freeze -p .venv --exclude-editable > "$TLC_RUNS/env/requirements.lock"
+   uv pip install -p fork/.venv-tlc -r "$TLC_RUNS/env/requirements.lock" pytest
+   uv pip install -p fork/.venv-tlc --no-deps -e fork/tlc
+   echo "$PWD" > fork/.venv-tlc/lib/python3.12/site-packages/surogate-checkout.pth
+   ```
+
+   根目录 `.venv` 的 torch 若来自 download.pytorch.org（锁文件中的版本带 `+cu…`），第三条命令要加上对应的 `--index-url`。
+
+3. 环境指纹与 GPU。
+
+   ```bash
+   $PY -c 'import json; from surogate_tlc.train import report; print(json.dumps(report.environment(), indent=2))' > "$TLC_RUNS/env/environment.json"
+   $PY -m pytest -c fork/tlc/pyproject.toml fork/tlc/tests/gpu/test_gpu_environment.py
+   ```
+
+   预期 2 个测试通过：`surogate._surogate` 与 `surogate_tlc` 都来自本检出，GPU 的计算能力为 (12, 0)，指纹中提交、原生扩展的 sha256、驱动版本齐全。每个运行记录都带同样的指纹。
+
+4. tokenizer、模型目录与 shard。
+
+   ```bash
+   $PY -m surogate_tlc train-tokenizer "$TLC_RUNS/corpus/corpus.toml" "$TLC_RUNS/tokenizer" --pretokenizer qwen2
+   for row in A0 A0-split A1 A1h; do
+     $PY -m surogate_tlc init "$row" "$TLC_RUNS/models/$row" --tokenizer "$TLC_RUNS/tokenizer" --seed 1
+   done
+   $PY -m surogate_tlc.data.tokenizer check "$TLC_RUNS/models/A0" "$TLC_RUNS/corpus/corpus.toml" --limit 10000
+   $PY -m pytest -c fork/tlc/pyproject.toml fork/tlc/tests/gpu/test_data_native.py
+   $PY -m surogate_tlc build-data "$TLC_RUNS/corpus/corpus.toml" "$TLC_RUNS/tokenizer" "$TLC_RUNS/data" --seq-len 512
+   ```
+
+   - 预分词候选还没有选定（v0.7 §3.5；两份研究备忘另提出 Qwen 子集词表和“标识符保留”预分词两个候选）。owner 在 A0 之前定下，四行共用同一个 tokenizer 和同一个 `--seed`；A0 与 A0-split 用同一个种子，得到同一份权重（G1(d)）。
+   - `check`：预期输出 `consistent on N texts`，退出码 0；有差异时停止，不建 shard。`test_data_native.py`：预期 4 个测试通过。
+   - `build-data` 输出各划分的 `pad_fraction`；超过约 25% 时记下来（P0b 的触发条件），pilot 照常进行。
+
+5. kernel 与图。
+
+   ```bash
+   $PY -m pytest -c fork/tlc/pyproject.toml fork/tlc/tests/gpu/test_gates.py -k g0
+   ```
+
+   预期 3 个测试通过（A0、A1、A1h）：在 2 × 512 token 上做一次前向与反向，每个可训练参数的梯度都存在、有限且不全为零。它在 TLC 的图中跑过 BF16 GEMM、selective scan 的前向与反向（A0、A1h）和 head_dim 64 的 flash attention（A1、A1h），也完成两项附带检查：没有 `BlockSchema` 的 `TLCMambaFFNBlock` 被 buffer plan 接受，A1h 中带 MLP 的 `A` 层能运行。A0-split 的模型级第 1 层由 G1(d) 检查。执行沙箱的检查属于 P5-a，不在 P0 的 G0 中。
 
 ### G1 因果性
 
-待填写。范围：修改位置 t 之后的 token 不改变位置 ≤ t 的 logprobs（前缀长度 1、2、7、64、511）；原生全序列 logprobs 与参照实现的逐 token 递归一致（goldens 与判据见上文“数值参照”）；A1 打包与分开运行一致；A0-split 与 A0 等价（两个目录用同一 `init_seed` 初始化即得同一份权重，logits 与梯度在容差内一致）。
+```bash
+$PY -I -B fork/tlc/prototypes/ref_mamba2.py "$TLC_RUNS/models/A0" "$TLC_RUNS/goldens/A0.npz" --batch 2 --seq-len 512 --seed 0
+$PY -m pytest -c fork/tlc/pyproject.toml fork/tlc/tests/gpu/test_gates.py -k g1 -s | tee "$TLC_RUNS/env/g1.txt"
+```
+
+第一条在 CPU 上生成 G1(b) 的 goldens（见上文“数值参照”）。`-s` 让测试打印实测的误差（JSON 行）。
+
+| 选择 | 行 | 判据 |
+|---|---|---|
+| `-k g1a` | A0、A1、A1h | 把位置 p 起的 token 全部改掉，位置 p 之前的 logprobs 逐位不变，p ∈ {1, 2, 7, 64, 511}；p 之后的 logprobs 确有变化 |
+| `-k g1b` | A0 | goldens 记录的权重 sha256 与模型目录一致；原生 logprobs 与参照的最大绝对差不超过 goldens 中的 `tolerance` |
+| `-k g1c` | A1；A0 为负对照 | 两个文档打包在一行（第二个文档的 position 从 0 重新开始），与各自单独打分比较：A1 最大绝对差 ≤ 2e-2 [P]；A0 的第一个文档 ≤ 2e-2，第二个文档的差异 > 1e-3，因为 `mamba_ssm_scan` 不在文档之间复位，这正是 Mamba 行每行只放一个文档的原因 |
+| `-k g1d` | A0、A0-split | 两者的 `init_seed` 相同；logprobs 最大绝对差不超过 goldens 的 `tolerance`；梯度按 `split_param_name()` 改名后一一对应，最小余弦 ≥ 0.999 [P] |
+
+G1(d) 不成立时，模型级第 1 层的方案不能承载 P2/P3 的 c_t 与槽写入，按支持方案改走 fork IR 后处理 pass。
 
 ### G2 数学与梯度
 
-待填写。范围：step-0 loss ≈ ln 16384 ≈ 9.70；梯度全部有限；单层梯度与参照一致；固定 batch 100 步过拟合；save → resume 后 logits 和下一步 loss 复现。
+```bash
+$PY -m pytest -c fork/tlc/pyproject.toml fork/tlc/tests/gpu/test_gates.py -k g2 -s | tee "$TLC_RUNS/env/g2.txt"
+```
+
+| 测试 | 判据 |
+|---|---|
+| `test_g2_initial_loss_is_near_ln_vocab`（A0、A1、A1h） | 初始权重下随机 token 的交叉熵与 ln 16384 ≈ 9.70 相差不到 0.25（A0 的 CPU 预测为 9.78） |
+| `test_g2_gradients_point_where_the_reference_does` | A0 第 1 层与第 12 层的每个参数：原生 bf16 梯度与参照实现（`prototypes/ref_mamba2.py` 的分块形式，fp32 autograd，2 × 128 token）的梯度余弦 ≥ 0.99 [P] |
+| `test_g2_resume_reproduces_the_next_steps` | A0 的 smoke 阶段跑两次：一次不中断，一次从第 5 步的 checkpoint 恢复；第 6–10 步的 loss 相差 ≤ 1e-3（v0.7 G2.6 的容差：原生反向用浮点 atomicAdd，不要求逐位相等）。同时检验收尾过的 checkpoint 仍能恢复 |
+
+梯度全部有限由 G0 的第 5 步检查；固定 batch 的过拟合是 G3 的 overfit 阶段。
 
 ### G3 基线
 
-待填写。范围：每行依次 10 步冒烟、100 步过拟合、300 步 pilot；记录 train/val loss、microbatch 2/8/32 的 tokens/s、峰值显存、ValidTokenCount 和样例，然后填写上文的 GPU 预算。
+```bash
+for config in a0 a1 hybrid; do
+  for stage in smoke overfit pilot; do
+    $PY -m surogate_tlc train "fork/tlc/examples/$config.yaml" --stage "$stage" || break 2
+  done
+done
+for config in a0 a1 hybrid; do
+  for microbatch in 2 8; do
+    $PY -m surogate_tlc train "fork/tlc/examples/$config.yaml" --stage pilot --microbatch "$microbatch"
+  done
+done
+for row in A0 A1 A1h; do
+  $PY -m surogate_tlc eval "$TLC_RUNS/train/$row/pilot" "$TLC_RUNS/data" --out "$TLC_RUNS/train/$row/pilot/eval-val.json"
+done
+$PY -m surogate_tlc.train.report "$TLC_RUNS/train" | tee "$TLC_RUNS/train/report.jsonl"
+```
+
+第一组循环依次跑每行的 10 步冒烟、100 步过拟合和 300 步 pilot（microbatch 32）；第二组在每次更新 16,384 token 不变的前提下，用 microbatch 2 和 8 重跑 pilot（运行目录 `pilot-mb2`、`pilot-mb8`）；`eval` 给出验证 loss 与 unigram 基线；`report` 汇总全部运行。判据：
+
+- 每条 `train` 退出码为 0，`status` 为 completed，loss 曲线中没有 NaN 或 Inf，没有降档（示例配置 `on_oom: fail`）。
+- smoke：第 1 步的 loss 接近 ln 16384（同 G2）。
+- overfit：在固定 batch 上，第 100 步的 loss 低于第 1 步的一半 [P]。
+- pilot：`eval` 输出 `below_unigram: true`（v0.7 G3）。
+- 记录每行在 microbatch 2、8、32 下的 tokens/s 与峰值显存，以及每次更新的有效目标数，然后填写上文的 GPU 预算。
+- 这些结果是 pilot：G3 只认证流水线，不认证模型质量；生成样例在 P0 中暂缺（见“评测”）。未通过 G3 时不进入 Phase 1。

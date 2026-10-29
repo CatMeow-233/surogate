@@ -153,3 +153,90 @@ def test_native_data_loader_reads_padded_rows():
         "if (file_info->NonOverlapping) { targets.get<int>()[mSeqLen - 1] = -100; }",
     ):
         assert snippet in source, snippet
+
+
+def _config_keys() -> set[str]:
+    """Keys upstream's SFT config reads from the YAML: cfg["k"], cfg.get("k", ...) and "k" in cfg."""
+    keys = set()
+    for name in ("sft_config.py", "model_config.py", "train_dataset_config.py"):
+        for node in ast.walk(_tree(f"surogate/core/config/{name}")):
+            if isinstance(node, ast.Subscript) and ast.unparse(node.value) == "cfg":
+                keys.add(ast.literal_eval(node.slice))
+            elif isinstance(node, ast.Call) and ast.unparse(node.func) == "cfg.get":
+                keys.add(ast.literal_eval(node.args[0]))
+            elif isinstance(node, ast.Compare) and ast.unparse(node.comparators[0]) == "cfg":
+                keys.add(ast.literal_eval(node.left))
+    return keys
+
+
+def test_sft_keys_tlc_sets_are_read_upstream():
+    """A misspelt or retired key would be ignored silently and the run would use upstream's default."""
+    import yaml
+    from surogate_tlc.train import config, driver
+
+    used = {*config.FIXED, *driver.SCORING, "gpus", "gradient_accumulation_steps"}
+    for example in sorted((REPO / "fork" / "tlc" / "examples").glob("*.yaml")):
+        body = yaml.safe_load(example.read_text(encoding="utf-8"))
+        used |= set(body) - {"tlc"}
+        for stage in body["tlc"]["stages"].values():
+            used |= set(stage) - config.STAGE_KEYS
+    assert used - _config_keys() == set()
+
+
+def test_sft_config_is_completed_by_an_explicit_post_init():
+    """driver.native_wrapper calls SFTConfig.__post_init__() itself, as TokenizeDatasets does."""
+    init = _method(_tree("surogate/train/tokenize.py"), "TokenizeDatasets", "__init__")
+    assert "config.__post_init__()" in {ast.unparse(n) for n in ast.walk(init) if isinstance(n, ast.Call)}
+    sft_init = _method(_tree("surogate/core/config/sft_config.py"), "SFTConfig", "__init__")
+    assert "__post_init__" not in ast.unparse(sft_init)
+
+
+def test_trainer_regression_artifact_holds_what_the_summary_reads():
+    tree = _tree("surogate/train/trainer.py")
+    init = ast.unparse(_method(tree, "SurogateTrainerWrapper", "__init__"))
+    assert "os.environ.get('SUROGATE_REGRESSION_ARTIFACT')" in init
+    record = ast.unparse(_method(tree, "SurogateTrainerWrapper", "_record_regression_step"))
+    assert "'step': float(metrics.step + 1)" in record and "'loss': float(metrics.loss)" in record
+    write = _method(tree, "SurogateTrainerWrapper", "_write_regression_artifact")
+    payload = next(n for n in ast.walk(write) if isinstance(n, ast.Dict) and len(n.keys) > 5)
+    keys = {ast.literal_eval(k) for k in payload.keys}
+    assert {"convergence_curve", "step_time_ms", "cuda_peak_memory_bytes", "block_schema_summary"} <= keys
+    percentiles = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_percentile_summary")
+    assert "'p50': pct(0.5)" in ast.unparse(percentiles)
+    train = ast.unparse(_method(tree, "SurogateTrainerWrapper", "train"))
+    assert "self._write_regression_artifact()" in train
+
+
+def test_native_training_log_is_a_json_array_with_eval_lines():
+    source = (REPO / "csrc/src/runtime/training/logging.cpp").read_text(encoding="utf-8")
+    assert 'mLogFile << "[\\n";' in source
+    assert (
+        '{{"log": "eval", "time": "{}", "step": {}, "epoch": {}, "eval_tokens": {}, "duration_ms": {}, "loss": {}}}'
+        in (source)
+    )
+
+
+def test_native_out_of_memory_errors():
+    """driver.is_oom recognises these: a RuntimeError naming "OOM" and the activation stack's std::bad_alloc."""
+    allocator = (REPO / "csrc/src/utilities/allocator.cpp").read_text(encoding="utf-8")
+    assert 'fmt::format("Cuda OOM when allocating tensor {} of shape {}' in allocator
+    assert "throw std::runtime_error(message);" in allocator
+    stack = (REPO / "csrc/src/utilities/stack.cpp").read_text(encoding="utf-8")
+    assert "throw std::bad_alloc();" in stack
+
+
+def test_tlc_never_calls_train_with_oom_recovery():
+    """It halves the tokens per update once accumulation reaches 16 (support plan E22); the driver replaces it."""
+    for path in (REPO / "fork" / "tlc" / "src").rglob("*.py"):
+        nodes = ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        names = {
+            n.attr if isinstance(n, ast.Attribute) else n.id for n in nodes if isinstance(n, ast.Attribute | ast.Name)
+        }
+        assert "train_with_oom_recovery" not in names, path
+
+
+def test_compute_logprobs_binding():
+    source = " ".join((REPO / "csrc/src/binding/binding.cpp").read_text(encoding="utf-8").split())
+    start = source.index('"compute_logprobs",')
+    args = re.findall(r'nb::arg\("(\w+)"\)', source[start : source.index(".def(", start)])
+    assert args == ["input_ids", "targets", "use_lora", "position_ids", "temperatures"]

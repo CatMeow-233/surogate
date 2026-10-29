@@ -1,10 +1,12 @@
 """GPU tests run in fork/.venv-tlc on the GPU host (runbook in fork/tlc/README.md).
 
-They use the installed native `surogate`, so only fork/tlc/src goes on sys.path; the repository
-root is left off because its `surogate/` may lack the built extension. Without CUDA every test
-here is skipped.
+That environment imports `surogate` from this checkout, whose `surogate/` holds the extension
+`fork/dev build train` copies there, through a .pth file the runbook writes; only fork/tlc/src is
+put on sys.path here. Without CUDA every test here is skipped. The gate tests also need TLC_RUNS,
+the directory the runbook prepares, and skip without it.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -33,3 +35,12 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(pytest.mark.gpu)
             if skip:
                 item.add_marker(skip)
+
+
+@pytest.fixture(scope="session")
+def runs() -> Path:
+    """$TLC_RUNS as the runbook prepares it: tokenizer/, data/, models/<row>/ and goldens/A0.npz."""
+    path = os.environ.get("TLC_RUNS")
+    if not path:
+        pytest.skip("set TLC_RUNS to the runbook's directory (fork/tlc/README.md, G0)")
+    return Path(path)

@@ -75,13 +75,13 @@ def checkpoint_step(path: Path) -> int | None:
     return int(match.group(1))
 
 
-def finalize_checkpoints(checkpoint_dir: Path, source: Path) -> list[Path]:
+def finalize_checkpoints(checkpoint_dir: Path, source: Path, *, meta: Mapping[str, Any] | None = None) -> list[Path]:
     """finalize_dir() every complete step directory under `checkpoint_dir`; incomplete ones are left alone."""
     done = []
     for path in sorted(Path(checkpoint_dir).iterdir()):
         step = checkpoint_step(path)
         if step is not None:
-            done.append(finalize_dir(path, source, meta={"step": step}))
+            done.append(finalize_dir(path, source, meta={**(meta or {}), "step": step}))
     return done
 
 
@@ -104,6 +104,9 @@ def export(checkpoint: Path, source: Path, out: Path) -> Path:
     for name in (CONFIG_FILE, WEIGHTS_FILE):
         if (checkpoint / name).is_file():
             copy_atomic(checkpoint / name, out / name)
-    finalize_dir(out, source, meta={"step": step})
+    # A finalized checkpoint's tlc_meta.json carries the run's provenance (tokenizer and data hashes); keep it.
+    meta_file = checkpoint / META_FILE
+    meta = json.loads(meta_file.read_text(encoding="utf-8")) if meta_file.is_file() else {}
+    finalize_dir(out, source, meta={**meta, "step": step})
     check_model_dir(out)
     return out

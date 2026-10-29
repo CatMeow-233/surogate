@@ -128,6 +128,17 @@ def test_export_writes_a_model_dir_from_one_checkpoint(model_dir, tmp_path):
         checkpoint.export(partial, model_dir, tmp_path / "export-20")
 
 
+def test_run_provenance_reaches_checkpoints_and_exports(model_dir, tmp_path):
+    provenance = {"tokenizer_sha256": "t" * 64, "data_manifest_sha256": "d" * 64, "shard_version": 1}
+    step = _native_checkpoint(tmp_path / "ckpt", 10, model_dir)
+    checkpoint.finalize_checkpoints(tmp_path / "ckpt", model_dir, meta={**provenance, "step": 99})
+    meta = json.loads((step / "tlc_meta.json").read_text())
+    assert meta | provenance == meta and meta["step"] == 10  # the step directory's own step wins
+    out = checkpoint.export(step, model_dir, tmp_path / "export")
+    exported = json.loads((out / "tlc_meta.json").read_text())
+    assert exported | provenance == exported and exported["step"] == 10
+
+
 def test_upstream_final_export_needs_finalizing(model_dir, tmp_path):
     # SurogateTrainerWrapper.train() ends with export_model(output_dir), then copies this list from model_dir.
     out = tmp_path / "output"
