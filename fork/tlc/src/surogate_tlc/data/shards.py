@@ -37,7 +37,18 @@ from tokenizers import Tokenizer
 
 from .. import hf
 from ..modeldir import dump_json
-from .corpus import RULES, Corpus, Document, documents, file_sha256, load_corpus, provenance, split_of, unit_hash
+from .corpus import (
+    RULES,
+    Corpus,
+    Document,
+    decontam_record,
+    documents,
+    file_sha256,
+    load_corpus,
+    provenance,
+    split_of,
+    unit_hash,
+)
 from .tokenizer import BOS, CODE_END, CODE_START, EOS, PAD, load, special_ids, tokenizer_sha256
 
 MAGIC = b"BIN.TOK\n"
@@ -251,6 +262,7 @@ def build_shards(
             "seed": corpus.seed,
             "val_fraction": corpus.val_fraction,
             "train_files": train_files,
+            "decontam": decontam_record(corpus),
         },
         "rules": [
             *RULES,

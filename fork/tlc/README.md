@@ -43,6 +43,7 @@ DSL 类名一律带 `TLC` 前缀：注册表按类名做键，同名类会悄悄
 | `build-data ...` | 即 `python -m surogate_tlc.data.shards ...`，参数相同 |
 | `train CONFIG [--stage S] [--microbatch B]` | 训练一个运行配置，见下文“训练驱动”。退出码：0 完成；1 训练失败，失败报告在运行记录中；2 配置有问题，没有开始训练 |
 | `eval MODEL DATA [--split val] [--batch 32] [--max-rows N] [--out FILE]` | teacher-forced 的 loss 与 unigram 基线，见下文“评测” |
+| `eval MODEL DATA --suite FILE [--batch 32] [--max-rows N] [--out FILE]` | 在探针套件上做候选打分，见下文“绑定探针”；`--max-rows` 限制项数，`--out` 另写每项的结果 |
 | `export CHECKPOINT SOURCE OUT` | 从一个 step 目录导出干净的模型目录（`surogate_tlc.checkpoint.export`） |
 | 其他命令 | 先 `register()`，再交给上游的 `surogate` 命令行，例如 `python -m surogate_tlc sft CONFIG`。上游在同一进程中运行子命令模块，所以它看得到 TLC 模型。上游的 `sft` 会自己 tokenize，并经过 `train_with_oom_recovery`，所以 TLC 的训练用 `train` |
 
@@ -183,7 +184,7 @@ P0 直接依赖下列上游接口；CPU 测试钉住它们，上游改动时测�
 
 ## 语料、tokenizer 与数据 shard
 
-相关模块：`surogate_tlc.data.corpus`（语料 spec、文档、train/val 划分与 provenance）、`surogate_tlc.data.tokenizer`（训练 tokenizer，以及与原生 tokenizer 的一致性检查）、`surogate_tlc.data.shards`（BIN.TOK v3 shard 与 manifest）。它们都不需要原生扩展，只有 tokenizer 的 `check` 命令会加载原生 tokenizer。
+相关模块：`surogate_tlc.data.corpus`（语料 spec、文档、train/val 划分与 provenance）、`surogate_tlc.data.decontam`（对 HumanEval、MBPP、EvalPlus 去污染）、`surogate_tlc.data.synth`（合成绑定任务）、`surogate_tlc.data.tokenizer`（训练 tokenizer，以及与原生 tokenizer 的一致性检查）、`surogate_tlc.data.shards`（BIN.TOK v3 shard 与 manifest）。它们都不需要原生扩展，只有 tokenizer 的 `check` 命令会加载原生 tokenizer。
 
 ### 语料
 
@@ -192,6 +193,7 @@ P0 直接依赖下列上游接口；CPU 测试钉住它们，上游改动时测�
 ```toml
 seed = 0               # 划分用的种子
 val_fraction = 0.01    # 进入 val 的文档比例
+decontam = "decontam.json"   # 可选：去污染报告，相对 spec 所在目录（见下文“去污染”）
 
 [[source]]
 name = "stack-python"  # 各来源不同名
@@ -210,6 +212,76 @@ filters = ["..."]      # 下载之后、入库之前做过的过滤；可以为�
 - 入库规则：换行按 Python 的通用换行统一为 `\n`（`\r\n` 和单独的 `\r`），之后为空的文档和不是合法 UTF-8 的文档被丢弃并计数。后续的标签按 UTF-8 字节偏移对齐时，看到的就是模型训练的文本。
 - 划分：sha256(seed, group) 按 2⁶⁴ 的比例小于 `val_fraction` 的文档进 val；没有 `group` 的文档自成一组。tokenizer 只用 train 划分训练，shard 按同一划分写出。
 - 配比（v0.7：70% Python、30% 英文）在准备输入文件时决定；shard manifest 按来源记录实际的 token 数和 train 中的占比，供核对。
+
+### 去污染
+
+```bash
+python -m surogate_tlc.data.decontam CORPUS.toml BENCHMARK_DIR CORPUS_DIR/decontam.json --plant 40 --jobs 8
+```
+
+在训练 tokenizer 之前，`surogate_tlc.data.decontam` 按 v0.7 §9 与评审 C11 的四条规则，为语料的每个文档生成候选：
+
+| 规则 | 内容 | 结果 |
+|---|---|---|
+| `code13` | 基准解答的信息性 13-gram 中，在文档里出现的比例（覆盖率）。代码先做标识符抽象：标识符记为 ID，字符串与数字字面量记为 STR、NUM，去掉注释和 docstring。13-gram 中至少 4 个是词（关键字、内建名、ID）才算信息性，这样只含字面量的列表不会处处命中。信息性 13-gram 少于 15 个的条目不建索引 | ≥ 0.5 标记，≥ 0.8 删除 |
+| `text8` | 基准描述（MBPP 的 text，HumanEval 的 docstring）的小写词 8-gram 覆盖率，条目至少有 5 个 8-gram | ≥ 0.5 标记，≥ 0.8 删除 |
+| `ast` | 文档中某个函数的 AST 在 α-重命名、字面量归一、去掉 docstring 与注解之后与基准函数相同（`surogate_tlc.data.decontam.ast_hash`）；少于 40 个节点的函数会处处相同，不比较 | 删除 |
+| `name` | 文档定义的函数与基准的独特入口函数同名：至少 10 个字符、带下划线、不是 main、solve 之类的通用名 | 只标记 |
+
+- 只有高精度的证据才删除文档（v0.7）：`ast` 命中，或 `code13`、`text8` 的覆盖率达到删除阈值。只被标记的文档留在语料中，供抽样人工审计。候选按函数和 n-gram 生成，删除以整个文档为单位。
+- 文本文档按文本扫描，其中的 markdown 代码块另按代码扫描，代码块的判定与 shard 相同。
+- 基准文件：`BENCHMARK_DIR` 中所有 `*.jsonl`、`*.jsonl.gz`、`*.json`。支持两种格式：HumanEval 与 HumanEval+（`prompt` 是签名加 docstring，`canonical_solution` 是函数体），MBPP、MBPP+ 与 sanitized MBPP（完整代码加描述）。MBPP 要放入全部 974 个 id（`mbpp.jsonl`，含 prompt 划分 1–10）：要报告 MBPP+，这是前提（评审 C12）。来源与许可：HumanEval 来自 openai/human-eval（MIT），MBPP 来自 google-research（CC-BY-4.0），HumanEval+ 与 MBPP+ 来自 evalplus 的 release（Apache-2.0）。
+- 报告 `decontam.json` 的内容：
+  - 版本，语料 spec 的 sha256，每个基准文件的 sha256 和条目数，各规则及其阈值；
+  - 各来源扫描的文档数；
+  - `removed` 与 `flagged`：每个文档的键、来源、正文的 sha256 和全部命中；
+  - 从中抽取的 20 个待审计文档；
+  - 植入校准的结果。
+- 使用：在语料 spec 顶层写 `decontam = "decontam.json"`。此后训练 tokenizer 和构建 shard 都丢弃报告中删除的文档，按来源记作 `decontaminated`；文档正文的 sha256 与报告不符时报错，要求重新扫描。tokenizer 与 shard 的 manifest 都在 `corpus.decontam` 中记下报告的路径、sha256 和删除数。扫描本身忽略 spec 中的这个键。
+- 植入校准（G6）：`--plant 40` 取 40 个基准解答，做 α-重命名（标识符改成 `zz_` 加倒序名，属性名不改），追加到随机抽取的代码文档末尾。报告给出删除规则的召回率、标记的召回率和各规则的召回数，以及未改动的宿主文档被删除（误报）和被标记的比例。
+- 本环境中的校准（scratch，不是 G6）：
+  - 基准：HumanEval、HumanEval+、MBPP 全部 974 个、MBPP+，共 1,680 条；
+  - 宿主：从本机 CPython stdlib 和一个 site-packages 中随机抽取的 2,000 个非测试文件，共 24.2 MB；
+  - 删除规则在宿主上没有误报；`code13` ≥ 0.5 标记了 11 个文件（0.55%，覆盖率都低于 0.6），`name` 标记了 4 个；
+  - 40 个植入中删除 27 个（其中 `code13` 27 个，`ast` 20 个）。漏掉的 13 个都是 2–4 行的短解答，信息性 13-gram 少于 15 个，AST 不到 40 个节点。v0.7 不把这类通用短函数的功能等价算作泄漏。不改名、直接复制时删除 29/40；
+  - 单进程扫描约 0.75 MB/CPU 秒，大语料用 `--jobs`。
+  - 这些数字只代表本机的库代码。英文网页上 `text8` 的误报要在 G0 用实际语料的报告抽样核对。
+
+### 合成绑定任务
+
+```bash
+python -m surogate_tlc.data.synth OUT_DIR --seed 0 --per-task 4000 --train-chars 2000000
+```
+
+`surogate_tlc.data.synth` 生成静态 Python 子集上的绑定程序。程序只用赋值、函数定义与调用和 `assert`，值都是不透明的 4 字符字符串字面量（如 `'k3f9'`），没有算术（评审 SD-01：把绑定与执行区分开）。程序以读出行 `assert EXPR == 'value'` 结束：生成时先执行程序，取得 EXPR 的值并写进读出行，再执行一次核验，不靠人工标注。每个函数定义之后紧接着调用它，所以函数内的读出看到的正是它前面文本中的绑定。
+
+- **T1 值追踪**：一条长 `hops` 的拷贝链把字面量传给被读的名字，链被重绑 `overwrites` 次（换新的字面量），另有 `live − hops` 个名字绑定干扰字面量，随机分散在链的前后。作用域模式如下：
+
+  | 模式 | 结构 |
+  |---|---|
+  | `flat` | 全在模块级 |
+  | `shadow-in` | `depth` 层嵌套函数各自重绑该名字，在最内层读；链是被遮蔽的外层值 |
+  | `shadow-out` | 同上，但在这些调用之后回到模块级读 |
+  | `closure` | 链在一个外层函数中，`depth` 层嵌套函数读它（闭包） |
+  | `shadow-closure` | 外层函数中先有 `depth` 层函数遮蔽该名字，之后另一个闭包读外层的值 |
+  | `call-pos`、`call-kw` | 值经一个三参数函数的形参（按位置或按关键字）传入，再从返回值读出 |
+
+  网格：`live` ∈ {2, 4, 8, 16, 24, 32, 64}，`hops` ∈ {1, 2, 3, 4}（不超过 `live`），`overwrites` ∈ {0, 1, 2, 4}，作用域模式另有 `depth` ∈ {1, 2}。这是 v0.7 §12.2 与研究备忘 EV-BIND 的并集：EV-BIND 的主层是 K ∈ {2, 4, 8, 16}，压力层是 {24, 32, 64}，被读变量重绑 1、2、4 次。
+- **T2 形实参对应**：读出 `assert f(实参) == ` 的值，即被调函数返回的那个形参收到的值。除被调函数外，还有 `distractors` 个形参同名、顺序不同的函数，以及 0–3 个不传入的无关绑定。调用模式：`positional`；`keyword`（按形参顺序）；`mixed`（前几个按位置，其余按关键字）；`default`（后几个形参有默认值，调用时省略一部分）；`names-reordered`（模块变量与形参同名，按另一顺序按位置传入）；`keyword-reordered`。网格：`formals` ∈ {2, 3, 4, 6}，`distractors` ∈ {0, 1, 2}，`actuals` ∈ {literal, name}。
+- **划分**：训练流与评测项在四个轴上互不相交（v0.7 §9；研究备忘 §2.4.1 的生成器四轴切分）。
+
+  | 轴 | 训练流 | 只在评测中出现 |
+  |---|---|---|
+  | 模板族（表面写法） | T1 的 `assign` 与 `unpack`（相邻的字面量绑定合成元组赋值）；T2 的 `return` 与 `local`（经局部变量返回） | T1 的 `annotated`（`name: str = ...`）；T2 的 `lambda` |
+  | 作用域模式（组合格） | 其余模式 | `shadow-closure`（闭包内的遮蔽）和 `keyword-reordered`（关键字重排的调用）。其中的原子（遮蔽、闭包、关键字传参、重排）都在训练流中出现 |
+  | 标识符池 | `seen`：36 个代码词素，以及它们两两组合中的约 80%（共 1,062 个） | `novel`：其余 234 个组合，即由已见词素组成的新串；`rare`：只用 j、k、q、v、w、x、z 的 3–4 字母串（2,744 个），训练流中没有这样的标识符 |
+  | 字面量 | sha256 桶 1–3 | sha256 桶 0，形状相同 |
+
+  此外，任何训练程序的 AST（α-重命名、字面量归一后的 `ast_hash`，与去污染的 `ast` 规则相同）都不与评测项相同：撞上就在同一格内重抽，最多 20 次，仍然撞上就放弃这一格。`check()` 逐项核验：训练流中没有留出的模板族、模式、标识符或字面量，没有评测项的 AST，dev 与 test 没有相同的程序。`build()` 把核验结果写进 manifest。
+- **评测项**：每个任务每半至少 `--per-task` 项，网格的每格项数相同。每项随机取模板族和标识符池，所以每项记着自己被留出的轴（`strata.heldout`）。dev 与 test 是同一分布的两半，程序不重复（v0.7：dev 用于选层，test 用于确认）；test 只在预注册的里程碑读取（研究备忘 §2.4.1 的 SEALED）。
+- **训练流** `train.jsonl`：每行一个文档，由连续若干程序组成一个约 1,600 字符的模块（v0.7 §9：合成数据集的"文档"是一个生成的多函数模块；按 512 token 切窗时，一个文档大多落在一行内）。整个模块再执行一次核验。T1 与 T2 交替出现，格在训练网格上均匀抽取，只用 `seen` 池和训练字面量。它作为一个 `kind = "code"` 的来源加进语料 spec，与其他来源一起训练 tokenizer、构建 shard。配比（v0.7 暂定 5%）由 `--train-chars` 决定，约为其余来源的字符数 × 0.05 / 0.95。P0 用固定配比，没有 ramp；研究备忘 F2 的"在 A0 上按成功率标定、冻结后回放"属于 Phase 1。
+- 输出：`dev.jsonl`、`test.jsonl`（`surogate_tlc.data.suites.Item`，见下文“绑定探针”）、`train.jsonl` 和 `manifest.json`。manifest 记录网格、留出的轴、各文件的 sha256、训练流中与评测 AST 相撞后重抽和放弃的次数，以及 `check()` 的结果。同样的参数得到逐字节相同的文件。
+- 本机的默认规模：每半 8,668 项（T1 4,576、T2 4,092），训练流 200 万字符（4,136 个程序），用时约 47 秒。最长的 prompt 有 2,624 个字符，放得进 v0.7 要求的 2,048 token；P0 的 512 token 放不下 `live` ≥ 32 的大部分 T1 项，探针把它们计为 `too_long`。因与评测 AST 相撞而放弃的抽样约占 T1 的 1.7%，都在 `flat` 和 `shadow-out` 中 `live` 很小、结构只有几种的格里。
 
 ### Tokenizer
 
@@ -307,7 +379,52 @@ tlc:
 
 `python -m surogate_tlc eval MODEL DATA`（`surogate_tlc.eval.loss.evaluate()`）按原生 DataLoader 的读法（`served_rows()`）取 `DATA` 的 val 划分，用原生 `compute_logprobs(use_lora=False)` 打分；loss 是有效目标上的平均负对数概率。基线是 train 划分中目标 token 的 add-one 平滑 unigram 分布下的 loss，v0.7 的 G3 要求验证 loss 低于它（输出中的 `below_unigram`）。模型目录的 tokenizer 必须与 shard 的一致。输出另有行数、有效目标数、困惑度、tokenizer 与数据 manifest 的 sha256。
 
-绑定探针、按角色分层的 loss 等 teacher-forced 指标由后续步骤加入 `surogate_tlc.eval`。P0 没有生成样例：原生 `next_token_logits` 要求 trainer 带 LoRA，TLC 的生成要等 P5-a 的 rollout server（给全量训练的 checkpoint 挂一个零初始化的 rank-1 LoRA）。
+绑定探针以外，按角色分层的 loss 需要 P1 的角色标签，不在 P0 中。英文 PPL 可以用只含英文来源的语料 spec 和同一个 tokenizer 另建一个 shard 目录，再对它运行 `eval`。P0 没有生成样例：原生 `next_token_logits` 要求 trainer 带 LoRA，TLC 的生成要等 P5-a 的 rollout server（给全量训练的 checkpoint 挂一个零初始化的 rank-1 LoRA）。
+
+### 绑定探针
+
+```bash
+python -m surogate_tlc.data.suites CORPUS.toml OUT_DIR --limit 4000      # T3 的 dev 与 test
+python -m surogate_tlc eval MODEL DATA --suite SUITE.jsonl --out FILE     # 打分
+```
+
+主指标是行为式的绑定准确率（v0.7 §12.2，评审 SD-01）：每个探针项（`surogate_tlc.data.suites.Item`）有一个 prompt 和若干候选；模型给每个候选打分，正确的候选得分最高即为答对。各臂按同一标准计分，不读模型的内部状态。
+
+- **T1、T2**：上文的合成程序。prompt 到读出行的 `== ` 为止，候选是 prompt 中出现的全部字符串字面量，chance 为候选数的倒数。
+- **T3 自然代码**：`surogate_tlc.data.suites` 从语料 val 划分的代码文档中，取函数内对局部变量的读取作为探针项。
+  - 该名字在函数文本中此前已有绑定。绑定从 Python 实际执行它的位置起算：赋值在语句结束之后，循环变量在可迭代对象之后。
+  - 候选是此前出现过的局部名（至少 2 个），答案是被读的名字。
+  - 只用静态子集中的函数：没有 global、nonlocal，没有对名字的 del，没有 eval、exec、locals、getattr 之类的反射。
+  - AST（α-重命名后）与 train 划分中某个函数相同的函数不用。
+  - 每个文档最多取 8 项；dev 与 test 按文档的 group 分开。
+- **打分**（`surogate_tlc.eval.probes`）：
+  - 每个候选的文本是 prompt + 候选 + 尾部（候选之后到行末），按 shard 的方式编码：文档开头加 `<|bos|> <|code_start|>`，正文中的特殊 token 字符串按普通文本处理。
+  - 得分是一段 token 的对数概率之和：从共享上下文之后的第一个 token 起，到包含尾部第一个字符的 token 为止。因此候选按"在此处结束的整词"计分。
+  - 有 token 跨过 prompt 末尾时（例如 GPT-2 式预分词把空格和后面的字母合成一个 token），共享上下文在最早的那个 token 之前结束。各候选的上下文 token 不一致的项不计分（`context`）。
+  - 合成项放不进模型的上下文时不计分（`too_long`），因为截断可能切掉被问的绑定；自然代码项保留最后 seq_len 个 token，与 shard 的窗口一致。
+  - 原生打分与 `eval` 的 loss 相同，都用 `compute_logprobs(use_lora=False)`；每行的长度是 `DATA` 中 shard 的行长，每批 `--batch` 行。
+- **启发式 floor**（v0.7 §12.2，评审 SD-01）：每项都带着各启发式的预测。T1、T2 的启发式来自一个不看作用域的文本读者：
+
+  | 启发式 | 预测 |
+  |---|---|
+  | `recent` | prompt 中最后一个字面量（most-recent literal） |
+  | `line1` | prompt 中第一个字面量 |
+  | `same_name` | 把所有作用域当作一个名字空间，沿每个名字在文本中最近的绑定解析读出的表达式；调用中的关键字实参绑定被调函数中同名的形参（same-name-ignoring-scope） |
+  | `first_bound` | 同上，但沿最早的绑定解析 |
+  | `stale` | 读者在该表达式最后一次变化之前给出的值（研究备忘 EV-BIND 的 stale floor） |
+  | `position` | 被调函数返回的形参按实参的位置对应，关键字实参也按书写顺序计 |
+
+  T3 的启发式：`recent`（最近出现的局部名）和 `frequent`（此前读取次数最多的局部名）。
+- **汇总**（`surogate_tlc.eval.probes.summarize`，按任务给出）：
+  - 准确率、chance、每个启发式的准确率。
+  - 按格（T1：模式、live、hops、overwrites、depth；T2：模式、formals、distractors、actuals）给出 `floor` 和 `shortcut_floor`。`floor` 是该格最好的启发式；`shortcut_floor` 只在该格中不恒对的启发式里取最好的。恒对的启发式就是该格的正确算法，例如没有遮蔽时的 `same_name`、只有一层遮蔽时 `shadow-out` 的 `stale`、没有重绑时的 `first_bound`、按位置调用时的 `position`（v0.7："在 shadow=0 的层，same-name 启发式本身就是正确算法"）。
+  - `above_floor` 与 `above_shortcut_floor`：每个计分项的对错（1 或 0）减去所在格的 floor，再取平均。
+  - `disagreement`：所有不恒对的启发式都答错的项（启发式分歧子集）。
+  - `stale_rate`：选中了读者给出的上一个值、而它又不是答案的比例。
+  - 同样的指标还按每个分层键、被留出的轴（`heldout`：family、pattern、pool 或 none）、距离桶（答案所在绑定到 prompt 末尾的 token 数：≤128、128–512、512–2048、>2048）和被问标识符的 token 片数（1、2、3、≥4）分组给出。
+- 输出：`eval --suite` 打印 `summary`，以及模型、套件、tokenizer 和数据 manifest 的 sha256 与行长；`--out` 另写每项的结果（状态、选择、各候选得分、距离和片数）。
+- 本机用 stdlib 建的 T3 套件（val 占 30%，共 1,100 项，平均 5.3 个候选）：chance 26.9%，`recent` 16.4%，`frequent` 22.5%。v0.7 引用的 stdlib 数字（27.8%、25.3%、31.7%）包括只有一个候选的读取，两者不能直接比较。
+- 研究备忘 EV-BIND 中尚未实现的部分：标识符末片与同函数其他标识符共享的分层、改名孪生对照、值打乱对照、按 seed 的锁定步数，以及 copy-5 等过滤后的 NLL 类别。
 
 ## GPU 预算
 
@@ -334,10 +451,10 @@ GPU 小时 = Σ 种子数 × 名义 token 数 ÷ 实测 tokens/s × (1 + 评测�
 set -o pipefail                  # `pytest ... | tee` 保留 pytest 的退出码
 export TLC_RUNS=/data/tlc        # 所有产物的根目录，放在仓库之外
 PY=fork/.venv-tlc/bin/python
-mkdir -p "$TLC_RUNS/env" "$TLC_RUNS/corpus" "$TLC_RUNS/goldens"
+mkdir -p "$TLC_RUNS/env" "$TLC_RUNS/corpus" "$TLC_RUNS/goldens" "$TLC_RUNS/benchmarks"
 ```
 
-语料 spec `$TLC_RUNS/corpus/corpus.toml` 由 owner 按上文“语料”准备（v0.7 §9 的来源表、70/30 配比、合成数据占比）。
+语料 spec `$TLC_RUNS/corpus/corpus.toml` 由 owner 按上文“语料”准备（v0.7 §9 的来源表、70/30 配比、合成数据占比）。去污染用的基准文件放在 `$TLC_RUNS/benchmarks`：`HumanEval.jsonl.gz`、`mbpp.jsonl`（全部 974 条）、`HumanEvalPlus.jsonl.gz`、`MbppPlus.jsonl.gz`，见上文“去污染”。
 
 ### G0 环境
 
@@ -373,7 +490,19 @@ mkdir -p "$TLC_RUNS/env" "$TLC_RUNS/corpus" "$TLC_RUNS/goldens"
 
    预期 2 个测试通过：`surogate._surogate` 与 `surogate_tlc` 都来自本检出，GPU 的计算能力为 (12, 0)，指纹中提交、原生扩展的 sha256、驱动版本齐全。每个运行记录都带同样的指纹。
 
-4. tokenizer、模型目录与 shard。
+4. 合成数据、去污染与 T3 套件。依次运行，每条之后按说明改 spec：
+
+   ```bash
+   $PY -m surogate_tlc.data.synth "$TLC_RUNS/suites/synth" --seed 0 --train-chars "$SYNTH_CHARS"
+   $PY -m surogate_tlc.data.decontam "$TLC_RUNS/corpus/corpus.toml" "$TLC_RUNS/benchmarks" "$TLC_RUNS/corpus/decontam.json" --plant 40 --jobs 8
+   $PY -m surogate_tlc.data.suites "$TLC_RUNS/corpus/corpus.toml" "$TLC_RUNS/suites/natural"
+   ```
+
+   - `synth`：`SYNTH_CHARS` 约为其余来源的字符数 × 0.05 / 0.95（v0.7 暂定的 5%）。然后在 spec 中加一个来源：`name = "synth-binding"`、`kind = "code"`、`files = ["../suites/synth/train.jsonl"]`，`url` 写生成命令与 manifest 的 sha256，`license` 写“generated”。预期 manifest 的 `disjoint.eval_items_with_a_training_ast` 为 0。
+   - `decontam`：然后在 spec 顶层加 `decontam = "decontam.json"`。把输出中的 `calibration`（召回率与误报率）连同 `audit_sample` 中各文档的人工审计结论记进 `$TLC_RUNS/env/decontam.txt`，作为 G6 的去污染记录。
+   - `suites`：T3 的 dev 与 test，取自去污染之后语料的 val 划分。
+
+5. tokenizer、模型目录与 shard。
 
    ```bash
    $PY -m surogate_tlc train-tokenizer "$TLC_RUNS/corpus/corpus.toml" "$TLC_RUNS/tokenizer" --pretokenizer qwen2
@@ -389,7 +518,7 @@ mkdir -p "$TLC_RUNS/env" "$TLC_RUNS/corpus" "$TLC_RUNS/goldens"
    - `check`：预期输出 `consistent on N texts`，退出码 0；有差异时停止，不建 shard。`test_data_native.py`：预期 4 个测试通过。
    - `build-data` 输出各划分的 `pad_fraction`；超过约 25% 时记下来（P0b 的触发条件），pilot 照常进行。
 
-5. kernel 与图。
+6. kernel 与图。
 
    ```bash
    $PY -m pytest -c fork/tlc/pyproject.toml fork/tlc/tests/gpu/test_gates.py -k g0
@@ -427,7 +556,7 @@ $PY -m pytest -c fork/tlc/pyproject.toml fork/tlc/tests/gpu/test_gates.py -k g2 
 | `test_g2_gradients_point_where_the_reference_does` | A0 第 1 层与第 12 层的每个参数：原生 bf16 梯度与参照实现（`prototypes/ref_mamba2.py` 的分块形式，fp32 autograd，2 × 128 token）的梯度余弦 ≥ 0.99 [P] |
 | `test_g2_resume_reproduces_the_next_steps` | A0 的 smoke 阶段跑两次：一次不中断，一次从第 5 步的 checkpoint 恢复；第 6–10 步的 loss 相差 ≤ 1e-3（v0.7 G2.6 的容差：原生反向用浮点 atomicAdd，不要求逐位相等）。同时检验收尾过的 checkpoint 仍能恢复 |
 
-梯度全部有限由 G0 的第 5 步检查；固定 batch 的过拟合是 G3 的 overfit 阶段。
+梯度全部有限由 G0 的第 6 步检查；固定 batch 的过拟合是 G3 的 overfit 阶段。
 
 ### G3 基线
 
@@ -446,6 +575,13 @@ for row in A0 A1 A1h; do
   $PY -m surogate_tlc eval "$TLC_RUNS/train/$row/pilot" "$TLC_RUNS/data" --out "$TLC_RUNS/train/$row/pilot/eval-val.json"
 done
 $PY -m surogate_tlc.train.report "$TLC_RUNS/train" | tee "$TLC_RUNS/train/report.jsonl"
+$PY -m pytest -c fork/tlc/pyproject.toml fork/tlc/tests/gpu/test_probes.py -s | tee "$TLC_RUNS/env/probes.txt"
+for row in A0 A1 A1h; do
+  for suite in synth natural; do
+    $PY -m surogate_tlc eval "$TLC_RUNS/train/$row/pilot" "$TLC_RUNS/data" --suite "$TLC_RUNS/suites/$suite/dev.jsonl" \
+      --out "$TLC_RUNS/train/$row/pilot/probes-$suite-dev.json" > /dev/null
+  done
+done
 ```
 
 第一组循环依次跑每行的 10 步冒烟、100 步过拟合和 300 步 pilot（microbatch 32）；第二组在每次更新 16,384 token 不变的前提下，用 microbatch 2 和 8 重跑 pilot（运行目录 `pilot-mb2`、`pilot-mb8`）；`eval` 给出验证 loss 与 unigram 基线；`report` 汇总全部运行。判据：
@@ -454,5 +590,6 @@ $PY -m surogate_tlc.train.report "$TLC_RUNS/train" | tee "$TLC_RUNS/train/report
 - smoke：第 1 步的 loss 接近 ln 16384（同 G2）。
 - overfit：在固定 batch 上，第 100 步的 loss 低于第 1 步的一半 [P]。
 - pilot：`eval` 输出 `below_unigram: true`（v0.7 G3）。
+- 探针：`test_probes.py` 通过，即 A0 在合成 dev 套件的短项上，原生的候选得分与参照实现（bf16 存储）之差不超过 G1(b) 的 `tolerance` × 计分 token 数，参照的领先幅度超过误差界时两者选出同一个候选。每行在两个 dev 套件上的探针命令退出码为 0。pilot 规模下准确率接近 chance 是预期的，这一步只检验探针流水线；test 半不在 G3 读取。
 - 记录每行在 microbatch 2、8、32 下的 tokens/s 与峰值显存，以及每次更新的有效目标数，然后填写上文的 GPU 预算。
 - 这些结果是 pilot：G3 只认证流水线，不认证模型质量；生成样例在 P0 中暂缺（见“评测”）。未通过 G3 时不进入 Phase 1。

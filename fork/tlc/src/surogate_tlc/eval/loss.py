@@ -43,7 +43,8 @@ def unigram_loss(data: Path, targets: np.ndarray, vocab_size: int) -> float:
     return float(-np.log(counts[valid] / counts.sum()).mean())
 
 
-def _native_scorer(model_dir: Path, data: Path, out: Path, *, batch: int, seq_len: int) -> Scorer:
+def native_scorer(model_dir: Path, data: Path, out: Path, *, batch: int, seq_len: int) -> Scorer:
+    """compute_logprobs of a native trainer on `model_dir` (no LoRA) for batches of `batch` rows of `seq_len`."""
     from ..train.driver import native_trainer
 
     trainer = native_trainer(model_dir, data, out, batch=batch, seq_len=seq_len).trainer
@@ -75,7 +76,7 @@ def evaluate(
     inputs, targets, positions = (np.concatenate(arrays)[:max_rows].astype(np.int32) for arrays in zip(*parts))
     total, count = 0.0, 0
     with tempfile.TemporaryDirectory(prefix="tlc-eval-") as tmp:
-        score = scorer or _native_scorer(model_dir, data, Path(tmp), batch=batch, seq_len=seq_len)
+        score = scorer or native_scorer(model_dir, data, Path(tmp), batch=batch, seq_len=seq_len)
         for start in range(0, len(inputs), batch):
             rows = slice(start, start + batch)
             n = len(inputs[rows])

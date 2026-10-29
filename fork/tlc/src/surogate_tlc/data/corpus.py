@@ -1,8 +1,9 @@
 """The corpus spec: which sources make up the TLC corpus, where they came from, and the train/val split.
 
-A spec is a TOML file (README: "语料"). Its top level holds the split settings, `seed` and `val_fraction`; each
-`[[source]]` table names one source with its provenance and its input files, given as globs relative to the spec
-file. A `.jsonl` file holds one document per line in the field "text", plus an optional "group" (for example the
+A spec is a TOML file (README: "语料"). Its top level holds the split settings, `seed` and `val_fraction`, and
+optionally `decontam`, a decontamination report (surogate_tlc.data.decontam) whose removed documents are dropped;
+each `[[source]]` table names one source with its provenance and its input files, given as globs relative to the
+spec file. A `.jsonl` file holds one document per line in the field "text", plus an optional "group" (for example the
 repository) that keeps related documents in the same split; any other file is one document.
 
 Documents are normalised the same way for the tokenizer and the shards: newlines follow Python's universal
@@ -19,12 +20,13 @@ import json
 import math
 import tomllib
 from collections import Counter
-from collections.abc import Iterator
-from dataclasses import dataclass
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any
 
+DECONTAM_VERSION = 1  # surogate_tlc.data.decontam's report version
 KINDS = ("code", "text")
 SOURCE_KEYS = ("name", "kind", "files", "url", "license", "downloaded", "filters")
 OPTIONAL_SOURCE_KEYS = ("revision", "stage")
@@ -52,6 +54,8 @@ class Corpus:
     seed: int
     val_fraction: float
     sources: tuple[Source, ...]
+    decontam: Path | None = None  # the report, when the spec names one
+    removed: Mapping[str, str] = field(default_factory=dict)  # document key -> sha256 of its text
 
     def relative(self, path: Path) -> str:
         """`path` relative to the spec's directory where possible: the form recorded in manifests and keys."""
@@ -92,11 +96,12 @@ def _source(table: dict[str, Any], base: Path) -> Source:
     return Source(name, table["kind"], tuple(sorted(files)), provenance)
 
 
-def load_corpus(path: Path) -> Corpus:
-    """Read and check a corpus spec; every glob must match at least one file."""
+def load_corpus(path: Path, *, decontam: bool = True) -> Corpus:
+    """Read and check a corpus spec; every glob must match at least one file. decontam=False ignores the spec's
+    decontamination report, as the scan that writes it does."""
     path = Path(path).resolve()
     spec = tomllib.loads(path.read_text(encoding="utf-8"))
-    unknown = sorted(set(spec) - {"seed", "val_fraction", "source"})
+    unknown = sorted(set(spec) - {"seed", "val_fraction", "decontam", "source"})
     if unknown:
         raise ValueError(f"{path}: unknown top-level keys {unknown}")
     seed, val_fraction = spec.get("seed"), spec.get("val_fraction")
@@ -108,7 +113,16 @@ def load_corpus(path: Path) -> Corpus:
     names = [s.name for s in sources]
     if not sources or len(set(names)) != len(names):
         raise ValueError(f"{path}: needs at least one [[source]], with distinct names (got {names})")
-    return Corpus(path, seed, float(val_fraction), sources)
+    if not decontam or "decontam" not in spec:
+        return Corpus(path, seed, float(val_fraction), sources)
+    if not isinstance(spec["decontam"], str) or not spec["decontam"]:
+        raise ValueError(f"{path}: decontam must be the path of a decontamination report")
+    report = path.parent / spec["decontam"]
+    data = json.loads(report.read_text(encoding="utf-8"))
+    if data.get("tlc_decontam_version") != DECONTAM_VERSION:
+        raise ValueError(f"{report}: not a decontamination report of version {DECONTAM_VERSION}")
+    removed = {entry["key"]: entry["sha256"] for entry in data["removed"]}
+    return Corpus(path, seed, float(val_fraction), sources, report, removed)
 
 
 def normalize(text: str) -> str:
@@ -162,6 +176,10 @@ def source_documents(corpus: Corpus, source: Source, dropped: Counter | None = N
             else:
                 text = normalize(text)
                 reason = None if text else "empty"
+            if not reason and key in corpus.removed:
+                if hashlib.sha256(text.encode()).hexdigest() != corpus.removed[key]:
+                    raise ValueError(f"{key} changed since the decontamination report {corpus.decontam}; rescan")
+                reason = "decontaminated"
             if reason:
                 if dropped is not None:
                     dropped[source.name, reason] += 1
@@ -196,6 +214,14 @@ def file_sha256(path: Path) -> str:
         for block in iter(lambda: f.read(1 << 20), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def decontam_record(corpus: Corpus) -> dict[str, Any] | None:
+    """What manifests record of the decontamination: the report's path, sha256 and number of removed documents."""
+    if corpus.decontam is None:
+        return None
+    report = corpus.decontam
+    return {"report": corpus.relative(report), "sha256": file_sha256(report), "removed": len(corpus.removed)}
 
 
 def provenance(corpus: Corpus) -> list[dict[str, Any]]:

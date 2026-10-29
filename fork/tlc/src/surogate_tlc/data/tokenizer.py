@@ -30,7 +30,7 @@ from tokenizers import Regex, Tokenizer, decoders, models, pre_tokenizers, proce
 
 from .. import hf
 from ..modeldir import dump_json
-from .corpus import RULES, Corpus, documents, file_sha256, load_corpus, provenance, sample, split_of
+from .corpus import RULES, Corpus, decontam_record, documents, file_sha256, load_corpus, provenance, sample, split_of
 
 PAD, BOS, EOS, CODE_START, CODE_END = SPECIAL_TOKENS = (
     "<|pad|>",
@@ -166,6 +166,7 @@ def train_tokenizer(
             "seed": corpus.seed,
             "val_fraction": corpus.val_fraction,
             "trained_on": "train split",
+            "decontam": decontam_record(corpus),
             "rules": list(RULES),
         },
         "sources": sources,

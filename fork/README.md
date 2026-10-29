@@ -99,7 +99,7 @@ GRPO 补丁（T6–T8）调用的 fork 代码位于 `surogate/_fork`，上游文
 - [docs/performance.md](docs/performance.md)：fork 的性能改动、测量方法和开关，包括 LoRA 融合输入梯度和 GRPO 周期计时指标。
 - [native/README.md](native/README.md)：fork 原生代码（C++ 与 CMake）的目录、`csrc/CMakeLists.txt` 中两行挂接点的约定，以及 OpenMP 接线测试的运行方法。
 - [docs/upstream-errata.md](docs/upstream-errata.md)：上游已知的失效引用、过时配置和测试缺陷；fork 不修改这些上游文件，只记录绕行方法。
-- [tlc/README.md](tlc/README.md)：TLC 包的目录、命令行、模型目录与 checkpoint 契约、初始化与 Mamba-2 数值参照、语料 spec、tokenizer 与数据 shard、训练驱动（运行配置、OOM 策略、运行记录）、评测、GPU 预算和 RTX 5090 运行手册。
+- [tlc/README.md](tlc/README.md)：TLC 包的目录、命令行、模型目录与 checkpoint 契约、初始化与 Mamba-2 数值参照、语料 spec、去污染、合成绑定任务、tokenizer 与数据 shard、训练驱动（运行配置、OOM 策略、运行记录）、评测（loss 与绑定探针）、GPU 预算和 RTX 5090 运行手册。
 - [experimental/README.md](experimental/README.md) 与 [experimental/docs/training.md](experimental/docs/training.md)：实验训练器的安装、配置和发布产物。
 
 ## 规则

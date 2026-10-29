@@ -125,6 +125,7 @@ def test_manifest(built, corpus_spec, trained_tokenizer):
         "seed": 7,
         "val_fraction": 0.25,
         "train_files": 2,
+        "decontam": None,
     }
     for s in manifest["shards"]:
         assert s["sha256"] == corpus.file_sha256(out / s["file"])

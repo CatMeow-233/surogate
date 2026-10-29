@@ -38,12 +38,15 @@ def _parser() -> argparse.ArgumentParser:
     train.add_argument("config", type=Path, help="run configuration (YAML)")
     train.add_argument("--stage", help="stage of the configuration, e.g. smoke, overfit, pilot")
     train.add_argument("--microbatch", type=int, help="microbatch size; the accumulation keeps tokens per update")
-    evaluate = commands.add_parser("eval", help="teacher-forced loss of a model directory on a shard split")
+    evaluate = commands.add_parser(
+        "eval", help="teacher-forced loss on a shard split, or binding probes on a suite (--suite)"
+    )
     evaluate.add_argument("model", type=Path, help="model directory")
-    evaluate.add_argument("data", type=Path, help="shard directory from build-data")
+    evaluate.add_argument("data", type=Path, help="shard directory from build-data (rows of its length)")
     evaluate.add_argument("--split", default="val", choices=["train", "val"])
+    evaluate.add_argument("--suite", type=Path, help="probe suite file (data.synth or data.suites) instead of a split")
     evaluate.add_argument("--batch", type=int, default=32, help="rows per native forward")
-    evaluate.add_argument("--max-rows", type=int)
+    evaluate.add_argument("--max-rows", type=int, help="rows of the split, or items of the suite, to use")
     evaluate.add_argument("--out", type=Path, help="also write the result to this JSON file")
     export = commands.add_parser("export", help="model directory from a checkpoint step directory")
     export.add_argument("checkpoint", type=Path, help="step_<8 digits> directory of a run")
@@ -94,12 +97,18 @@ def _train(args: argparse.Namespace) -> int:
 
 
 def _eval(args: argparse.Namespace) -> int:
-    from .eval.loss import evaluate
+    if args.suite:
+        from .eval.probes import evaluate_suite
 
-    result = evaluate(args.model, args.data, split=args.split, batch=args.batch, max_rows=args.max_rows)
+        result = evaluate_suite(args.model, args.data, args.suite, batch=args.batch, max_items=args.max_rows)
+        shown = {k: v for k, v in result.items() if k != "results"}  # the per-item results go to --out only
+    else:
+        from .eval.loss import evaluate
+
+        result = shown = evaluate(args.model, args.data, split=args.split, batch=args.batch, max_rows=args.max_rows)
     if args.out:
         args.out.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-    _print(result)
+    _print(shown)
     return 0
 
 
