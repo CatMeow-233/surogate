@@ -1,6 +1,6 @@
 """A model directory loads through the trainer's Python path in a fresh interpreter, both with
-surogate_tlc.register() and with only its auto_map (the fork imported just for the DSL model); plus the
-model-directory checks that compare config.json with the tokenizer.
+surogate_tlc.register() and with only its auto_map (the fork imported just for the DSL model), and so does
+every P0 row; plus the model-directory checks that compare config.json with the tokenizer.
 """
 
 import json
@@ -62,6 +62,35 @@ def test_model_dir_loads_in_a_fresh_interpreter(fresh_python, model_dir, mode):
     assert report["ir_model"] == "TLCModel"
     assert report["ir_pattern"] == config["tlc_layer_pattern"]
     assert report["ir_source_architectures"] == [hf.ARCHITECTURE]
+
+
+LOAD_ROWS = """
+import json
+from surogate.core.model.registry import get_model_info_and_tokenizer
+from surogate.dsl.ir_builder import build_dsl_ir_for_model
+
+sys.path.insert(0, sys.argv[2])
+import surogate_tlc
+
+surogate_tlc.register()
+report = []
+for path in sys.argv[3:]:
+    info, _ = get_model_info_and_tokenizer(path)
+    ir = json.loads(build_dsl_ir_for_model(path))["modules"][0]
+    report.append([info.max_model_len, ir["name"], ir["config"]["n_layers"], ir["config"].get("hybrid_pattern")])
+print(json.dumps(report))
+"""
+
+
+def test_every_row_loads_through_the_trainer_path(fresh_python, tmp_path, tokenizer_dir):
+    dirs = [modeldir.write_model_dir(tmp_path / row, hf.row_config(row), tokenizer_dir) for row in hf.ROWS]
+    report = json.loads(fresh_python(LOAD_ROWS, SRC, *dirs).splitlines()[-1])
+    assert dict(zip(hf.ROWS, report, strict=True)) == {
+        "A0": [512, "TLCModel", 12, "M" * 12],
+        "A0-split": [512, "TLCModel", 11, "M" * 11],
+        "A1": [512, "TLCModel", 12, None],
+        "A1h": [512, "TLCModel", 12, "MMMMMAMMMMMA"],
+    }
 
 
 def test_written_dir_holds_the_contract_files(model_dir):

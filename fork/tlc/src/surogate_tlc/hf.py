@@ -13,7 +13,15 @@ from typing import Any
 
 from .configuration_tlc import TLCConfig
 
-__all__ = ["TLCConfig", "check_config", "config_problems", "configuration_source", "default_config", "is_tlc"]
+__all__ = [
+    "TLCConfig",
+    "check_config",
+    "config_problems",
+    "configuration_source",
+    "default_config",
+    "is_tlc",
+    "row_config",
+]
 
 ARCHITECTURE = "TLCForCausalLM"
 MODEL_TYPE = TLCConfig.model_type
@@ -28,6 +36,28 @@ MAMBA_KEYS = ("mamba_num_heads", "mamba_head_dim", "ssm_state_size", "n_groups",
 ATTENTION_KEYS = ("num_attention_heads", "num_key_value_heads", "head_dim")
 GDN_KEYS = ("linear_num_key_heads", "linear_num_value_heads", "linear_key_head_dim", "linear_value_head_dim")
 TOKEN_ID_KEYS = ("bos_token_id", "eos_token_id", "pad_token_id")
+# true: layer 1 is traced as model-level ops ahead of the layer stack (the A0-split row). Absent means false.
+SPLIT_KEY = "tlc_split_first_layer"
+
+# The P0 Mamba-2 geometry, fixed: H=12 heads of P=64 (inner width 768 = 2 x hidden), N=64 state, G=1 group.
+# N is 64 rather than 128 because the scan kernel loops over the state dimension serially.
+MAMBA_GEOMETRY = {
+    "mamba_num_heads": 12,
+    "mamba_head_dim": 64,
+    "ssm_state_size": 64,
+    "n_groups": 1,
+    "conv_kernel": 4,
+    "chunk_size": 128,
+}
+
+# Differences of each P0 row from default_config(). A1's FFN width 1504 puts it within 0.1 % of A0's parameter
+# count, tied or untied. A1h replaces layers 6 and 12 of A0 with attention layers.
+ROWS: dict[str, dict[str, Any]] = {
+    "A0": {},
+    "A0-split": {SPLIT_KEY: True},
+    "A1": {"tlc_layer_pattern": "A" * 12, "intermediate_size": 1504},
+    "A1h": {"tlc_layer_pattern": "MMMMMAMMMMMA"},
+}
 
 
 def configuration_source() -> str:
@@ -40,10 +70,9 @@ def is_tlc(cfg: Mapping[str, Any]) -> bool:
 
 
 def default_config(**overrides: Any) -> dict[str, Any]:
-    """A0 as TLC v0.6 proposes it: 12 x 384, SwiGLU 1024, vocabulary 16384, context 512.
+    """A0 as TLC v0.6 proposes it: 12 x 384, SwiGLU 1024, vocabulary 16384, context 512, MAMBA_GEOMETRY.
 
-    The Mamba geometry (H=12, P=64, N=64, G=1) is provisional. The special token ids must match the tokenizer;
-    check_model_dir() compares them.
+    The special token ids must match the tokenizer; check_model_dir() compares them.
     """
     cfg: dict[str, Any] = {
         "architectures": [ARCHITECTURE],
@@ -59,12 +88,7 @@ def default_config(**overrides: Any) -> dict[str, Any]:
         "pad_token_id": 0,
         "bos_token_id": 1,
         "eos_token_id": 2,
-        "mamba_num_heads": 12,
-        "mamba_head_dim": 64,
-        "ssm_state_size": 64,
-        "n_groups": 1,
-        "conv_kernel": 4,
-        "chunk_size": 128,
+        **MAMBA_GEOMETRY,
         # Used by attention layers. A0 keeps them too: the native runtime divides by the head count when
         # head_dim is 0.
         "num_attention_heads": 6,
@@ -75,6 +99,16 @@ def default_config(**overrides: Any) -> dict[str, Any]:
     }
     cfg.update(overrides)
     cfg.setdefault("tlc_layer_pattern", "M" * cfg["num_hidden_layers"])
+    return cfg
+
+
+def row_config(row: str, **overrides: Any) -> dict[str, Any]:
+    """config.json of P0 row `row` (a ROWS key); a pattern without Mamba layers drops the Mamba keys."""
+    cfg = default_config(**{**ROWS[row], **overrides})
+    if "M" not in cfg["tlc_layer_pattern"]:
+        for key in MAMBA_KEYS:
+            if key not in overrides:
+                del cfg[key]
     return cfg
 
 
@@ -128,6 +162,11 @@ def _tlc_problems(cfg: Mapping[str, Any]) -> list[str]:
     unknown = sorted(set(pattern) - set(LAYER_KINDS))
     if unknown:
         problems.append(f"tlc_layer_pattern has unknown layer kinds {unknown}; known: {sorted(LAYER_KINDS)}")
+    split = cfg.get(SPLIT_KEY, False)
+    if not isinstance(split, bool):
+        problems.append(f"{SPLIT_KEY} must be true or false, got {split!r}")
+    elif split and (len(pattern) < 2 or pattern[0] != "M"):
+        problems.append(f"{SPLIT_KEY} needs a Mamba first layer and at least one more layer, got {pattern!r}")
     if "M" in pattern:
         problems += [
             f"{key} must be given as a positive integer" for key in MAMBA_KEYS if not _positive_int(cfg.get(key))

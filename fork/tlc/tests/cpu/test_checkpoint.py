@@ -95,6 +95,23 @@ def test_finalize_refuses_a_different_model(model_dir, tmp_path, tokenizer_dir):
     assert _snapshot(step) == before
 
 
+@pytest.mark.parametrize("row, accepted", [("A0-split", True), ("A0", False)])
+def test_finalize_allows_the_stack_depth_only_for_a0_split(tmp_path, tokenizer_dir, row, accepted):
+    # The native config.json takes the DSL's layer count; A0-split's stack leaves out the model-level layer 1.
+    from surogate_tlc import hf
+
+    source = modeldir.write_model_dir(tmp_path / row, hf.row_config(row), tokenizer_dir)
+    step = _native_checkpoint(tmp_path / "ckpt", 10, source)
+    native = json.loads((step / "config.json").read_text())
+    (step / "config.json").write_text(json.dumps(native | {"num_hidden_layers": 11}))
+    if accepted:
+        checkpoint.finalize_dir(step, source)
+        assert modeldir.check_model_dir(step)["num_hidden_layers"] == 12
+    else:
+        with pytest.raises(ValueError, match=r"on \['num_hidden_layers'\]"):
+            checkpoint.finalize_dir(step, source)
+
+
 def test_export_writes_a_model_dir_from_one_checkpoint(model_dir, tmp_path):
     step = _native_checkpoint(tmp_path / "ckpt", 10, model_dir)
     out = checkpoint.export(step, model_dir, tmp_path / "export")

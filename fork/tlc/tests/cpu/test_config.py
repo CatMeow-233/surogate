@@ -6,18 +6,28 @@ import json
 import pytest
 from surogate_tlc import hf
 
-A0 = hf.default_config()
-A1H = hf.default_config(tlc_layer_pattern="MMMMMAMMMMMA")
+A0 = hf.row_config("A0")
+A1H = hf.row_config("A1h")
 
 
 def _without(cfg: dict, *keys: str) -> dict:
     return {k: v for k, v in cfg.items() if k not in keys}
 
 
-@pytest.mark.parametrize("cfg", [A0, A1H], ids=["A0", "A1h"])
-def test_valid_configs_have_no_problems(cfg):
+@pytest.mark.parametrize("row", list(hf.ROWS))
+def test_valid_configs_have_no_problems(row):
+    cfg = hf.row_config(row)
     assert hf.config_problems(cfg) == []
     hf.check_config(cfg)
+
+
+def test_rows_state_their_geometry_explicitly():
+    assert A0 == hf.default_config() and A0["tlc_layer_pattern"] == "M" * 12
+    for row in ("A0", "A0-split", "A1h"):
+        assert hf.MAMBA_GEOMETRY.items() <= hf.row_config(row).items(), row
+    # Without Mamba layers the Mamba keys would only be noise in config.json, unless asked for.
+    assert not set(hf.MAMBA_KEYS) & set(hf.row_config("A1"))
+    assert hf.row_config("A1", n_groups=1)["n_groups"] == 1
 
 
 @pytest.mark.parametrize(
@@ -40,6 +50,9 @@ def test_valid_configs_have_no_problems(cfg):
         (_without(A0, "tie_word_embeddings"), "tie_word_embeddings must be given"),
         ({**A0, "num_attention_heads": 0, "head_dim": 0}, "num_attention_heads or head_dim must be positive"),
         ({**A0, "linear_num_key_heads": 4}, "a GDN geometry needs all of"),
+        ({**A0, hf.SPLIT_KEY: 1}, "tlc_split_first_layer must be true or false"),
+        ({**A1H, "tlc_layer_pattern": "A" * 12, hf.SPLIT_KEY: True}, "needs a Mamba first layer"),
+        (hf.default_config(num_hidden_layers=1, **{hf.SPLIT_KEY: True}), "and at least one more layer"),
     ],
 )
 def test_each_invariant_is_enforced(cfg, problem):
@@ -105,12 +118,19 @@ def test_ir_carries_the_layer_pattern_as_a_string(cfg):
     assert ir_config["n_mamba_blocks"] == cfg["tlc_layer_pattern"].count("M")
 
 
-def test_dsl_rejects_a_pattern_of_the_wrong_length():
+@pytest.mark.parametrize(
+    "cfg, error",
+    [
+        ({**A0, "tlc_layer_pattern": "M" * 11}, "tlc_layer_pattern"),
+        ({**A1H, "tlc_layer_pattern": "A" + "M" * 11, hf.SPLIT_KEY: True}, hf.SPLIT_KEY),
+    ],
+)
+def test_dsl_rejects_what_check_config_rejects(cfg, error):
     import surogate_tlc
 
     from surogate.dsl.py_compiler import compile_model_for_hf
 
     surogate_tlc.register()
-    result = json.loads(compile_model_for_hf(hf.ARCHITECTURE, {**A0, "tlc_layer_pattern": "M" * 11}))
+    result = json.loads(compile_model_for_hf(hf.ARCHITECTURE, cfg))
     assert not result["success"]
-    assert "tlc_layer_pattern" in json.dumps(result["errors"])
+    assert error in json.dumps(result["errors"])

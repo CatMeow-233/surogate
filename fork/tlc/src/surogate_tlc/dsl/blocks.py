@@ -64,7 +64,10 @@ TLC_MAMBA_FFN_BLOCK_REMAP: dict[str, str] = {
 
 
 class TLCMambaFFNBlock(nn.Block):
-    """A0 layer: RMSNorm -> Mamba-2 mixer -> RMSNorm -> SwiGLU, with the residual carried as in upstream hybrids."""
+    """A0 layer: RMSNorm -> Mamba-2 mixer -> RMSNorm -> SwiGLU, with the residual carried as in upstream hybrids.
+
+    It declares no BlockSchema; the native buffer plan treats schemas as optional (checked on the GPU host, G0).
+    """
 
     _name_remap_ = TLC_MAMBA_FFN_BLOCK_REMAP
 

@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from . import hf
 from .modeldir import (
     CONFIG_FILE,
     META_FILE,
@@ -43,7 +44,7 @@ def finalize_dir(target: Path, source: Path, *, meta: Mapping[str, Any] | None =
         raise FileNotFoundError(f"{target} is not a directory")
     if (target / CONFIG_FILE).is_file():
         written = json.loads((target / CONFIG_FILE).read_text(encoding="utf-8"))
-        differ = [k for k in STRUCTURAL_KEYS if k in written and written[k] != source_cfg.get(k)]
+        differ = [k for k in STRUCTURAL_KEYS if k in written and written[k] not in _native_values(source_cfg, k)]
         if differ:
             raise ValueError(
                 f"{target / CONFIG_FILE} disagrees with {source} on {differ}: wrong source model directory?"
@@ -54,6 +55,15 @@ def finalize_dir(target: Path, source: Path, *, meta: Mapping[str, Any] | None =
     tlc_meta = json.loads((source / META_FILE).read_text(encoding="utf-8")) | dict(meta or {})
     write_text_atomic(target / META_FILE, dump_json(tlc_meta))
     return target
+
+
+def _native_values(source_cfg: Mapping[str, Any], key: str) -> list[Any]:
+    """Values of `key` the native trainer may write for a model built from `source_cfg`."""
+    values = [source_cfg.get(key)]
+    if key == "num_hidden_layers" and source_cfg.get(hf.SPLIT_KEY):
+        # The native config takes the DSL's layer count, which leaves out the model-level layer 1.
+        values.append(source_cfg[key] - 1)
+    return values
 
 
 def checkpoint_step(path: Path) -> int | None:
