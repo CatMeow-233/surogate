@@ -42,7 +42,7 @@ DSL 类名一律带 `TLC` 前缀：注册表按类名做键，同名类会悄悄
 | A1 | `tlc_layer_pattern` 为 12 个 `A`，`intermediate_size` 1504 | 12 × `A` | 31,812,480 / 38,103,936 | +0.10% / +0.08% |
 | A1h | `tlc_layer_pattern` 为 `MMMMMAMMMMMA` | 10 × `M`，第 6、12 层为 `A` | 30,681,320 / 36,972,776 | −3.46% / −2.89% |
 
-- **Mamba-2 几何**（`surogate_tlc.hf.MAMBA_GEOMETRY`）：H=12 个头、每头 P=64（内宽 768，即 2 × 宽度）、状态 N=64、G=1 组，conv 核 4，chunk 128。v0.7 notebook 不存在，按支持方案 §4.3 定稿：N 取 64 而不取 128，因为 scan kernel 在状态维上的循环是串行的。A0 的参数量由这组几何唯一确定，CPU 测试钉住它。Mamba-2 的 conv 带 bias、输入输出投影不带 bias；dt 不做 clamp（上游 `Mamba2Mixer` 不给 `time_step_limit` 时的行为），数值参照必须一致。
+- **Mamba-2 几何**（`surogate_tlc.hf.MAMBA_GEOMETRY`）：H=12 个头、每头 P=64（内宽 768，即 2 × 宽度）、状态 N=64、G=1 组，conv 核 4，chunk 128。支持方案 §4.3 与 v0.7 notebook（§0.8、§13）都固定为这组几何：N 取 64 而不取 128，因为 scan kernel 在状态维上的循环是串行的。A0 的参数量由这组几何唯一确定，CPU 测试钉住它。Mamba-2 的 conv 带 bias、输入输出投影不带 bias；dt 不做 clamp（上游 `Mamba2Mixer` 不给 `time_step_limit` 时的行为），数值参照必须一致。
 - **A1**：FFN 宽度 1504 使 A1 与 A0 的参数量相差在 0.1% 以内（目标 ±2%）；attention 几何与 A1h 相同（6 个头、2 个 KV 头、head_dim 64）。A1 的 IR 与同尺寸的上游 `Qwen3ForCausalLM` 逐 op、逐参数相同（CPU 测试），只是 checkpoint 中的权重名不同。A1 不设 `hybrid_pattern`，所以原生侧把每层当作 dense 块，与上游 Qwen3 的路径一致；它的 config.json 不带 Mamba 键。
 - **A1h**：只作上界参照，不做参数匹配（attention 层比 Mamba 层少约 55 万参数）。原生侧按 `hybrid_pattern` 把 `A` 层当作 attention 块，而 `Qwen3Block` 带 MLP：这在 GPU 上验证（G1）。
 - **A0-split**：为 P2/P3 去风险（角色特征和槽写入要在模型级从第 1 层的输出计算）。第 1 层的 ops 由同一个 `TLCMambaFFNBlock` 在模型级追踪，名字加 `first_layer_` 前缀（例如 `first_layer_in_proj_weight`），其后的 stack 是第 2..L 层，层号从 `blocks[0]` 重新开始。CPU 测试检查 A0-split 与 A0 的 op、属性和顺序完全相同，张量一一对应，A0 的参数按 `surogate_tlc.dsl.models.split_param_name()` 改名后形状不变；所以同一份权重改名后即可做 G1(d) 的等价测试。IR 的 `n_layers` 为 11、`hybrid_pattern` 为 11 个 `M`（原生侧的层数只算 stack）。模型级第 1 层的权重与 stack 中的权重一样按 IR 名加载；它的激活槽沿用各 module 的默认作用域，与上游模型级 module 的做法相同。原生侧能否正确执行、重算这些模型级 ops，由 G1(d) 判定；若不等价，改走 fork IR 后处理 pass。
@@ -161,11 +161,80 @@ P0 直接依赖下列上游接口；CPU 测试钉住它们，上游改动时测�
 - `surogate.cli.main.cli_main` 用 `runpy.run_module(..., run_name="__main__", alter_sys=True)` 在同一进程中运行子命令模块，所以先 `register()` 再交给它，注册对子命令有效。
 - `SurogateTrainerWrapper(config, train_files, eval_files=None)` 与无参数的 `train()`。
 - `TokenizedDataFileWriter(file_name, vocab_size, masking=False, non_overlapping=False)`、`add_document(tokens, position_ids, mask=None)` 与 BIN.TOK v3 的文件头。
+- 原生 tokenizer：`tlc` 不在按架构写死正则的名单中，因此从 `tokenizer.json` 读取 split 正则（没有时用 GPT-2 的）；手写 splitter 覆盖 `qwen2` 与 GPT-2 的正则，不覆盖 `python`。
+- 原生 DataLoader 读取 non-overlapping 文件的规则：块数为 token 数 ÷ `seq_len`，目标是下一个 token，position 块紧跟 token 块，mask 位为 0 的目标与每行最后一个目标置为 −100。
 
-## 数据打包
+## 语料、tokenizer 与数据 shard
 
-- A0、A1、A1h 一律每行一个文档：长文件切成不超过 512 token 的窗口，末尾 padding，不跨文档打包。原因是 `mamba_ssm_scan` 在打包的文档之间不复位状态；A1 也这样做，保证各行的数据语义相同。
-- 记录 padding 浪费（非 pad token 按 ValidTokenCount 计）。超过约 25% 时，再考虑实现文档复位后改用打包 shard，所有行同时切换。
+相关模块：`surogate_tlc.data.corpus`（语料 spec、文档、train/val 划分与 provenance）、`surogate_tlc.data.tokenizer`（训练 tokenizer，以及与原生 tokenizer 的一致性检查）、`surogate_tlc.data.shards`（BIN.TOK v3 shard 与 manifest）。它们都不需要原生扩展，只有 tokenizer 的 `check` 命令会加载原生 tokenizer。
+
+### 语料
+
+语料由一个 TOML spec 描述：顶层是划分参数，每个 `[[source]]` 是一个来源及其 provenance，对应 v0.7 §9 的来源表。
+
+```toml
+seed = 0               # 划分用的种子
+val_fraction = 0.01    # 进入 val 的文档比例
+
+[[source]]
+name = "stack-python"  # 各来源不同名
+kind = "code"          # code 或 text
+files = ["python/*.jsonl"]   # glob，相对 spec 所在目录，每个至少匹配一个文件
+url = "https://huggingface.co/datasets/..."
+revision = "..."       # 可选
+license = "..."
+downloaded = 2026-10-20
+stage = "M1"           # 可选
+filters = ["..."]      # 下载之后、入库之前做过的过滤；可以为空列表
+```
+
+- 缺少必需键、出现未知键、glob 匹配不到文件时报错。
+- `.jsonl` 文件每行一个文档，正文在 `text` 字段；可选的 `group`（例如仓库名）让同组的文档落在同一划分。其他文件整个是一个文档。
+- 入库规则：换行按 Python 的通用换行统一为 `\n`（`\r\n` 和单独的 `\r`），之后为空的文档和不是合法 UTF-8 的文档被丢弃并计数。后续的标签按 UTF-8 字节偏移对齐时，看到的就是模型训练的文本。
+- 划分：sha256(seed, group) 按 2⁶⁴ 的比例小于 `val_fraction` 的文档进 val；没有 `group` 的文档自成一组。tokenizer 只用 train 划分训练，shard 按同一划分写出。
+- 配比（v0.7：70% Python、30% 英文）在准备输入文件时决定；shard manifest 按来源记录实际的 token 数和 train 中的占比，供核对。
+
+### Tokenizer
+
+```bash
+python -m surogate_tlc.data.tokenizer train CORPUS.toml OUT_DIR --pretokenizer qwen2 --vocab-size 16384
+```
+
+- 16384 个 id 的字节级 BPE，没有 normalizer，decode(encode(x)) == x。特殊 token 的 id 固定为 0–4：`<|pad|>`、`<|bos|>`、`<|eos|>`、`<|code_start|>`、`<|code_end|>`，其中前三个与 `hf.default_config()` 的 pad、bos、eos 一致。语料不够学满词表时报错。
+- 预分词有三个候选（v0.7 §3.5），由 `--pretokenizer` 选择，默认 `qwen2`：
+
+  | 名称 | 规则 | 原生 tokenizer 的实现 |
+  |---|---|---|
+  | `qwen2`（默认） | Qwen2 的 split 正则：GPT-2 一族，字母和数字用 Unicode 类 `\p{L}`、`\p{N}`，每个数字单独成片 | 手写 splitter |
+  | `gpt2` | GPT-2 正则，连续数字成一片 | 手写 splitter |
+  | `python` | v0.7 的 pyaware2 改用 `\p{L}`、`\p{N}`：标识符（含 `_`）、常见的多字符运算符、换行连同其后的缩进、整个数字（含小数和指数）各成一片 | std::regex 回退 |
+
+  - 默认取 `qwen2`，因为工作单要求数字逐位切分；v0.7 只给出候选和选择规则（Python 加英文的总 token 数、跨词素率、多角色率），还没有选定。比较总 token 数时，用各候选分别建 shard，对比 manifest 中每个来源的 `characters` 与 `real_tokens`；跨词素率和多角色率要用 P1 的对齐与角色标注来算。
+  - v0.7 的第三个候选"严格按 Python 词法切分"不是正则预分词，原生 tokenizer 推理时做不到，所以没有提供。
+  - `model_type` 为 `tlc` 时，原生 tokenizer 从 `tokenizer.json` 读取 split 正则，没有时用 GPT-2 的。`qwen2` 与 GPT-2 的正则各有手写实现；其他正则（包括 `python`）走 std::regex 回退，用之前必须通过下面的一致性检查。CPU 的 pin 测试钉住这几点。本环境中用原生 tokenizer 源码编译的 CPU 程序，在本机的 stdlib 与仓库文档上训练三个候选，各比较了 295 段文本（640 万字符，含边界用例和 CRLF 版本），全部一致；这不代替 G0。
+- 编码：文档正文按普通文本编码，其中的特殊 token 字符串不会变成特殊 id（v0.7：原始文本永远不产生特殊 token）；prompt 按带特殊 token 的方式编码。
+- chat template：`<|bos|>` 加各条消息的内容，不要求生成提示时最后加 `<|eos|>`。prompt 就是文档的开头，与 shard 的框定一致。
+- 输出目录：`tokenizer.json`、`tokenizer_config.json` 和 `tokenizer_manifest.json`（配方、`tokenizer_sha256`、语料 spec 的 sha256、各来源的 provenance 和参与训练的文档数）。tokenizer 的身份是 `tokenizer.json` 的 sha256（`surogate_tlc.data.tokenizer.tokenizer_sha256()`），shard 的 manifest 也记录它。同样的语料与参数训练出逐字节相同的文件。
+- 一致性检查：`compare()` 比较本 tokenizer 与原生 tokenizer 的特殊 id 和词表大小，并逐段比较普通编码、带特殊 token 的编码，以及两侧对普通编码 id 的解码。文本是固定的边界用例（`EDGE_CASES`：CRLF、单独的 CR、tab、CJK 标识符、emoji、f-string、字符串中的 U+2028、特殊 token 字符串等）加语料样本。CPU 测试用替身检查 harness 能发现各类差异；与真实原生 tokenizer 的比较在 GPU 主机上进行，见 G0。
+
+### 数据 shard
+
+```bash
+python -m surogate_tlc.data.shards CORPUS.toml TOKENIZER_DIR OUT_DIR --seq-len 512 --train-files 1
+```
+
+- 输出 `train-00000.bin` 等、`val-00000.bin`，最后写 `manifest.json`。`OUT_DIR` 必须不存在或为空；同样的输入得到逐字节相同的输出。
+- 格式：BIN.TOK v3（1024 字节的头、int32 token、int32 position、按位存储的 mask），头中标为 non-overlapping。写出的文件与上游 `TokenizedDataFileWriter(masking=True, non_overlapping=True)` 的逐字节相同（CPU 测试）；上游模块 import 时就需要原生扩展，所以 fork 自己写。
+- 每行一个文档，不跨文档打包：`mamba_ssm_scan` 在打包的文档之间不复位状态。A1、A1h 也这样做，保证各行的数据语义相同。
+  - 框定：代码文档为 `<|bos|> <|code_start|> 正文 <|code_end|> <|eos|>`；英文文档为 `<|bos|> 正文 <|eos|>`，其中的 markdown 代码块按行转换（v0.7 §3.5）：去掉缩进后以 ``` 开头的行打开代码块，换成 `<|code_start|>`；代码块内恰为 ``` 的行关闭它，换成 `<|code_end|>`；文档结束时仍未关闭的代码块在末尾关闭。
+  - 窗口：超过 `seq_len` 的文档切成 `seq_len` 个 token 的窗口，相邻窗口共享一个 token，因此除文档的首个 token 外，每个 token 恰好作一次目标。每个窗口是一行，末尾用 `<|pad|>` 补齐；每行的 position 为 0..seq_len−1。
+  - mask：输入位置 i 的 mask 位为 1，当且仅当它的目标（第 i+1 个 token）是同一行中的真实 token。原生 DataLoader 对 non-overlapping 文件恰好给出这些行，并把每行最后一个位置的目标置为 −100。
+- ValidTokenCount：有 n 个真实 token 的行有 n−1 个有效目标。manifest 按 shard 和按划分记录 `rows`、`tokens`、`real_tokens`、`valid_targets`（一个 epoch 中 ValidTokenCount 之和）和 `pad_fraction`；按来源记录文档数、字符数、行数、真实 token 数、train 中的 token 占比、丢弃计数和 provenance（URL、revision、license、下载日期、过滤规则，以及每个输入文件的大小与 sha256）；`rules` 列出入库与框定规则。
+- 身份：数据的身份是 `manifest.json` 的 sha256（`surogate_tlc.data.shards.manifest_sha256()`），与 `tokenizer_sha256` 一起写进每个结果行（v0.7 IMPL-08）。训练驱动要核对 shard 的 `seq_len` 等于训练配置的 `sequence_len`，manifest 中的 tokenizer sha256 等于模型目录中 `tokenizer.json` 的 sha256。
+- 原生 DataLoader 依次读取各文件，只在文件内打乱行，所以 train 文档按 hash 分到 `--train-files` 个文件，每个文件都是各来源的随机样本。单个文件少于 2³¹ 个 token。
+- `surogate_tlc.data.shards.served_rows()` 按原生 DataLoader 的读取规则给出每行的输入、目标与 position。CPU 测试用它核对上面的窗口与 ValidTokenCount；GPU 主机上的测试核对它与原生 DataLoader 一致。本环境中用原生 `dataloader.cpp` 编译的 CPU 程序读取本机语料建出的 shard，逐行一致。
+- padding 浪费（`pad_fraction`）超过约 25% 时，再考虑实现文档复位并改用打包 shard，所有行同时切换。本机 stdlib 与仓库文档按整文件切窗时约为 4.6%。
+- 上下文：P0 用 512。v0.7 默认正式训练用 2048（O-1，待 owner 确认）：shard 用 `--seq-len 2048` 生成，模型 config 的 `max_position_embeddings` 也要改，而 `check_config` 目前要求 512。
 
 ## OOM 与每次更新的 token 数
 
@@ -198,7 +267,17 @@ GPU 小时 = Σ 种子数 × 名义 token 数 ÷ 实测 tokens/s × (1 + 评测�
 
 ### G0 环境
 
-待填写。范围：创建 `fork/.venv-tlc`，`fork/dev build train`（sm_120a），环境指纹，BF16 GEMM，selective scan 的前向与反向，A1 的 flash-attention（head_dim 64），至少 10k 文档上原生与 HF tokenizer 的一致性；附带检查原生侧接受四行的图：没有 `BlockSchema` 的 `TLCMambaFFNBlock`、A1h 中带 MLP 的 `A` 层、A0-split 的模型级第 1 层。
+数据部分（tokenizer 与 shard，命令在仓库根目录运行）：
+
+```bash
+fork/.venv-tlc/bin/python -m pytest -c fork/tlc/pyproject.toml fork/tlc/tests/gpu/test_data_native.py
+fork/.venv-tlc/bin/python -m surogate_tlc.data.tokenizer check MODEL_DIR CORPUS.toml --limit 10000
+```
+
+- 第一条：用小语料训练三个预分词候选，与原生 tokenizer 比较，并用原生 DataLoader 读取 shard；预期 4 个测试全部通过。
+- 第二条：用于训练的模型目录和语料 spec，取各来源等量的至少 10k 个文档，加上边界用例；预期输出 `consistent on N texts`，退出码 0。有差异时逐条列出，退出码 1，此时停止，不建 shard。
+
+其余待填写。范围：创建 `fork/.venv-tlc`，`fork/dev build train`（sm_120a），环境指纹，BF16 GEMM，selective scan 的前向与反向，A1 的 flash-attention（head_dim 64）；附带检查原生侧接受四行的图：没有 `BlockSchema` 的 `TLCMambaFFNBlock`、A1h 中带 MLP 的 `A` 层、A0-split 的模型级第 1 层。
 
 ### G1 因果性
 

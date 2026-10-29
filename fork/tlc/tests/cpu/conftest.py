@@ -66,6 +66,78 @@ def tokenizer_dir(tmp_path_factory) -> Path:
     return out
 
 
+CORPUS_SPEC = """\
+seed = 7
+val_fraction = 0.25
+
+[[source]]
+name = "code"
+kind = "code"
+files = ["code/*.py"]
+url = "https://example.invalid/code"
+license = "MIT"
+downloaded = 2026-10-01
+filters = ["fixture: generated functions"]
+
+[[source]]
+name = "text"
+kind = "text"
+files = ["text.jsonl"]
+url = "https://example.invalid/text"
+revision = "r1"
+license = "CC-BY-4.0"
+downloaded = "2026-10-02"
+stage = "M1"
+filters = []
+"""
+NAMES = ("add", "scale", "count", "merge", "split", "total", "clamp", "first", "last", "pairs", "window", "flatten")
+SENTENCES = (
+    "The little coder reads English and writes Python.",
+    "Every function returns the total of the values it was given.",
+    "A loop walks over the items, and the counter grows by one each time.",
+    "Small models need clean data, careful tokens and honest tests.",
+)
+
+
+def write_corpus(root: Path) -> Path:
+    """Local fixture documents and their corpus spec: Python files (one with CRLF, one with lone CR line ends),
+    a JSONL of English documents (three in one group, one with a markdown code fence, one with special-token
+    strings), and two documents the builder drops (not UTF-8; empty)."""
+    (root / "code").mkdir(parents=True)
+    for i, name in enumerate(NAMES):
+        body = (
+            f"def {name}_items(values, limit={i}):\n    total = 0\n    for index, value in enumerate(values):\n"
+            f"        if value > limit and index % {i + 2} == 0:\n            total += value * {i + 1}\n"
+            f"    return total  # {SENTENCES[i % len(SENTENCES)]}\n"
+        )
+        body = {1: body.replace("\n", "\r\n"), 2: body.replace("\n", "\r")}.get(i, body)
+        (root / "code" / f"mod_{i:02d}.py").write_bytes(body.encode())
+    (root / "code" / "bad.py").write_bytes(b"x = '\xff\xfe'\n")
+    (root / "code" / "empty.py").write_bytes(b"")
+    records = [{"text": " ".join(SENTENCES[i % 4 :] + SENTENCES[: i % 4]) * (1 + i % 3)} for i in range(10)]
+    records += [{"text": f"{SENTENCES[i]} Part {i}.", "group": "book"} for i in range(3)]
+    records.append({"text": "Intro:\n```python\nx = add_items([1, 2], 0)\n```\nThe value is x.\n"})
+    records.append({"text": "A tokenizer marks the end with <|eos|> and pads with <|pad|>."})
+    records.append({"text": ""})
+    lines = [json.dumps(record) for record in records]
+    (root / "text.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (root / "corpus.toml").write_text(CORPUS_SPEC, encoding="utf-8")
+    return root / "corpus.toml"
+
+
+@pytest.fixture(scope="session")
+def corpus_spec(tmp_path_factory) -> Path:
+    return write_corpus(tmp_path_factory.mktemp("corpus"))
+
+
+@pytest.fixture(scope="session")
+def trained_tokenizer(tmp_path_factory, corpus_spec) -> Path:
+    """The TLC tokenizer recipe (default pre-tokenizer) trained on the fixture corpus, with 300 ids."""
+    from surogate_tlc.data import corpus, tokenizer
+
+    return tokenizer.train_tokenizer(corpus.load_corpus(corpus_spec), tmp_path_factory.mktemp("tok"), vocab_size=300)
+
+
 @pytest.fixture
 def model_dir(tmp_path, tokenizer_dir) -> Path:
     """An A0 model directory as write_model_dir() leaves it: everything but the weights."""

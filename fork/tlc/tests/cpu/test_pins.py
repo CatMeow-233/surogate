@@ -6,9 +6,11 @@ Modules that need the native extension (the trainer, the shard writer, the CLI) 
 
 import ast
 import inspect
+import re
 from pathlib import Path
 
-from surogate_tlc import ir
+from surogate_tlc import hf, ir
+from surogate_tlc.data import tokenizer
 
 REPO = Path(__file__).resolve().parents[4]
 
@@ -113,3 +115,41 @@ def test_tokenized_data_file_writer():
     assert "header_str = 'BIN.TOK\\n'" in source and "version = 3" in source
     fields = "[version, bytes_per_token, self.n_tokens, self.vocab_size, self.has_masks, self.non_overlapping]"
     assert fields in source
+
+
+CPP_STRING = r'"(?:[^"\\]|\\.)*"'
+
+
+def _cpp_strings(code: str) -> list[str]:
+    """The values of the C++ string literals in `code`, adjacent literals joined."""
+    literals = (re.findall(CPP_STRING, joined) for joined in re.findall(rf"(?:{CPP_STRING}\s*)+", code))
+    return ["".join(re.sub(r"\\(.)", r"\1", lit[1:-1]) for lit in group) for group in literals]
+
+
+def test_native_tokenizer_reads_tlc_split_patterns():
+    """A "tlc" model's split pattern comes from tokenizer.json (GPT-2's when there is none), and the native
+    tokenizer has hand-written splitters for the "qwen2" pattern and GPT-2's; others run on std::regex."""
+    tokenizer_cpp = (REPO / "csrc/src/tokenizer/tokenizer.cpp").read_text(encoding="utf-8")
+    assert hf.MODEL_TYPE not in set(re.findall(r'architecture == "([^"]+)"', tokenizer_cpp))
+    assert 'if (obj.at("type") == "Split" && obj.contains("pattern"))' in tokenizer_cpp
+    gpt2_default = _cpp_strings(tokenizer_cpp[tokenizer_cpp.index("If still empty, use GPT-2 default") :])[0]
+    unicode_cpp = (REPO / "csrc/src/tokenizer/unicode.cpp").read_text(encoding="utf-8")
+    custom = unicode_cpp[unicode_cpp.index("unicode_regex_split_custom(const std::string& text") :]
+    custom = custom[: custom.index("\n}\n")]
+    patterns = {_cpp_strings(m)[0] for m in re.findall(rf"regex_expr == ((?:{CPP_STRING}\s*)+)", custom)}
+    assert {tokenizer.PRETOKENIZERS["qwen2"], gpt2_default} <= patterns
+    assert tokenizer.PRETOKENIZERS["python"] not in patterns
+
+
+def test_native_data_loader_reads_padded_rows():
+    """The reading rules surogate_tlc.data.shards.served_rows mirrors, for a non-overlapping shard with masks."""
+    source = " ".join((REPO / "csrc/src/runtime/training/dataloader.cpp").read_text(encoding="utf-8").split())
+    for snippet in (
+        "int num_chunks = file_info->NonOverlapping ? (num_tokens / mSeqLen) : ((num_tokens - 1) / mSeqLen);",
+        "const long target_offset = input_offset + element_size;",
+        "const long pos_ids_start = element_size * file_info->NumTokens + header_offset;",
+        "masks_start += element_size * file_info->NumTokens;",
+        "bool mask_bit = (mMaskBuffer[byte_id] >> bit_id) & 1; if (!mask_bit) { target_tokens[i - start] = -100; }",
+        "if (file_info->NonOverlapping) { targets.get<int>()[mSeqLen - 1] = -100; }",
+    ):
+        assert snippet in source, snippet
