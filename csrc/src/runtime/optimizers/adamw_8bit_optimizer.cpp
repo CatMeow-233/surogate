@@ -718,11 +718,21 @@ void AdamW8BitOptimizer::step_cpu_streaming(dsl::DslModel& model,
     }
     CUDA_CHECK(cudaEventRecord(rs.NormDone, stream));
 
+    // A tied lm_head's master is the embedding's (fork ledger T10): each master takes one step, with the gradient
+    // both names share.
+    std::vector<std::string> names;
+    std::unordered_set<const std::byte*> stepped;
+    for (const auto& name : model.mGrads->param_names()) {
+        const Tensor& master = model.mWeightManager->get_master(name);
+        if (master.Data && !stepped.insert(master.Data).second) continue;
+        names.push_back(name);
+    }
+
     // 4. Initialize CPU optimizer state if needed
     auto& cpu_state = mImpl->cpu_state;
     if (!cpu_state.initialized) {
         std::size_t total = 0;
-        for (const auto& name : model.mGrads->param_names()) {
+        for (const auto& name : names) {
             total += model.mWeightManager->get_master(name).nelem();
         }
         cpu_state.m.resize(total, 0.0f);
@@ -733,7 +743,7 @@ void AdamW8BitOptimizer::step_cpu_streaming(dsl::DslModel& model,
 
     // 5. Per-parameter CPU optimizer step
     std::size_t offset = 0;
-    for (const auto& name : model.mGrads->param_names()) {
+    for (const auto& name : names) {
         Tensor& master = model.mWeightManager->get_master(name);
         const Tensor& grad = model.mGrads->get_cpu_grad(name);
         const auto n = static_cast<std::size_t>(master.nelem());

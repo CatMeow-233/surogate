@@ -217,6 +217,7 @@ DslWeightManager::DslWeightManager(const Module& module,
     mConfig.resident_nonblock = mConfig.cpu_training && lora_config && lora_config->enabled() &&
                                 std::getenv("SUROGATE_SHARED_NONBLOCK_STAGING") == nullptr;
     mConfig.enable_fp8_forward = options.fp8_forward_enabled();
+    mConfig.tie_lm_head = config.TiedWordEmbeddings && !(lora_config && lora_config->enabled());
     // FP8 weight streaming: only when the FP8 forward recipe is active AND masters are
     // offloaded (dispatch-PP). Then frozen matmul block masters are stored + streamed as
     // FP8 (half the PCIe bytes), matching the recipe's per-layer skip_quant_* selection.
@@ -290,6 +291,7 @@ void DslWeightManager::allocate_weights(const Module& module,
     mBlockParamNames.resize(mConfig.num_layers);
 
     const bool sharded_master = mConfig.shard_weights && mConfig.num_shards > 1;
+    const bool tie_head = mConfig.tie_lm_head && graph.params.contains("embedding") && graph.params.contains("lm_head");
 
     for (const auto& kv : graph.params) {
         const std::string& name = kv.first;
@@ -329,6 +331,15 @@ void DslWeightManager::allocate_weights(const Module& module,
 
         // Cache global (unsharded) shape
         entry.global_shape = shape;
+
+        // A tied head in full training is the embedding: it takes the embedding's master and work copy below, so
+        // the optimizer's one update of the embedding is the head the forward reads (fork ledger T10).
+        if (tie_head && name == "lm_head") {
+            entry.tied_alias = true;
+            mWeights.emplace(name, std::move(entry));
+            mParamOrder.push_back(name);
+            continue;
+        }
 
         // Expert Parallelism: a frozen stacked-expert weight only feeds this rank's
         // local experts (the grouped GEMMs run post-dispatch on local expert ids), so
@@ -447,6 +458,18 @@ void DslWeightManager::allocate_weights(const Module& module,
     std::sort(mParamOrder.begin(), mParamOrder.end());
     for (auto& layer_names : mBlockParamNames) {
         std::sort(layer_names.begin(), layer_names.end());
+    }
+
+    if (tie_head) {
+        DslWeightEntry& head = mWeights.at("lm_head");
+        const DslWeightEntry& embedding = mWeights.at("embedding");
+        if (head.global_shape != embedding.global_shape || head.work_dtype != embedding.work_dtype) {
+            throw std::runtime_error(
+                "DslWeightManager: tied lm_head and embedding must have matching shapes and dtype");
+        }
+        head.master = embedding.master;
+        head.master_sharded = embedding.master_sharded;
+        head.work = embedding.work;  // under cpu_training both are pointed at the shared staging buffer below
     }
 
     // CPU-RAM centric: allocate a shared GPU buffer for embedding/lm_head work weights.
@@ -727,6 +750,11 @@ bool DslWeightManager::is_trainable(const std::string& name) const {
     auto it = mWeights.find(name);
     if (it == mWeights.end()) return false;
     return it->second.trainable;
+}
+
+bool DslWeightManager::is_tied_alias(const std::string& name) const {
+    auto it = mWeights.find(name);
+    return it != mWeights.end() && it->second.tied_alias;
 }
 
 bool DslWeightManager::is_sharded(const std::string& name) const {
@@ -1194,6 +1222,7 @@ void DslWeightManager::iterate_tensors(const std::function<void(std::string, con
     for (const auto& name : mParamOrder) {
         auto it = mWeights.find(name);
         if (it == mWeights.end()) continue;
+        if (it->second.tied_alias) continue;  // the embedding's master, saved once under its name
         if (it->second.master_sharded && !it->second.global_shape.empty()) {
             callback(name,
                      TensorShard(it->second.master, mConfig.shard_idx, mConfig.num_shards, it->second.global_shape));

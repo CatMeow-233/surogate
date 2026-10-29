@@ -46,7 +46,7 @@ public:
         bool trainable = true;
         bool external = false;                   ///< Provided by QLoRA weight provider (no local storage)
         bool managed_by_weight_manager = false;  ///< Provided by DslWeightManager (no local storage)
-        bool storage_alias = false;              ///< Frozen tied output reads the embedding allocation
+        bool storage_alias = false;  ///< Tied lm_head: the embedding's storage (the weight manager's, with one)
         bool arena_pending = false;  ///< Storage released ahead of the persistent arena; bound there, not copied
     };
 
@@ -84,10 +84,8 @@ public:
     [[nodiscard]] QLoRAWeightProvider* qlora_provider() const {
         return mQLoRAProvider;
     }
-    /// Wire a DslWeightManager (optional).
-    void set_weight_manager(DslWeightManager* manager) {
-        mWeightManager = manager;
-    }
+    /// Wire a DslWeightManager (optional). Throws when it does not share a tied lm_head the way this store does.
+    void set_weight_manager(DslWeightManager* manager);
     /// Set default stream for provider-backed resolution.
     void set_default_stream(cudaStream_t stream) {
         mDefaultStream = stream;

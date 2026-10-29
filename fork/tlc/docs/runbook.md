@@ -158,18 +158,19 @@ G1(d) 不成立时，模型级第 1 层的方案不能承载 P2/P3 的 c_t 与�
 $PY -m pytest -c fork/tlc/pyproject.toml fork/tlc/tests/gpu/test_gates.py -k g2 -s | tee "$TLC_RUNS/env/g2.txt"
 ```
 
-预期 7 个测试通过（`test_g2_initial_loss` 3 个、梯度 1 个、过拟合 2 个、恢复 1 个）。
+预期 8 个测试通过（`test_g2_initial_loss` 3 个、梯度 1 个、过拟合 2 个、tied head 1 个、恢复 1 个）。
 
 | 测试 | 判据 |
 |---|---|
 | `test_g2_initial_loss`（A0、A1、A1h） | 初始权重下随机 token 的交叉熵在 ln V + var(logits)/2 ± 0.1 之内，logits 的标准差 < 1。var(logits) 由权重估计：初始化时 final norm 的输出每个 token 均方为 1，所以它是宽度 × LM head（tied 时即 embedding）的均方。标准差这一半因此检查的是初始化方案（0.02 × √384 ≈ 0.39，打印为 `logit_std_from_weights`），不是原生训练器；打分用的 trainer 只返回目标的 log-probability，完整的 logits 要另建一个带 LoRA 的 trainer（如 G3）。期望值保持由权重估计，交叉熵这一半才是对原生前向的独立检查 |
 | `test_g2_gradients_point_where_the_reference_does` | A0 第 1 层与第 12 层的每个参数：原生 bf16 梯度与参照实现（分块形式，fp32 autograd，2 × 128 token）的梯度余弦 ≥ 0.99 [P] |
 | `test_g2_overfits_a_small_alphabet_batch`（A0、A1） | 一个只含 64 个 token id 的固定 batch（2 × 512，其 H(next \| current) ≥ 1.5），200 步 AdamW（学习率 1e-3）后 loss < 0.05 [P]。只看当前 token 的模型到不了这个下限，所以拟合它说明序列混合有效；消融 mixer 的对照在 CPU 参照上做（`prototypes/g2_suite.py`），原生图无法消融 |
-| `test_g2_resume_reproduces_the_next_steps_and_the_logits` | A0 的 smoke 阶段跑两次：一次不中断，一次从第 5 步的 checkpoint 恢复；第 6–10 步的 loss 相差 ≤ 1e-3（原生反向用浮点 atomicAdd，不要求逐位相等），两次的最终权重在 goldens 上的 logprobs 相差不超过 G1(b) 的 `tolerance` [P]。再把第 5 步的 checkpoint 导出到一个用另一个 seed 初始化的源目录：导出目录的权重文件与 checkpoint 的相同（sha256），与源目录的不同；tied embedding 只存一份（没有 `lm_head.weight`）。“加载进另一个 seed 构建的模型后 logits 逐位相等”（G2.4）还没有原生检查，见下文“已知问题” |
+| `test_g2_tied_head_trains_as_the_embedding` | A0 全量训练 10 步 AdamW（学习率 1e-3，2 × 128 token 的固定 batch）后存 checkpoint：weights shard 中没有 `lm_head`，`model.safetensors` 中没有 `lm_head.weight`，embedding 与初始值不同；训练后 trainer 的 logprobs 与 fp32 参照（读保存的权重，以 tied embedding 作 head）的最大绝对差不超过参照的 bf16 模式与 fp32 之差的两倍 [P]，打印为 `g2_tied_head_error` 与 `tolerance`；head 停在初始 embedding 的参照与 fp32 参照之差（`stale_head_gap`）必须超过这个界，否则这次比较分不出缺陷。它检查 fork 的 ledger topic T10（见 [model.md 的“tied LM head”](model.md#tied-lm-head)） |
+| `test_g2_resume_reproduces_the_next_steps_and_the_logits` | A0 的 smoke 阶段跑两次：一次不中断，一次从第 5 步的 checkpoint 恢复；第 6–10 步的 loss 相差 ≤ 1e-3（原生反向用浮点 atomicAdd，不要求逐位相等），两次的最终权重在 goldens 上的 logprobs 相差不超过 G1(b) 的 `tolerance` [P]。再把第 5 步的 checkpoint 导出到一个用另一个 seed 初始化的源目录：导出目录的权重文件与 checkpoint 的相同（sha256），与源目录的不同；tied embedding 只存一份（没有 `lm_head.weight`）。“加载进另一个 seed 构建的模型后 logits 逐位相等”（G2.4）还没有原生检查，见 [model.md 的说明](model.md#g1-与-g2-的参照套件) |
 
 梯度全部有限由 G0 的第 6 步检查；固定 batch 在真实数据上的过拟合是 G3 的 overfit 阶段。
 
-已知问题（待 owner 决定，见 [model.md 的“已知问题：tied LM head”](model.md#已知问题tied-lm-head)）：原生全量训练没有把 tied 的 `lm_head` 与 embedding 绑在一起，checkpoint 会写出一份停在初始值的 `lm_head.weight`。所以恢复检查预期在“没有 `lm_head.weight`”处失败：按停止规则在 G2 停下，记录输出，不要删掉这条断言。修复（原生 ledger topic，或明确改成 untied）之后，G2.4 的“加载进另一个 seed 构建的模型”检查和 G3 采样器在训练后权重上的检查一并补上。
+tied LM head：上游的原生全量训练原先让 tied 的 `lm_head` 停在初始值，并把它写进 checkpoint；fork 的 ledger topic T10 修复了它，但只在没有 GPU 的环境中验证过编译（见 [model.md 的“tied LM head”](model.md#tied-lm-head)）。所以 `test_g2_tied_head_trains_as_the_embedding`、恢复检查中“没有 `lm_head.weight`”的断言和过拟合检查，是这项修复第一次在 GPU 上受检：任何一个不成立时按停止规则在 G2 停下，记录输出（`-s` 打印的 JSON 行），不要删掉断言，也不要改成 untied 绕过。存储层面的共用另由原生测试检查：在同一台主机上运行 `fork/dev test native`，其中 `dsl-run-state-tests` 的 `[tied-head]` 用例应全部通过。
 
 ## G3 基线
 
@@ -197,11 +198,11 @@ $PY -m pytest -c fork/tlc/pyproject.toml fork/tlc/tests/gpu/test_probes.py fork/
 
 修好问题后重跑整段即可：已完成的阶段不再训练，失败的阶段从最后一个 checkpoint 恢复；`sample`、`eval`、`probe` 只是在同一份最终权重上重测。每行依次跑 10 步冒烟、100 步过拟合和 300 步 pilot（microbatch 32），每个阶段结束时在固定 prompt 上写出 greedy 样例；再在每次更新 16,384 token 不变的前提下用 microbatch 2 和 8 重跑 pilot（运行目录 `pilot-mb2`、`pilot-mb8`）；`eval` 给出验证 loss、按来源和种类的 loss 与 unigram 基线；`probe` 在两个 dev 套件上打分；`report` 汇总全部运行。判据：
 
-- 每条命令退出码为 0，`status` 为 completed，loss 曲线中没有 NaN 或 Inf。`-k "probe or g3"` 预期 4 个测试通过。
+- 每条命令退出码为 0，`status` 为 completed，loss 曲线中没有 NaN 或 Inf。`-k "probe or g3"` 预期 7 个测试通过（探针 1 个，采样器 6 个：三行各在初始权重与 pilot 的最终权重上）。
 - smoke：第 1 步的 loss 接近 G2 的初始 loss（`report` 的 `first_loss`；运行恢复过时它仍取自第一次调用，`attempts` 与 `resumed_from_step` 两列注明）。
 - overfit：在固定 batch 上，第 100 步的 loss 低于第 1 步的一半 [P]。
 - pilot：`eval` 输出 `below_unigram: true`。
-- 样例：10、100、300 步各有 `samples.json`（固定 prompt、生成的 token 与文本）；`-k g3` 通过，即在初始权重上，采样用的 trainer（零初始化的 rank 1 LoRA）给出的 next-token 分布与 `compute_logprobs` 一致，最大绝对差 ≤ 2e-2 [P]。训练之后两者未必一致（上文 G2 的已知问题：带 LoRA 的 trainer 把 embedding 当作 head，不读 `lm_head.weight`），所以在修复之前，训练后的样例只作参考。
+- 样例：10、100、300 步各有 `samples.json`（固定 prompt、生成的 token 与文本）；`-k g3` 通过，即采样用的 trainer（零初始化的 rank 1 LoRA）给出的 next-token 分布与 `compute_logprobs` 一致，最大绝对差 ≤ 2e-2 [P]，在初始权重和 `$TLC_RUNS/train/<行>/pilot` 的最终权重上各检查一次。带 LoRA 的 trainer 把 tied embedding 当作 head；T10 之后全量训练训练、保存的正是这个 head，所以训练后的样例反映打分的同一个网络。pilot 上的检查不成立时，训练后的样例只作参考，并按停止规则记录。
 - 探针：`test_probes.py` 通过，即 A0 在合成 dev 套件的短项上，原生的候选得分与参照实现（bf16 存储）之差不超过 G1(b) 的 `tolerance` × 计分 token 数，参照的领先幅度超过误差界时两者选出同一个候选。pilot 规模下准确率接近 chance 是预期的，这一步只检验探针流水线；test 半不在 G3 读取。
 - 记录每行在 microbatch 2、8、32 下的 tokens/s、MFU 与峰值显存，以及每次更新的有效目标数，然后填写下文的 GPU 预算。
 - 这些结果是 pilot：G3 只认证流水线，不认证模型质量。未通过 G3 时不进入 Phase 1。

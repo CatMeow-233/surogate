@@ -346,7 +346,9 @@ void DslModel::import_weights(const std::string& file_name, bool allow_cast, NCC
         [&](const std::string& name) -> Tensor& {
             return mWeightManager ? mWeightManager->get_master(name) : mParams->get(name);
         },
-        [&](const std::string& name) { return mParams->is_external(name); });
+        [&](const std::string& name) {
+            return mParams->is_external(name) || (mParams->has(name) && mParams->is_storage_alias(name));
+        });
 
     if (lora_enabled()) {
         mLoRAWeights->random_init(42, comm);
@@ -562,9 +564,15 @@ void DslModel::export_weights(const std::string& file_name, NCCLCommunicator& co
         throw std::runtime_error("DSL model: unsupported HF export mapping for " + name);
     };
 
+    // A tied head is the embedding's storage: HF stores it once, as the embedding (fork ledger T10).
+    std::vector<std::string> names;
+    for (const auto& name : mParams->param_names()) {
+        if (!mParams->is_storage_alias(name)) names.push_back(name);
+    }
+
     // The header comes first: every tensor's name, dtype and shape.
     std::vector<ExportEntry> exports;
-    for (const auto& name : mParams->param_names()) {
+    for (const auto& name : names) {
         exports_of(name, source_of(name), exports);
     }
     for (const auto& entry : exports) {
@@ -573,7 +581,7 @@ void DslModel::export_weights(const std::string& file_name, NCCLCommunicator& co
     writer.prepare_metadata(&comm);
 
     cudaStream_t stream = mRunState ? mRunState->MainStream : cudaStreamDefault;
-    for (const auto& name : mParams->param_names()) {
+    for (const auto& name : names) {
         Tensor full;
         if (is_gathered(name)) {
             full = mWeightManager->gather_full_master(name, comm, stream);

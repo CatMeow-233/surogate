@@ -30,7 +30,7 @@
 
 | 命令 | 运行内容 | 需要 |
 |---|---|---|
-| `fork/dev test cpu` | `fork/tools/test_cpu.sh`：fork 的 GRPO 补丁测试，以及上游 `tests/` 与 `csrc/src/testing/serve` 的 pytest，分 7 个进程运行，结果与 [known_failures.txt](../tools/known_failures.txt) 比较 | `FORK_PY` 指向装有 torch 和 [requirements-cpu-lane.txt](../tools/requirements-cpu-lane.txt) 的解释器（默认 `.venv/bin/python`） |
+| `fork/dev test cpu` | `fork/tools/test_cpu.sh`：fork 的补丁测试（`fork/patches/tests`），以及上游 `tests/` 与 `csrc/src/testing/serve` 的 pytest，分 7 个进程运行，结果与 [known_failures.txt](../tools/known_failures.txt) 比较 | `FORK_PY` 指向装有 torch 和 [requirements-cpu-lane.txt](../tools/requirements-cpu-lane.txt) 的解释器（默认 `.venv/bin/python`） |
 | `fork/dev test experimental` | 在 `fork/` 下的 `.venv-experimental` 中运行 `fork/experimental/tests` | uv；无法访问 download.pytorch.org 时设 `FORK_TORCH_INDEX=pypi` |
 | `fork/dev test patches` | `fork/patches/tests` | `FORK_PY`（默认 `.venv/bin/python`） |
 | `fork/dev test tlc` | `fork/tlc/tests/cpu`：TLC 包的 CPU 测试，不需要原生扩展。GPU 测试 `fork/tlc/tests/gpu` 按 [TLC 运行手册](../tlc/docs/runbook.md) 在 GPU 主机上运行 | `FORK_PY`（默认 `.venv/bin/python`），需要 CPU torch 和 [requirements-cpu-lane.txt](../tools/requirements-cpu-lane.txt) |
@@ -48,7 +48,7 @@
 
 1. 更新版本号：`git grep -n '<旧版本>' -- fork/experimental` 列出所有写有版本号的地方（`fork/experimental/pyproject.toml`，`fork/experimental/README.md` 与 `fork/experimental/docs/training.md` 中的下载文件名，以及 `fork/experimental/RELEASE_NOTES.md`），全部改为新版本。
 2. 改写 `fork/experimental/RELEASE_NOTES.md`：它就是 Release 的正文。
-3. 在 GPU 主机上运行 `fork/dev test gpu`。整理后的 fork 原生 C++ 用例（`fork/native/tests`）和 GRPO 周期计时指标只在没有 GPU 的环境中验证过编译和 CPU 行为，下一个实验 tag 之前必须在 GPU 上通过一次；结果记在对应 topic（T1–T4、T6）的 `conflict_history` 中。
+3. 在 GPU 主机上运行 `fork/dev test gpu`。整理后的 fork 原生 C++ 用例（`fork/native/tests`）、GRPO 周期计时指标和 T10 的 tied LM head 修复只在没有 GPU 的环境中验证过编译和 CPU 行为，下一个实验 tag 之前必须在 GPU 上通过一次（T10 还要通过 TLC 运行手册 G2 的 `test_g2_tied_head_trains_as_the_embedding`）；结果记在对应 topic（T1–T4、T6、T10）的 `conflict_history` 中。
 4. 运行 `fork/dev test experimental` 和 `fork/dev release experimental --tag experimental-v<新版本>`，确认测试通过、产物能构建。
 5. 提交并推送 `main`，等 fork CI 通过。
 6. 只推送这一个 tag：

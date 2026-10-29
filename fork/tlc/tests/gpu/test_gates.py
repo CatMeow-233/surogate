@@ -78,6 +78,21 @@ def gradients(trainer, ids: np.ndarray, targets: np.ndarray) -> dict[str, np.nda
     return {name: torch.from_dlpack(view).float().cpu().numpy() for name, view in trainer.get_gradients(0).items()}
 
 
+def adamw(learning_rate: float = 1e-3):
+    """The native AdamW of the G2 training checks: no weight decay, clip 1, betas 0.9 / 0.95."""
+    from surogate import _surogate
+
+    return _surogate.OptimizerConfig(
+        optimizer="adamw",
+        learning_rate=learning_rate,
+        weight_decay=0.0,
+        grad_clip=1.0,
+        adamw_beta1=0.9,
+        adamw_beta2=0.95,
+        adamw_epsilon=1e-8,
+    )
+
+
 def random_batch(vocab: int, batch: int, seq_len: int, seed: int, low: int = 0) -> tuple[np.ndarray, np.ndarray]:
     ids = np.random.default_rng(seed).integers(low, vocab, size=(batch, seq_len), dtype=np.int32)
     return ids, np.concatenate([ids[:, 1:], np.full((batch, 1), IGNORE, np.int32)], 1)
@@ -282,8 +297,6 @@ def test_g2_overfits_a_small_alphabet_batch(runs, row, tmp_path):
     """One fixed batch over 64 token ids, whose H(next | current) is at least 1.5 nats: no model that sees only
     the current token gets below that, so fitting it shows the sequence mixer works. The control with the mixers
     ablated runs on the reference (prototypes/g2_suite.py, gate G2.3); the native graph cannot be ablated."""
-    from surogate import _surogate
-
     ids, targets = random_batch(5 + 64, 2, 512, seed=5, low=5)  # ids 5..68: no special token
     bound = _conditional_entropy(ids)
     assert bound >= 1.5
@@ -291,18 +304,55 @@ def test_g2_overfits_a_small_alphabet_batch(runs, row, tmp_path):
     with native(runs / "models" / row, runs, tmp_path) as trainer:
         for step in range(200):
             trainer.step(ids, targets, _positions(ids))
-            optimizer = _surogate.OptimizerConfig(
-                optimizer="adamw",
-                learning_rate=1e-3,
-                weight_decay=0.0,
-                grad_clip=1.0,
-                adamw_beta1=0.9,
-                adamw_beta2=0.95,
-                adamw_epsilon=1e-8,
-            )
-            losses.append(float(trainer.update_with_config(optimizer, step + 1)["loss"]))
+            losses.append(float(trainer.update_with_config(adamw(), step + 1)["loss"]))
     print(json.dumps({"row": row, "g2_overfit_bound": bound, "g2_overfit_loss": losses[::20] + losses[-1:]}))
     assert losses[-1] < 0.05  # [P]
+
+
+TIED_STEPS = 10
+
+
+def test_g2_tied_head_trains_as_the_embedding(runs, tmp_path):
+    """A0 is tied: full training trains one matrix, read both as the embedding and as the LM head (fork ledger T10).
+    After a few AdamW steps the checkpoint stores it once (no `lm_head` in the weights shard, no `lm_head.weight` in
+    model.safetensors), it moved, and the trained trainer's log-probabilities match the fp32 reference on the saved
+    weights with the tied embedding as the head, within twice the reference's own bf16 error (the G1(b) criterion).
+    A reference whose head stayed at the initial embedding, the defect, must lie outside that bound."""
+    import torch
+
+    sys.path.insert(0, str(TLC / "prototypes"))
+    import ref_mamba2
+
+    model = runs / "models" / "A0"
+    cfg = _cfg(runs, "A0")
+    assert cfg["tie_word_embeddings"] is True
+    ids, targets = random_batch(cfg["vocab_size"], 2, 128, seed=7)
+    with native(model, runs, tmp_path, batch=2, seq_len=128) as trainer:
+        for step in range(TIED_STEPS):
+            trainer.step(ids, targets, _positions(ids))
+            trainer.update_with_config(adamw(), step + 1)
+        live = logprobs(trainer, ids, targets)
+        trainer.save_checkpoint(str(tmp_path / "checkpoints"), TIED_STEPS)
+    saved = tmp_path / "checkpoints" / f"step_{TIED_STEPS:08d}"
+    shard = set(load_file(next(saved.glob("weights.shard_*.safetensors"))))
+    weights = load_file(saved / "model.safetensors")
+    assert "embedding" in shard and "lm_head" not in shard
+    assert ref_mamba2.EMBEDDING in weights and ref_mamba2.LM_HEAD not in weights
+    initial = load_file(model / "model.safetensors")[ref_mamba2.EMBEDDING]
+    assert not torch.equal(weights[ref_mamba2.EMBEDDING], initial)
+
+    def reference(cfg, weights, **kwargs):
+        with torch.no_grad():
+            scorer = ref_mamba2.Reference.from_weights(cfg, weights, **kwargs)
+            return scorer.logprobs(torch.from_numpy(ids).long(), torch.from_numpy(targets).long()).numpy()
+
+    fp32 = reference(cfg, weights)
+    tolerance = 2 * float(np.abs(reference(cfg, weights, bf16=True) - fp32).max())
+    stale = reference({**cfg, "tie_word_embeddings": False}, {**weights, ref_mamba2.LM_HEAD: initial})
+    error, stale_gap = float(np.abs(live - fp32).max()), float(np.abs(stale - fp32).max())
+    print(json.dumps({"g2_tied_head_error": error, "tolerance": tolerance, "stale_head_gap": stale_gap}))
+    assert stale_gap > tolerance  # the comparison can tell the trained head from the initial one
+    assert error <= tolerance  # [P]
 
 
 def test_g2_resume_reproduces_the_next_steps_and_the_logits(runs, tmp_path, monkeypatch):
@@ -359,20 +409,24 @@ def init_seed_of(runs: Path) -> int:
     return json.loads((runs / "models" / "A0" / "tlc_meta.json").read_text())["init_seed"]
 
 
+@pytest.mark.parametrize("weights", ["initial", "pilot"])
 @pytest.mark.parametrize("row", ROWS)
-def test_g3_sampler_computes_the_base_model(runs, row, tmp_path):
+def test_g3_sampler_computes_the_base_model(runs, row, weights, tmp_path):
     """The sampler's trainer (rank-1 LoRA with B = 0, for next_token_logits) gives the next-token distribution of
-    the base model: its log-softmax at each target matches compute_logprobs without LoRA."""
+    the base model: its log-softmax at each target matches compute_logprobs without LoRA. On the initial weights
+    and on the pilot run's final weights: the LoRA trainer reads the tied embedding as the head, which is what full
+    training trains and saves (fork ledger T10), so after training both trainers still compute one network."""
+    model = runs / "models" / row if weights == "initial" else runs / "train" / row / "pilot"
     vocab = _cfg(runs, row)["vocab_size"]
     ids, targets = random_batch(vocab, 8, 512, seed=6)
     last = np.array([5, 127, 128, 129, 300, 400, 500, 510], np.int32)
-    with native(runs / "models" / row, runs, tmp_path / "base", batch=8) as trainer:
+    with native(model, runs, tmp_path / "base", batch=8) as trainer:
         base = logprobs(trainer, ids, targets)
-    with native(runs / "models" / row, runs, tmp_path / "lora", batch=8, settings=SAMPLING_LORA) as trainer:
+    with native(model, runs, tmp_path / "lora", batch=8, settings=SAMPLING_LORA) as trainer:
         logits = np.asarray(trainer.next_token_logits(np.ascontiguousarray(ids), last), np.float64)
     shifted = logits - logits.max(-1, keepdims=True)
     log_softmax = shifted - np.log(np.exp(shifted).sum(-1, keepdims=True))
     sampled = log_softmax[np.arange(8), targets[np.arange(8), last]]
     error = float(np.abs(sampled - base[np.arange(8), last]).max())
-    print(json.dumps({"row": row, "g3_sampler_max_abs_error": error}))
+    print(json.dumps({"row": row, "weights": weights, "g3_sampler_max_abs_error": error}))
     assert error <= 2e-2  # [P]

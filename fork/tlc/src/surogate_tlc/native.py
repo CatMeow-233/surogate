@@ -28,8 +28,9 @@ SCORING = {
     **FIXED,
 }
 # A rank-1 adapter on the MLP down projections. Its B factor starts at zero (the native LoRA initialisation), so the
-# adapted model computes the base model on the weights the LoRA trainer reads (with a tied head: the embedding, not a
-# checkpoint's lm_head.weight); native next_token_logits only runs with resident LoRA weights.
+# adapted model computes the base model on the weights the LoRA trainer reads (with a tied head: the embedding, which
+# full training also trains as the head and saves alone since fork ledger topic T10); native next_token_logits only
+# runs with resident LoRA weights.
 SAMPLING_LORA = {
     "lora": True,
     "lora_rank": 1,

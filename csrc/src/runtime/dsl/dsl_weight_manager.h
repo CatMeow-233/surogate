@@ -82,6 +82,10 @@ struct DslWeightManagerConfig {
     // FP8 caching
     bool enable_fp8_forward = false;
 
+    // Full training of a model with tie_word_embeddings: lm_head's master and work copy are the embedding's
+    // (fork ledger T10). A frozen LoRA base keeps two copies.
+    bool tie_lm_head = false;
+
     // FP8 weight streaming (dispatch-PP + fp8_hybrid): store frozen matmul block masters as
     // FP8-E4M3 in pinned host and stream the FP8 bytes (half the PCIe traffic), feeding the
     // FP8 GEMM directly. Only the matmul-weight fields (qkv/out/mlp_*) are quantized; conv /
@@ -119,6 +123,7 @@ struct DslWeightEntry {
     bool trainable = true;           ///< Whether this weight is trainable
     bool is_block = false;           ///< Whether this is a per-layer block weight
     bool ep_sliced = false;          ///< Stream only this rank's expert rows (EP-local prefetch)
+    bool tied_alias = false;         ///< Tied lm_head: master and work are the embedding's (tie_lm_head)
     int layer_idx = -1;              ///< Layer index for block weights (-1 for non-block)
     /// The dtype compute reads: the parameter's declared dtype, else the work dtype. A streamed
     /// block weight's prefetch buffer has it too, so an FP32 parameter (GDN A_log / dt_bias)
@@ -155,6 +160,8 @@ public:
     const Tensor& get(const std::string& name) const;
     bool has(const std::string& name) const;
     bool is_trainable(const std::string& name) const;
+    /// True for a tied lm_head whose master and work copy are the embedding's (DslWeightManagerConfig::tie_lm_head).
+    bool is_tied_alias(const std::string& name) const;
 
     /// True when this weight's work buffer is refilled between uses (streamed
     /// block weights, and the shared embedding/lm_head staging buffer under

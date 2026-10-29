@@ -82,7 +82,7 @@ fork 文档引用上游代码时写文件和符号名（函数、CMake 目标或
 `git diff -M --name-status $(git merge-base HEAD upstream/main) HEAD` 中的每一条都必须能在 ledger 中找到：
 
 - **A（新增）**：fork 自有路径，列在 `[owned]` 中（`fork/` 及少数必须放在其他位置的 fork 文件）。
-- **M（修改上游文件）**：归属某个 `[[topic]]`（T1–T9），每个 topic 记录提交、开关、涉及文件、测试和冲突历史。
+- **M（修改上游文件）**：归属某个 `[[topic]]`（T1–T10），每个 topic 记录提交、开关、涉及文件、测试和冲突历史。
 - **D（删除）/ R（重命名）**：分别列在 `[[deletion]]` 与 `[[relocation]]` 中；重命名必须是 100% 相似度。
 
 ledger 的表格形式见 [patches/README.md](patches/README.md)（由 ledger 生成）。检查命令（只用标准库，比较 merge base 与工作区，已暂存和未暂存的改动都算，未跟踪的文件在 `git add` 之前不计；`fork/dev check` 会运行它）：
@@ -93,7 +93,7 @@ python3 -I fork/tools/check_divergence.py --strict
 
 未登记的改动会使其以退出码 1 失败并列出路径；`--strict` 还会报告过期条目（topic 文件已与上游一致、登记路径已不存在等）。实现见 [tools/check_divergence.py](tools/check_divergence.py)。
 
-GRPO 补丁（T6–T8）调用的 fork 代码位于 `surogate/_fork`，上游文件中只保留调用它的几行。这些补丁的 CPU 测试位于 `fork/patches/tests/grpo`，用 `fork/dev test patches` 运行；`tests/` 与上游逐字节一致。
+GRPO 补丁（T6–T8）调用的 fork 代码位于 `surogate/_fork`，上游文件中只保留调用它的几行。这些补丁的 CPU 测试位于 `fork/patches/tests/grpo`，T10（tied 的 LM head 在全量训练时共用 embedding）的源码 pin 位于 `fork/patches/tests/native`，都用 `fork/dev test patches` 运行；`tests/` 与上游逐字节一致。
 
 ## 文档
 

@@ -92,3 +92,24 @@ vendored 代码位于 `csrc/src/third_party/`，但两处排除项仍写作旧�
 ## 测试：MagicMock 泄漏使同一会话中的结果依赖顺序
 
 `tests/grpo/test_failure_exit_status.py:36`：未构建 `_surogate` 扩展时，该模块把一个模块级 `MagicMock` 写入 `sys.modules["surogate._surogate"]`，并且从不移除。在同一个 pytest 会话中，之后收集的模块都会导入这个 mock：能收集到的模块变多，部分测试的结果翻转；`tests/train/test_padded_truncation.py` 中的 `test_loader_*` 会在 `while loader.has_next(1)` 里死循环（MagicMock 恒为真），直到内存耗尽。绕行方法：每个测试文件单独用一个进程运行，或至少让该文件在独立进程中运行；在单会话运行中用 `--deselect` 排除这两个 `test_loader_*` 测试也能避免内存耗尽。
+
+## 全量训练时 tied 的 LM head 停在初始值（fork 已修复：ledger T10）
+
+本节是例外：fork 修改了上游文件，修复记在 [ledger](../patches/ledger.toml) 的 T10。行号对应上游 `282f9901`，这些文件在 fork 的 T10 之前与它逐字节相同。
+
+现象：`tie_word_embeddings` 为 true 的模型（Qwen3 0.6B/1.7B/4B、Llama 3.2 1B/3B、Gemma 3/4、LFM2、LFM2-MoE/VL、Qwen3.5 小模型、TLC 各行）做原生全量训练（`lora: false`）时，前向读的 LM head 一直停在加载或初始化时的值，只有 embedding 被更新。上游的示例 `examples/training/full-finetune.yaml`、`examples/training/multi-gpu.yaml`、`examples/pt/qwen3.yaml`、`examples/pt/qwen3-continue.yaml` 都在其中；默认的 LoRA 训练不受影响。
+
+证据：
+
+- IR 中 `lm_head` 是单独的可训练参数（`surogate/dsl/modules/embedding.py` 的 `LMHead` 注册自己的 `weight`），前向 `fused_lm_head_loss` 按名字读它。
+- `csrc/src/runtime/dsl/dsl_param_store.cpp:203-204` 只在 `freeze_base`（LoRA）且没有 weight manager 时让 `lm_head` 共用 embedding 的存储；全量训练时它另有存储，加载时从 embedding 复制一份（`dsl_weight_loader.cpp:388-415`），`from_scratch` 时另取一份随机初始化（`dsl_model_weights.cpp:79-115`）。weight manager（ZeRO-3、`master_dtype` 与模型 dtype 不同、`offload_master`、`cpu_training`）为两者各建一份 master（`dsl_weight_manager.cpp:280` 起的 `allocate_weights`）。
+- 它的梯度就是 embedding 的梯度缓冲（`dsl_grad_store.cpp:104-113`，两部分梯度相加）。GPU 优化器跳过已见过的梯度指针：`adamw_8bit_optimizer.cpp:237-241`、`adamw_optimizer.cpp:224`/`460`、`normuon_optimizer.cpp:317`/`542`。名字按字典序排列，`embedding` 先到，所以只有 embedding 被更新。
+- checkpoint 的 `weights.shard_*`（`dsl_param_store.cpp:473`、`dsl_weight_manager.cpp:1192`）和 `model.safetensors`（`dsl_model_weights.cpp:567`、`576`）写出停在初始值的 `lm_head.weight`，`config.json` 仍是 `tie_word_embeddings: true`；遵守 tie 的使用者（vLLM、`surogate serve`）因此用的是训练后的 embedding，和训练时的网络不同。Gemma 3（`lm_head` 映射到 embedding 的 HF 名）导出时第二次写 `model.embed_tokens.weight` 而抛错（`utilities/safetensors.cpp:497`）；LFM2-MoE/VL 的 `tied_to` 映射在导出时抛 “unsupported HF export mapping”（`dsl_model_weights.cpp:562`）。
+- `cpu_training` 加 `adamw_8bit` 是例外：`step_cpu_streaming`（`adamw_8bit_optimizer.cpp:734-786`）不去重，两份 master 拿到同一个梯度、同步更新；但两个名字各有一份主机梯度（`dsl_grad_store.cpp:797-806`），CPU 上的梯度范数（`cpu_adamw.cpp:106`）把 tied 梯度算了两次，裁剪与设备路径不同。
+- 来历：`2580d6cc`（2026-01-28）把旧模块化实现移植到 DSL 时只带过来梯度别名和指针去重，没有带过来共用存储；`4ac6a3d8`（2026-02-03）之后 DSL 是唯一的训练路径。上游没有对应的 issue 或测试：全量训练的 GPU 测试多用 `tie_word_embeddings=False` 的小模型。
+
+修复（T10）：全量训练时 tied 的 `lm_head` 就是 embedding——参数存储（没有 weight manager 时）或 weight manager（让 `lm_head` 的 master 与 work 都是 embedding 的）共用一份存储；一次更新（两部分梯度之和）就是前向读的 head。无法共用（形状或 dtype 不同、没有 `embedding` 参数）的可训练 tied head 在构建时报错。`weights.shard_*` 和 `model.safetensors` 只写 embedding（没有 `lm_head.weight`，与 HF 保存 tied 模型的方式一致，原生加载从 embedding 回填）；旧 checkpoint 中停在初始值的 `lm_head` 在加载时被忽略。`cpu_training` 下共用的 master 只做一次 CPU 更新，tied 梯度只有一份主机副本，范数只算一次。LoRA 与 QLoRA 的行为不变。代价：tied 全量训练与 LoRA 的别名一样不再把参数绑定进 persistent arena（参数留在各自的分配中，总量少了一份 V×C）。
+
+仍未处理（只读代码，GPU 上未确认）：dispatch-PP 的多阶段全量训练把 `embedding` 与 `lm_head` 两个名字的梯度分别从不同 GPU 收集，再写进同一块别名缓冲，后写的覆盖先写的（`dsl_model_execution.cpp` 的 `dispatch_pp_write_grads`），这在 T10 之前就存在；`cpu_training` 配 `adamw` 或 `normuon` 没有流式分支，块参数的梯度在 GPU 上为空，与 tie 无关。
+
+验证：在没有 GPU 的环境中为 sm_120a 编译了包含改动头文件的全部 87 个上游翻译单元和新的 C++ 测试；源码 pin `fork/patches/tests/native/test_tied_lm_head.py`（`fork/dev test patches`）在未修复的源码上失败。行为只能在 GPU 上确认：`fork/dev test native` 中的 `dsl-run-state-tests '[tied-head]'`，以及 TLC 运行手册 G2 的 `test_g2_tied_head_trains_as_the_embedding`。

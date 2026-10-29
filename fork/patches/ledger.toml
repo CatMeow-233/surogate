@@ -241,3 +241,44 @@ tests = ["fork/experimental/tests/test_release_version.py"]
 conflict_history = [
     "2026-10-27 reverse replay from b5af2f8e, conflict blocks at 90/30/14 days: none",
 ]
+
+[[topic]]
+id = "T10"
+title = "tied lm_head shares the embedding in full training"
+# The commit that adds this topic: `git log --grep 'tie a tied lm_head to the embedding'`.
+commits = []
+switch = "always on for tie_word_embeddings models; LoRA/QLoRA unchanged"
+# Defect (upstream 282f9901, unchanged since 2580d6cc / 4ac6a3d8): in full training the IR's lm_head is a
+# trainable parameter of its own, while its gradient is the embedding's buffer (dsl_grad_store.cpp:104-113)
+# and the GPU optimizers skip a gradient pointer they have seen (adamw_8bit_optimizer.cpp:237-241,
+# adamw_optimizer.cpp:224/460, normuon_optimizer.cpp:317/542). Only the embedding was updated, with the
+# summed gradient; the forward kept reading lm_head at its initial value, and checkpoints wrote it.
+# dsl_param_store.cpp:203-204 aliased the storage only under freeze_base (LoRA) without the weight manager.
+# Fix: dsl_param_store.cpp drops the freeze_base condition (and refuses a trainable tied head it cannot
+# alias); the weight manager makes lm_head's master and work copy the embedding's in full training
+# (dsl_weight_manager.cpp allocate_weights); weights shards and HF exports skip the alias (no
+# lm_head.weight, as HF writes a tied model; dsl_param_store.cpp:473, dsl_weight_manager.cpp:1192,
+# dsl_model_weights.cpp:345/567/576); under cpu_training the shared master takes one CPU step
+# (adamw_8bit_optimizer.cpp:722-786) and the tied gradient has one host copy, so the CPU norm counts it
+# once (dsl_grad_store.cpp:797-806). Built for sm_120a without a GPU; behaviour is GPU-unverified.
+files = [
+    "csrc/src/runtime/dsl/dsl_param_store.h",
+    "csrc/src/runtime/dsl/dsl_param_store.cpp",
+    "csrc/src/runtime/dsl/dsl_weight_manager.h",
+    "csrc/src/runtime/dsl/dsl_weight_manager.cpp",
+    "csrc/src/runtime/dsl/dsl_model_weights.cpp",
+    "csrc/src/runtime/dsl/dsl_grad_store.cpp",
+    "csrc/src/runtime/optimizers/adamw_8bit_optimizer.cpp",
+]
+fork_files = [
+    "fork/native/cmake/fork_native.cmake",   # attaches the C++ test to dsl-run-state-tests (shared with T5)
+    "fork/native/tests/test-fork-tied-lm-head.cpp",
+    "fork/patches/tests/native/test_tied_lm_head.py",
+]
+tests = [
+    "fork/patches/tests/native/test_tied_lm_head.py",
+    "fork/native/tests/test-fork-tied-lm-head.cpp",
+    "fork/tlc/tests/gpu/test_gates.py",
+    "fork/tlc/tests/cpu/test_gpu_gate_logic.py",
+]
+conflict_history = []

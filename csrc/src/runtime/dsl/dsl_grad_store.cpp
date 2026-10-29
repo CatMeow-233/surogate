@@ -795,14 +795,21 @@ void DslGradStore::enable_streaming(const DslParamStore& params) {
 }
 
 void DslGradStore::allocate_streaming_buffers(const DslParamStore& params) {
-    // 1. Allocate CPU pinned storage for ALL parameter gradients
+    // 1. Allocate CPU pinned storage for ALL parameter gradients. Names sharing a device gradient (a tied lm_head
+    //    and the embedding) share its host copy too, so the CPU norm counts it once, as the device norm does
+    //    (fork ledger T10).
+    std::unordered_map<const std::byte*, Tensor> host_of_device;
     for (const auto& kv : mGrads) {
         const auto& name = kv.first;
         const auto& gpu_grad = kv.second;
+        if (auto shared = host_of_device.find(gpu_grad.Data); gpu_grad.Data && shared != host_of_device.end()) {
+            mCpuGrads.emplace(name, shared->second);
+            continue;
+        }
         std::vector<long> shape(gpu_grad.Sizes.begin(), gpu_grad.Sizes.begin() + gpu_grad.Rank);
-        mCpuGrads.emplace(
-            name,
-            mAllocator->allocate(gpu_grad.DType, ("cpu_d_" + name).c_str(), EAllocationType::PINNED, shape));
+        Tensor host = mAllocator->allocate(gpu_grad.DType, ("cpu_d_" + name).c_str(), EAllocationType::PINNED, shape);
+        if (gpu_grad.Data) host_of_device.emplace(gpu_grad.Data, host);
+        mCpuGrads.emplace(name, host);
     }
 
     // 2. Allocate CPU staging buffer (for micro-step > 0 accumulation)

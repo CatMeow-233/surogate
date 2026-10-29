@@ -10,7 +10,7 @@
 |---|---|
 | `tests/` | 上游 pytest |
 | `csrc/src/testing/` | 上游 C++（Catch2/CTest）与服务端 Python |
-| `fork/patches/tests/` | fork：GRPO 补丁的 CPU 测试 |
+| `fork/patches/tests/` | fork：上游补丁的 CPU 测试（`grpo/`：GRPO 补丁；`native/`：原生补丁的源码 pin） |
 | `fork/experimental/tests/` | fork：实验训练器 |
 | `fork/tlc/tests/` | fork：TLC 包；`cpu/` 不需要原生扩展，`gpu/` 在 GPU 主机上运行 |
 | `fork/native/tests/` | fork：编译进上游测试可执行文件的 C++ 用例 |

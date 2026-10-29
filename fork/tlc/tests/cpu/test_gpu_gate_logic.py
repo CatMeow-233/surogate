@@ -10,8 +10,12 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
+from safetensors.torch import load_file, save_file
+from surogate_tlc import hf, init
 
 GPU = Path(__file__).resolve().parents[1] / "gpu"
+REF_FILE = Path(__file__).resolve().parents[2] / "prototypes" / "ref_mamba2.py"
 
 
 def _load(name: str):
@@ -158,3 +162,93 @@ def test_w_twice_without_a_measurement(monkeypatch, tmp_path, child, outcome):
     monkeypatch.setattr(module, "CHILD", f"import os, sys\n{child}\n")
     module.test_w_used_twice_is_recorded(tmp_path, tmp_path / "t")
     assert json.loads((tmp_path / "env" / "w-twice.json").read_text())["outcome"] == outcome
+
+
+@pytest.fixture(scope="module")
+def ref():
+    spec = importlib.util.spec_from_file_location("ref_mamba2_gate_replay", REF_FILE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="module")
+def small_a0(tmp_path_factory):
+    """A two-layer A0 with its initial weights, as the runbook's model directory would hold it."""
+    model = tmp_path_factory.mktemp("runs") / "models" / "A0"
+    model.mkdir(parents=True)
+    cfg = hf.row_config("A0", num_hidden_layers=2, tlc_layer_pattern="MM", chunk_size=16)
+    (model / "config.json").write_text(json.dumps(cfg))
+    save_file(init.init_state_dict(cfg, seed=0), model / "model.safetensors")
+    return model
+
+
+class TiedTrainer:
+    """Stand-in for the trainer of test_g2_tied_head_trains_as_the_embedding, scored by the reference in bf16: an
+    update moves the embedding. `defect` leaves the head at the initial embedding ("stale head", the forward of the
+    unfixed runtime), saves it as well ("head saved", the unfixed checkpoint) or trains nothing ("untrained")."""
+
+    def __init__(self, model: Path, defect: str | None, ref) -> None:
+        self.cfg = json.loads((model / "config.json").read_text())
+        self.w, self.ref, self.defect = load_file(model / "model.safetensors"), ref, defect
+        self.initial = self.w[ref.EMBEDDING].clone()
+
+    def step(self, ids, targets, positions) -> None:
+        pass
+
+    def update_with_config(self, optimizer, step: int) -> None:
+        if self.defect != "untrained":
+            noise = torch.randn(self.initial.shape, generator=torch.Generator().manual_seed(step))
+            self.w[self.ref.EMBEDDING] = (self.w[self.ref.EMBEDDING].float() + 0.01 * noise).to(self.initial.dtype)
+
+    def compute_logprobs(self, ids, targets, use_lora, position_ids=None) -> np.ndarray:
+        cfg, weights = self.cfg, self.w
+        if self.defect == "stale head":
+            cfg, weights = {**cfg, "tie_word_embeddings": False}, {**weights, self.ref.LM_HEAD: self.initial}
+        with torch.no_grad():
+            reference = self.ref.Reference.from_weights(cfg, weights, bf16=True)
+            return reference.logprobs(torch.from_numpy(ids).long(), torch.from_numpy(targets).long()).numpy()
+
+    def save_checkpoint(self, path: str, step: int) -> None:
+        out = Path(path) / f"step_{step:08d}"
+        out.mkdir(parents=True)
+        head = self.defect == "head saved"
+        save_file({**self.w, **({self.ref.LM_HEAD: self.initial} if head else {})}, out / "model.safetensors")
+        names = ["embedding", "final_norm", *(["lm_head"] if head else [])]
+        save_file({name: torch.zeros(1) for name in names}, out / "weights.shard_000_of_001.safetensors")
+
+
+@pytest.mark.parametrize(
+    "defect, report",
+    [
+        (None, None),
+        ("stale head", "error <= tolerance"),
+        ("head saved", '"lm_head" not in'),
+        ("untrained", "torch.equal"),
+    ],
+    ids=["tied", "stale head", "head saved", "untrained"],
+)
+def test_g2_tied_head_fails_on_a_head_left_behind(gates, monkeypatch, ref, small_a0, tmp_path, defect, report):
+    """The tied-head gate passes a runtime that trains one matrix, and fails one whose forward keeps the initial
+    head, one whose checkpoint saves a head, and one that trains nothing; one trainer, dropped at its block's end."""
+    threads = torch.get_num_threads()
+    torch.set_num_threads(1)  # the reference recurrence is many small ops
+    trainers = []
+
+    def native_trainer(model, data, out, **kwargs):
+        trainers.append(TiedTrainer(Path(model), defect, ref))
+        return SimpleNamespace(trainer=trainers[-1])
+
+    monkeypatch.setattr(gates, "native_trainer", native_trainer)
+    monkeypatch.setattr(gates, "adamw", lambda: None)
+    runs = small_a0.parents[1]
+    try:
+        if defect is None:
+            gates.test_g2_tied_head_trains_as_the_embedding(runs, tmp_path)
+        else:
+            with pytest.raises(AssertionError) as failure:
+                gates.test_g2_tied_head_trains_as_the_embedding(runs, tmp_path)
+            assert report in str(failure.traceback[-1].statement)  # the assertion that failed
+    finally:
+        torch.set_num_threads(threads)
+    assert len(trainers) == 1

@@ -87,7 +87,7 @@ fork CI（`.github/workflows/fork-ci.yml`）在每个分支的每次推送时运
 | 8. 检查 | `fork/dev check`；不带 `--fast` 时还运行 `fork/dev test patches`、`fork/dev test experimental`、`fork/dev test tlc` 和 `fork/dev test cpu`，它们需要准备好的 `.venv`（或 `FORK_PY`）、uv，以及 download.pytorch.org（无法访问时设 `FORK_TORCH_INDEX=pypi`），见 [fork/README.md 的“首次准备环境”](../README.md#首次准备环境)。 | 退出码 4 |
 | 9. 发布 | `git push -u origin <同步分支>`；PR 还没有打开时 `gh pr create -R CatMeow-233/surogate --base main`，正文（`.git/fork-sync-pr.md`）是第 3 步的报告加上同步分支的提交列表；PR 已经打开时（例如 `--continue` 之后）推送就更新了它，不再新建。`--local` 跳过此步。 | 退出码 1 |
 | 10. 完成 | PR 的检查通过后运行 `fork/dev sync --finish`：先用 `gh pr checks` 确认 `check`、`experimental`、`fork-tests`、`openmp-contract` 都已通过，再 `git switch main`、`git merge --ff-only <同步分支>`、`git push origin main`。 | 检查未全部通过时退出码 4，列出未通过的 job |
-| 11. GPU 复测 | 报告中出现 T1–T5 或 T6–T8 的上游提交时，在 GPU 主机上运行 `fork/dev test gpu`，并在该 topic 的 `conflict_history` 末尾记一行（日期、上游 sha、结果）。 | — |
+| 11. GPU 复测 | 报告中出现 T1–T5、T6–T8 或 T10 的上游提交时，在 GPU 主机上运行 `fork/dev test gpu`，并在该 topic 的 `conflict_history` 末尾记一行（日期、上游 sha、结果）。 | — |
 
 `--continue` 在同步分支上重新执行第 6–9 步，已经完成的部分会跳过，所以修复之后可以反复运行。`--local` 与 `--fast` 用于演练：前者不访问 `origin`、不推送也不开 PR（之后用 `fork/dev sync --finish --local` 在本地快进），后者跳过第 8 步中的测试套件。
 
@@ -166,6 +166,12 @@ git log --oneline HEAD..MERGE_HEAD -- <文件>                # 上游改了什�
 - 文件：`pyproject.toml` 的 `[tool.setuptools_scm]` 中一行 `git_describe_command`（`--match v[0-9]*`）。
 - 解决：上游修改该表时保留这一行；没有它，`experimental-v*` tag 会成为原生包的版本来源。
 - 测试：`fork/experimental/tests/test_release_version.py`（`fork/dev test experimental`）。
+
+### T10 tied 的 LM head 在全量训练时共用 embedding
+
+- 文件：`csrc/src/runtime/dsl/dsl_param_store.{h,cpp}`（`storage_alias` 的条件不再要求 `freeze_base`；无法共用的可训练 tied head 报错；`iterate_tensors` 跳过别名；`set_weight_manager` 核对两边一致）、`csrc/src/runtime/dsl/dsl_weight_manager.{h,cpp}`（`DslWeightManagerConfig::tie_lm_head`、`DslWeightEntry::tied_alias`、`allocate_weights` 中 `lm_head` 取 embedding 的 master 与 work、`iterate_tensors` 跳过）、`csrc/src/runtime/dsl/dsl_model_weights.cpp`（导出与 `resolve_tied_params` 跳过别名）、`csrc/src/runtime/dsl/dsl_grad_store.cpp`（`allocate_streaming_buffers` 中共用设备梯度的名字共用主机副本）、`csrc/src/runtime/optimizers/adamw_8bit_optimizer.cpp`（`step_cpu_streaming` 每个 master 只更新一次）。缺陷与证据见 [upstream-errata.md](upstream-errata.md#全量训练时-tied-的-lm-head-停在初始值fork-已修复ledger-t10)。
+- 解决：每处改动都很小，上游改写这些函数时以上游为准，再把对应的几行放回；源码 pin 按函数体定位，会指出缺了哪一处。上游自己修好 tied head（例如在 IR 中让 head 直接读 embedding，或让参数存储在全量训练时也共用存储）时，删掉 fork 的对应改动和 pin，从 ledger 删除 T10。T10 依赖上游的两点，pin 同样检查：`lm_head` 的梯度就是 embedding 的梯度缓冲，各个 GPU 优化器和设备上的梯度范数对同一个梯度指针只处理一次；上游去掉这种去重时，共用的矩阵会被更新两次。
+- 测试：`fork/patches/tests/native/test_tied_lm_head.py`（`fork/dev test patches`，不需要 GPU）；GPU 主机上 `fork/dev test native`（`dsl-run-state-tests '[tied-head]'`）和 TLC 运行手册 G2 的 `test_g2_tied_head_trains_as_the_embedding`。
 
 ### 移动过的上游笔记与删除的文件
 

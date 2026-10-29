@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# CPU test lane: the fork's GRPO patch tests plus the upstream pytest suites, without a GPU
-# or a built native extension. Upstream failures are compared with known_failures.txt.
+# CPU test lane: the fork's patch tests (GRPO, and the native patches' source pins) plus the
+# upstream pytest suites, without a GPU or a built native extension. Upstream failures are
+# compared with known_failures.txt.
 #
 # Usage: FORK_PY=<python with requirements-cpu-lane.txt and torch> fork/tools/test_cpu.sh
 #   FORK_PY defaults to .venv/bin/python. JUnit reports go to build/fork-test-cpu/<n>.xml.

@@ -10,7 +10,7 @@
 | [cmake/training_openmp.cmake](cmake/training_openmp.cmake) | `surogate_enable_training_openmp()`：把 `OpenMP::OpenMP_CXX` 链接到训练库 | T5 |
 | [include/surogate_fork/](include/surogate_fork/) | fork 头文件，源码中写作 `#include "surogate_fork/<文件名>"` | T3 |
 | [openmp-contract/](openmp-contract/) | 独立的 OpenMP 接线回归测试，只需主机 C++ 编译器和 OpenMP | T5 |
-| [tests/](tests/) | fork 的 C++ 测试用例，编译进上游的 `dsl-run-state-tests`（T1）和 `integration-tests`（T2–T4） | T1–T4 |
+| [tests/](tests/) | fork 的 C++ 测试用例，编译进上游的 `dsl-run-state-tests`（T1、T10）和 `integration-tests`（T2–T4） | T1–T4、T10 |
 | [release/](release/) | `build-wheel.sh` 在 CUDA 构建镜像中构建 fork 的原生 wheel；`VERSION` 是发布版本号，推送对它的修改即发布。由 `.github/workflows/native-release.yml` 使用，见 [发布原生版本](../docs/build-and-release.md#发布原生版本) | — |
 
 各 topic 的提交、开关和冲突历史见 [ledger](../patches/ledger.toml)。
@@ -54,6 +54,6 @@ git diff -U0 upstream/main -- csrc/CMakeLists.txt   # 只有一个 hunk，恰好
 之后只运行 fork 的用例（这些标签只出现在 fork 的测试中）：
 
 ```bash
-csrc/build/dsl-run-state-tests '[dispatch-pp]'
+csrc/build/dsl-run-state-tests '[dispatch-pp],[tied-head]'
 csrc/build/integration-tests '[fused-dx],[wgrad-zero],[recipe]'
 ```

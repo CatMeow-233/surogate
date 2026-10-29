@@ -125,17 +125,19 @@ CPU 测试另外检查参照实现的假设与编译出的 IR 一致（每层的
 | G2.2 初始 loss | 随机 token 的交叉熵在 ln V + var(logits)/2 ± 0.1 之内，logits 的标准差小于 1 |
 | G2.3 过拟合 | 一个 16 个 token id 的固定 batch，其 H(next \| current) ≥ 1.5：完整模型 200 步内 loss < 0.05，mixer 输出置零的消融模型 loss ≥ 0.9 × 下限。在 16384 的词表上随机 batch 中几乎每个 token 的后继都唯一，消融模型也能拟合，过拟合测试就证明不了序列混合有效 |
 
-G2.4（保存后加载进另一个 seed 构建的模型，logits 逐位相等）与 G2.5（resume 与不中断的运行逐位相等）测的是原生 checkpoint，不在 CPU 参照上做：P0 的训练循环、优化器状态、调度器与数据游标都在原生训练器里。G2.5 在 GPU 上的对应检查见 [运行手册的 G2](runbook.md#g2-数学与梯度)；数据游标的恢复由 `fork/tlc/tests/gpu/test_data_native.py` 逐位检查。G2.4 目前只检查到导出：导出复制 checkpoint 的权重文件（sha256 相同），另一个 seed 的源目录只提供权重以外的文件。把 checkpoint 加载进另一个 seed 构建的 trainer（原生 `load_checkpoint`）再逐位比较 logits 还没有做：它要在 GPU 上确认原生的加载路径，并且取决于下文 tied LM head 的处理。
+G2.4（保存后加载进另一个 seed 构建的模型，logits 逐位相等）与 G2.5（resume 与不中断的运行逐位相等）测的是原生 checkpoint，不在 CPU 参照上做：P0 的训练循环、优化器状态、调度器与数据游标都在原生训练器里。G2.5 在 GPU 上的对应检查见 [运行手册的 G2](runbook.md#g2-数学与梯度)；数据游标的恢复由 `fork/tlc/tests/gpu/test_data_native.py` 逐位检查。G2.4 目前只检查到导出：导出复制 checkpoint 的权重文件（sha256 相同），另一个 seed 的源目录只提供权重以外的文件。把 checkpoint 加载进另一个 seed 构建的 trainer（原生 `load_checkpoint`）再逐位比较 logits 还没有做：它要在 GPU 上确认原生的加载路径。下文 tied LM head 的修复（T10）之后，checkpoint 中只有 embedding 一份，它不再取决于 head 的处理。
 
-### 已知问题：tied LM head
+### tied LM head
 
-四行都是 tied embedding，但原生全量训练没有把两者绑在一起（GPU 的 G2 会暴露它，CPU 上只能读代码确认）：
+四行都是 tied embedding。上游的原生全量训练原先没有把两者绑在一起：IR 中 `lm_head` 是单独的可训练参数（`hf_mapping` 为 `lm_head.weight`），它的梯度与 embedding 的梯度是同一块缓冲，AdamW 跳过已见过的梯度指针，所以只更新 embedding（按两者梯度之和），前向读的 `lm_head` 一直停在加载时的值，checkpoint 与最终导出还写出这份 `lm_head.weight`。缺陷的证据与影响范围见 [upstream-errata.md 的对应一节](../../docs/upstream-errata.md#全量训练时-tied-的-lm-head-停在初始值fork-已修复ledger-t10)。
 
-- IR 中 `lm_head` 是单独的可训练参数（`hf_mapping` 为 `lm_head.weight`）。只有开 LoRA 时，参数存储才让它与 embedding 共用存储（`csrc/src/runtime/dsl/dsl_param_store.cpp`，`storage_alias` 要求 `freeze_base`）；全量训练时它有自己的存储，加载时由 embedding 填入。
-- 它的梯度与 embedding 的梯度是同一块缓冲（`dsl_grad_store.cpp`），AdamW 跳过已见过的梯度指针，所以只更新 embedding（按两者梯度之和），`lm_head` 一直停在初始值，而前向读的正是这份 `lm_head`。
-- checkpoint 与最终导出按参数名写出全部参数，因而带一份停在初始值的 `lm_head.weight`；`ref_mamba2.Reference` 拒绝这样的 tied checkpoint。带 LoRA 的采样 trainer 又把 embedding 当作 head，所以训练之后采样与打分算的不是同一个网络。
+fork 的 ledger topic T10 修复了它，只在没有 GPU 的环境中做过编译与源码检查，行为要在 GPU 上确认：
 
-修复要 owner 决定：要么加一个原生 ledger topic（全量训练时也让 tied 的 `lm_head` 与 embedding 共用存储，导出时不写别名参数；P0 原本不改上游文件），要么把各行明确改成 untied（参数量与设计都变）。在那之前 G2 的恢复检查预期失败（运行手册的 G2），G3 的训练后样例只作参考。
+- 全量训练时 tied 的 `lm_head` 与 embedding 共用一份存储（`csrc/src/runtime/dsl/dsl_param_store.cpp`；有 weight manager 时由它共用 master 与 work），一次 AdamW 更新（两部分梯度之和）就是前向读的 head。
+- `weights.shard_*` 与 `model.safetensors` 只存 embedding，没有 `lm_head.weight`，与初始化写出的模型目录一致；`ref_mamba2.Reference` 可以直接读取导出的权重，原生加载从 embedding 回填 head。
+- 带 LoRA 的采样 trainer 本来就把 embedding 当作 head，所以训练之后采样与打分算的是同一个网络。
+
+GPU 上的检查在运行手册的 [G2](runbook.md#g2-数学与梯度)（`test_g2_tied_head_trains_as_the_embedding`）与 [G3](runbook.md#g3-基线)（采样器在 pilot 的最终权重上）。前者在 A0 上训练 10 步 AdamW，检查 checkpoint 的 weights shard 没有 `lm_head`、`model.safetensors` 没有 `lm_head.weight`、embedding 确实变了，并且训练后 trainer 的 logprobs 与 fp32 参照（读保存的权重、以 tied embedding 作 head）之差不超过参照自身 bf16 误差的两倍；head 停在初始 embedding 的参照，也就是缺陷本身，必须落在这个界之外。CPU 测试 `fork/tlc/tests/cpu/test_gpu_gate_logic.py` 用替身 trainer 重放这个判定：head 停在初始值、checkpoint 存了 head、embedding 没有被训练，三种缺陷都让它失败。
 
 ### G1(b) 的 goldens
 

@@ -200,8 +200,11 @@ DslParamStore::DslParamStore(const Module& module,
         Entry entry;
         entry.external = mExternalParams.find(name) != mExternalParams.end();
         entry.managed_by_weight_manager = (!entry.external && mUsesWeightManager);
-        entry.storage_alias = freeze_base && config.TiedWordEmbeddings && name == "lm_head" &&
-            graph.params.contains("embedding") && !entry.external && !mUsesWeightManager;
+        // A tied lm_head is the embedding, frozen or trained: one tensor, so the update the embedding gets (with
+        // both gradients, which DslGradStore sums into one buffer) is the head the forward reads. In full training
+        // under the weight manager it is the manager that shares the storage (fork ledger T10).
+        entry.storage_alias = config.TiedWordEmbeddings && name == "lm_head" && graph.params.contains("embedding") &&
+                              !entry.external && (!mUsesWeightManager || !freeze_base);
         if (entry.external || entry.managed_by_weight_manager || entry.storage_alias) {
             entry.tensor = Tensor::empty(dtype, shape);
         } else {
@@ -219,10 +222,22 @@ DslParamStore::DslParamStore(const Module& module,
     if (mParams.contains("lm_head") && mParams.at("lm_head").storage_alias) {
         auto& head = mParams.at("lm_head").tensor;
         const auto& embedding = mParams.at("embedding").tensor;
-        if (head.nelem() != embedding.nelem() || head.DType != embedding.DType) {
-            throw std::runtime_error("tied frozen head and embedding must have matching shapes and dtype");
+        if (head.Rank != embedding.Rank || head.DType != embedding.DType ||
+            !std::equal(head.Sizes.begin(), head.Sizes.begin() + head.Rank, embedding.Sizes.begin())) {
+            throw std::runtime_error("tied head and embedding must have matching shapes and dtype");
         }
         head = embedding;
+    }
+    // A trainable tied head with storage of its own would get no update (its gradient is the embedding's), and the
+    // forward would keep reading its initial value: refuse it rather than train a model that is not the one saved.
+    if (config.TiedWordEmbeddings && !freeze_base) {
+        for (const char* head : {"lm_head", "lm_head_weight"}) {
+            auto it = mParams.find(head);
+            if (it != mParams.end() && it->second.trainable && !it->second.storage_alias) {
+                throw std::runtime_error(std::string("DslParamStore: tie_word_embeddings is set, but the trainable '") +
+                                         head + "' cannot share the 'embedding' parameter's storage");
+            }
+        }
     }
 
     // Deterministic ordering for optimizer updates/checkpointing.
@@ -297,6 +312,17 @@ bool DslParamStore::work_is_transient(const std::string& name) const {
     if (it == mParams.end()) return false;
     if (!it->second.managed_by_weight_manager || !mWeightManager) return false;
     return mWeightManager->work_is_transient(name);
+}
+
+void DslParamStore::set_weight_manager(DslWeightManager* manager) {
+    mWeightManager = manager;
+    // Both decide from the same inputs whether a tied head is the embedding; reading two copies would be the bug
+    // this sharing fixes (fork ledger T10).
+    if (manager && mParams.contains("lm_head") &&
+        mParams.at("lm_head").storage_alias != manager->is_tied_alias("lm_head")) {
+        throw std::logic_error(
+            "DslParamStore: the weight manager and the parameter store disagree on the tied lm_head");
+    }
 }
 
 Tensor* DslParamStore::master_tensor(const std::string& name) const {
@@ -482,6 +508,9 @@ void DslParamStore::iterate_tensors(const std::function<void(std::string, const 
     for (const auto& name : mParamOrder) {
         auto it = mParams.find(name);
         if (it == mParams.end()) continue;
+        if (it->second.storage_alias) {
+            continue;  // the embedding's storage: saved once, under its name (a stale copy in an older file is ignored)
+        }
         if (it->second.external) {
             if (!mQLoRAProvider) {
                 throw std::runtime_error("DslParamStore: external parameter requested without QLoRA provider: " + name);

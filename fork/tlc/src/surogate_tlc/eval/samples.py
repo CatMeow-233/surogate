@@ -2,11 +2,11 @@
 
 Every sample re-runs the whole sequence for each new token through the native next_token_logits, which needs a
 trainer with resident LoRA weights: native.SAMPLING_LORA adds a rank-1 adapter whose B factor starts at zero, so the
-adapted model computes the base model on initial weights. On trained ones it need not: with LoRA the native trainer
-uses the tied embedding as the head and ignores a checkpoint's lm_head.weight (docs/model.md: 已知问题：tied LM head).
-There is no decode cache (Mamba decoding is not native yet), which is
-slow per token but cheap at G3's few prompts. Prompts are framed as documents start in the shards: <|bos|>
-<|code_start|> for code, <|bos|> for English.
+adapted model computes the base model. With LoRA the native trainer uses the tied embedding as the head, which is
+also the head full training trains and saves since fork ledger topic T10 (docs/model.md: tied LM head), so this holds
+on trained weights too; G3 checks it on the initial and the pilot weights. There is no decode cache (Mamba decoding
+is not native yet), which is slow per token but cheap at G3's few prompts. Prompts are framed as documents start in
+the shards: <|bos|> <|code_start|> for code, <|bos|> for English.
 """
 
 from __future__ import annotations

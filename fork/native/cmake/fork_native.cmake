@@ -27,6 +27,7 @@ function(_surogate_fork_attach_tests)
     if(TARGET dsl-run-state-tests)
         target_sources(dsl-run-state-tests PRIVATE
             "${SUROGATE_FORK_NATIVE_DIR}/tests/test-fork-dispatch-pp-host-copy.cpp"
+            "${SUROGATE_FORK_NATIVE_DIR}/tests/test-fork-tied-lm-head.cpp"
         )
     endif()
 endfunction()
