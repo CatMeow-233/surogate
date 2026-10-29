@@ -46,6 +46,8 @@ Commands
   test experimental                 experimental tests in fork/.venv-experimental (needs uv;
                                     FORK_TORCH_INDEX=pypi without download.pytorch.org)
   test patches                      CPU tests of the GRPO patches (FORK_PY, default .venv/bin/python)
+  test tlc                          CPU tests of the TLC package fork/tlc (FORK_PY, default .venv/bin/python;
+                                    no native extension needed)
   test openmp                       OpenMP contract test in build/fork-openmp
   test native                       fork and upstream C++ test executables (GPU host)
   test gpu                          test native, then make test-py, serve-check and grpo-test (GPU host)
@@ -136,6 +138,10 @@ test_suite() {
             run ../.venv-experimental/bin/python -m pytest -q -p no:cacheprovider tests
             ;;
         patches) run "${FORK_PY:-.venv/bin/python}" -m pytest -q -p no:cacheprovider fork/patches/tests ;;
+        tlc)
+            run env PYTHONDONTWRITEBYTECODE=1 "${FORK_PY:-.venv/bin/python}" -m pytest -q -p no:cacheprovider \
+                fork/tlc/tests/cpu
+            ;;
         openmp)
             run cmake -S fork/native/openmp-contract -B build/fork-openmp
             run cmake --build build/fork-openmp
@@ -148,7 +154,7 @@ test_suite() {
             run make serve-check
             run make grpo-test
             ;;
-        *) die "usage: fork/dev test cpu|experimental|patches|openmp|native|gpu" ;;
+        *) die "usage: fork/dev test cpu|experimental|patches|tlc|openmp|native|gpu" ;;
     esac
 }
 

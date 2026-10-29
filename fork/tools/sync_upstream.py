@@ -13,7 +13,7 @@ A sync runs these steps and stops at the first one that needs the owner:
      when an upstream directory rename would leave a fork-owned subdirectory behind
   6. commit "sync: re-home upstream root notes" (see [root_rehome] in the ledger)
   7. commit "sync: refresh ledger and maps" ([sync].last_synced, gen_maps, doc-link baseline)
-  8. fork/dev check, then the patch, experimental and CPU test suites
+  8. fork/dev check, then the patch, experimental, TLC and CPU test suites
   9. push the branch and open a PR (or update the open one); --finish fast-forwards main once the
      PR's REQUIRED_CHECKS pass
 
@@ -328,7 +328,7 @@ def refresh(target):
 def checks(fast):
     suites = [["fork/dev", "check"]]
     if not fast:
-        suites += [["fork/dev", "test", "patches"], ["fork/dev", "test", "experimental"], ["fork/dev", "test", "cpu"]]
+        suites += [["fork/dev", "test", suite] for suite in ("patches", "experimental", "tlc", "cpu")]
     failed = [" ".join(cmd) for cmd in suites if run(*cmd) != 0]
     if failed:
         print(f"\nFailed: {', '.join(failed)}.")

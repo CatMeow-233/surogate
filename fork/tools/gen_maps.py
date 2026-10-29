@@ -7,8 +7,9 @@ the output is deterministic. The maps record what exists and where (files, impor
 targets, classifications), never line numbers or line counts, so editing the body of a file
 does not make them stale. --check regenerates everything in memory and fails when a file on
 disk differs, when a top-level directory under surogate/ or csrc/src, or a markdown file,
-matches no rule in the classification tables below (add a rule when upstream adds one), or
-when a file this script parses by a fixed path is gone (update the path below).
+matches no rule in the classification tables below (add a rule when upstream adds one), when a
+fork test_*.py lies outside FORK_TEST_TREES, or when a file this script parses by a fixed path is
+gone (update the path below).
 
 Usage: python3 -I fork/tools/gen_maps.py --write | --check
 """
@@ -75,6 +76,15 @@ CSRC_ENGINES = {
     "third_party": ("第三方", "vendored 代码，不做格式化"),
     "tokenizer": ("共享", "分词器，训练与服务各编译一次（见下文“接缝”）"),
     "utilities": ("训练", "分配器、GPU 信息等工具"),
+}
+
+# Fork test trees and what they hold; a fork test_*.py outside them is an error.
+FORK_TEST_TREES = {
+    "fork/patches/tests/": "fork：GRPO 补丁的 CPU 测试",
+    "fork/experimental/tests/": "fork：实验训练器",
+    "fork/tlc/tests/": "fork：TLC 包；`cpu/` 不需要原生扩展，`gpu/` 在 GPU 主机上运行",
+    "fork/native/tests/": "fork：编译进上游测试可执行文件的 C++ 用例",
+    "fork/native/openmp-contract/": "fork：OpenMP 接线测试",
 }
 
 # Markdown classes, first match wins. fnmatch semantics: `*` also matches `/`.
@@ -509,11 +519,11 @@ def tests_map():
     rows = [
         [tick("tests/"), "上游 pytest"],
         [tick("csrc/src/testing/"), "上游 C++（Catch2/CTest）与服务端 Python"],
-        [tick("fork/patches/tests/"), "fork：GRPO 补丁的 CPU 测试"],
-        [tick("fork/experimental/tests/"), "fork：实验训练器"],
-        [tick("fork/native/tests/"), "fork：编译进上游测试可执行文件的 C++ 用例"],
-        [tick("fork/native/openmp-contract/"), "fork：OpenMP 接线测试"],
-    ]
+    ] + [[tick(tree), note] for tree, note in FORK_TEST_TREES.items()]
+    for f in FILES:
+        stray = f.startswith("fork/") and not f.startswith(tuple(FORK_TEST_TREES))
+        if stray and re.fullmatch(r"test_.*\.py", Path(f).name):
+            ERRORS.append(f"{f}: fork test outside FORK_TEST_TREES; add its tree there in fork/tools/gen_maps.py")
     out += ["## 测试树\n\n", table(["位置", "内容"], rows), "\n"]
     out.append("运行它们的命令见 [build-and-release.md 的“测试命令”](../build-and-release.md#测试命令)。\n\n")
 

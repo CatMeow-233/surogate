@@ -71,7 +71,7 @@ fork 的工具不修改 GitHub 设置，以下各项由仓库所有者完成。
 
    `fork/dev sync --finish` 用 `gh pr checks` 检查同样的四个 job（`fork/tools/sync_upstream.py` 中的 `REQUIRED_CHECKS`），所以设置分支保护之前也能完成同步；修改必需检查时两处一起改。`upstream-cpu-lane` 暂不设为必需：它在工作流中是 `continue-on-error: true`。`fork/tools/known_failures.txt` 是在没有 GPU 的容器中生成的；等 CI 上两次相同的运行确认它（或按 CI 上传的 JUnit 结果重新生成）之后，去掉 `continue-on-error` 并把它加入必需检查。
 
-fork CI（`.github/workflows/fork-ci.yml`）在每个分支的每次推送时运行，各 job 执行的都是 `fork/dev` 命令：`check` 运行 `fork/dev check`（先获取上游 `main`），`experimental` 运行 `fork/dev test experimental` 和 `fork/dev release experimental`（只构建，不发布），`fork-tests` 运行 `fork/dev test patches`，`openmp-contract` 运行 `fork/dev test openmp`，`upstream-cpu-lane` 运行 `fork/tools/test_cpu.sh` 并上传 JUnit 结果。
+fork CI（`.github/workflows/fork-ci.yml`）在每个分支的每次推送时运行，各 job 执行的都是 `fork/dev` 命令：`check` 运行 `fork/dev check`（先获取上游 `main`），`experimental` 运行 `fork/dev test experimental` 和 `fork/dev release experimental`（只构建，不发布），`fork-tests` 运行 `fork/dev test patches` 和 `fork/dev test tlc`，`openmp-contract` 运行 `fork/dev test openmp`，`upstream-cpu-lane` 运行 `fork/tools/test_cpu.sh` 并上传 JUnit 结果。
 
 ## 每次同步做什么
 
@@ -84,7 +84,7 @@ fork CI（`.github/workflows/fork-ci.yml`）在每个分支的每次推送时运
 | 5. 自动解决 | 只自动处理一种冲突：上游删除了一个已移到 `docs/upstream-notes/` 的笔记（索引中有 base 与 ours 两个 stage，没有上游 stage）。脚本 `git rm` 该文件，并删除 ledger 中对应的 `[[relocation]]`。另外检查 `[owned]` 中每个路径所在的上游目录在合并后是否还存在（见“目录重命名”）。 | 其他冲突或目录消失时停下：退出码 2，列出文件及其 ledger topic |
 | 6. 归位提交 | 提交 “sync: re-home upstream root notes”。本次合并新增到根目录的 `.md` 文件，如果匹配 ledger `[root_rehome]` 的 `patterns`、不匹配 `never`，且文件名没有出现在 `tooling_refs` 所列的文件中（出现即说明工具按路径引用它），就 `git mv` 到 `docs/upstream-notes/` 并登记 `[[relocation]]`；其余的只报告，由你决定。归位是单独的提交，合并提交保持纯合并；下一次同步时 merge base 已含根目录路径，上游对该文件的修改会跟随重命名合入。 | — |
 | 7. 刷新提交 | 提交 “sync: refresh ledger and maps”：`[sync].last_synced` 设为合并的上游提交；`gen_maps.py --write` 重新生成地图；`check_doc_links.py --update-baseline` 把上游文档中新出现的失效链接加入基线、删去上游已修复的条目，变化逐条写在提交说明里。 | — |
-| 8. 检查 | `fork/dev check`；不带 `--fast` 时还运行 `fork/dev test patches`、`fork/dev test experimental` 和 `fork/dev test cpu`，它们需要准备好的 `.venv`（或 `FORK_PY`）、uv，以及 download.pytorch.org（无法访问时设 `FORK_TORCH_INDEX=pypi`），见 [fork/README.md 的“首次准备环境”](../README.md#首次准备环境)。 | 退出码 4 |
+| 8. 检查 | `fork/dev check`；不带 `--fast` 时还运行 `fork/dev test patches`、`fork/dev test experimental`、`fork/dev test tlc` 和 `fork/dev test cpu`，它们需要准备好的 `.venv`（或 `FORK_PY`）、uv，以及 download.pytorch.org（无法访问时设 `FORK_TORCH_INDEX=pypi`），见 [fork/README.md 的“首次准备环境”](../README.md#首次准备环境)。 | 退出码 4 |
 | 9. 发布 | `git push -u origin <同步分支>`；PR 还没有打开时 `gh pr create -R CatMeow-233/surogate --base main`，正文（`.git/fork-sync-pr.md`）是第 3 步的报告加上同步分支的提交列表；PR 已经打开时（例如 `--continue` 之后）推送就更新了它，不再新建。`--local` 跳过此步。 | 退出码 1 |
 | 10. 完成 | PR 的检查通过后运行 `fork/dev sync --finish`：先用 `gh pr checks` 确认 `check`、`experimental`、`fork-tests`、`openmp-contract` 都已通过，再 `git switch main`、`git merge --ff-only <同步分支>`、`git push origin main`。 | 检查未全部通过时退出码 4，列出未通过的 job |
 | 11. GPU 复测 | 报告中出现 T1–T5 或 T6–T8 的上游提交时，在 GPU 主机上运行 `fork/dev test gpu`，并在该 topic 的 `conflict_history` 末尾记一行（日期、上游 sha、结果）。 | — |

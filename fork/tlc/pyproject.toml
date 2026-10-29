@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools==84.2.1"]
+build-backend = "setuptools.build_meta"
+
+# Not published. Installed editable into fork/.venv-tlc next to the fork's native `surogate` build.
+[project]
+name = "surogate-tlc"
+version = "0.1.0.dev0"
+description = "The Little Coder (TLC) experiments on the Surogate native trainer"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+# Runtime requirement: the native `surogate` package (training extension `_surogate`) built from
+# this checkout, and the dependencies it brings. It is not listed here, so that installing this
+# package never lets a resolver fetch some other `surogate` distribution from an index.
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["surogate_tlc*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/cpu"]
+addopts = "-p no:cacheprovider --import-mode=importlib"
+markers = ["gpu: needs CUDA and the native extension; run on the GPU host (README: G0-G3 runbook)"]

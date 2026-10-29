@@ -63,6 +63,8 @@ jobs:
           python -m pip install -r fork/tools/requirements-cpu-lane.txt
       - name: GRPO patch tests
         run: FORK_PY=python fork/dev test patches
+      - name: TLC CPU tests
+        run: FORK_PY=python fork/dev test tlc
 
   openmp-contract:
     if: github.repository == 'CatMeow-233/surogate'

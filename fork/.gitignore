@@ -1,3 +1,6 @@
 /.venv-experimental/
+/.venv-tlc/
 /outputs/
 /build/
+# An editable install of fork/tlc writes its metadata into the source tree.
+/tlc/src/*.egg-info/

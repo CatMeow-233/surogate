@@ -17,7 +17,7 @@ last_synced = "282f99012a78c888725b8c3d8f9000749eca4e66"   # 2026-10-23
 # Fork-only paths: the merge base has no history for them.
 prefixes = [
     "fork/",
-    "surogate/_fork/",   # code the GRPO patches import; ships in the native wheel
+    "surogate/_fork/",   # code the GRPO patches import; ships in the native wheel, so TLC code stays in fork/tlc
 ]
 files = [
     "AGENTS.md",
