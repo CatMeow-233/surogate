@@ -34,6 +34,17 @@ def split_param_name(name: str) -> str:
     return f"{FIRST_LAYER}_{field}" if layer == 0 else f"blocks[{layer - 1}].{field}"
 
 
+def layer_param(name: str, split_first_layer: bool) -> tuple[int | None, str]:
+    """(layer, field) of IR parameter `name`, the layer counted in tlc_layer_pattern from 0; (None, name) for a
+    model-level weight. A0 and A0-split give the same answer for the same weight."""
+    if name.startswith(f"{FIRST_LAYER}_"):
+        return 0, name.removeprefix(f"{FIRST_LAYER}_")
+    match = _BLOCK_NAME.fullmatch(name)
+    if not match:
+        return None, name
+    return int(match.group(1)) + int(split_first_layer), match.group(2)
+
+
 @nn.hf_config(
     architecture=ARCHITECTURE,
     model_type=MODEL_TYPE,

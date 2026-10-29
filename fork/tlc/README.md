@@ -77,7 +77,7 @@ TLC 行另外要满足：
 - `configuration_tlc.py`：`auto_map` 指向它，内容就是包里的 `surogate_tlc.configuration_tlc`，只依赖 transformers，因此不 import fork 的进程也能读取 config；
 - tokenizer 文件：`tokenizer.json` 与带 `chat_template` 的 `tokenizer_config.json`（也可以是单独的 `chat_template.jinja`）。`bos_token`、`eos_token`、`pad_token` 在 tokenizer 中的 id 必须等于 config.json 中的值，最大 token id 小于 `vocab_size`；
 - `tlc_meta.json`：`tlc_meta_version`（当前为 1）、`init_seed`、`label_ontology_version`、`shard_version`、`sidecar_version`，后几项在用到之前为 null；checkpoint 与导出目录另有 `step`；
-- `model.safetensors`：从零训练时由 fork 的初始化工具按 IR 的参数名写出全部权重。Mamba-2 的 `A_log`、`dt_bias`、`D` 用标准初始化（原生侧按参数名初始化的结果对 Mamba 不对：`dt_bias` 为 0，`A_log` 与 `D` 服从正态分布）；tied 时不写 `lm_head`。训练经 `from_pretrained(model_dir)` 加载它。
+- `model.safetensors`：从零训练时由 `surogate_tlc.init.init_model_dir()` 写出，见下文“初始化”。训练经 `from_pretrained(model_dir)` 加载它。
 
 `surogate_tlc.modeldir.write_model_dir()` 写出除权重以外的全部文件；`check_model_dir()` 检查一个目录并列出全部问题，`weights=False` 时不要求 `model.safetensors`。
 
@@ -106,6 +106,51 @@ TLC 行另外要满足：
   - `ir_problems(module, native_ops)`：列出前向图的问题，空列表表示通过。检查项：op 名在原生表中；每个张量只写一次，不覆盖参数或图输入；每个输入都是参数、图输入或之前的 op 写出的张量；图输出都被写出；`moe_softmax` 的输入是 2 维（原生 kernel 直接把前两维当作 token 数和专家数）；`concat`、`mul` 的输入在有 dtype 标注时 dtype 相同（原生侧没有 cast op）。
 - 这些检查对应的 DSL 陷阱都有回归测试：两个 layer stack 都把层命名为 `blocks[0..]`，后一个覆盖前一个；同一个 module 调用两次时第二次覆盖第一次的激活（D1 的朴素共享权重循环就是这样）；模型缺少 `use_conv_bias` 别名时 `conv_bias` 从参数中消失，而图仍读取它。
 - 所有行的 IR 都通过上述检查（CPU 测试）。后续阶段新增的图结构（`tlc_aux_ce` 是 loss 的祖先、GDN 几何与 `linear_*` 键一致）在对应阶段加入 `ir_problems`。
+
+## 初始化
+
+`surogate_tlc.init.init_model_dir(path)` 往 `write_model_dir(..., init_seed=...)` 写出的目录中写入 `model.safetensors`，种子取自 `tlc_meta.json` 的 `init_seed`；已有权重文件时拒绝执行，`init_seed` 为 null 时报错。`init_state_dict(cfg, seed=...)` 只生成张量，不写文件。
+
+不用原生侧的初始化：它只按参数名决定初值（bias 为 0、norm 为 1、其余服从正态分布），Mamba-2 因此从 `dt_bias=0`（每个头 dt = softplus(0) = 0.69）、`A_log≈0`（每个头 A = −1）、`D≈0` 开始，所有头衰减相同，跳连关闭。fork 改用 Mamba-2 参照实现的初始化，四行用同一套规则，A0、A1、A1h 的起点可比：
+
+| 参数（层内字段名） | 初值 | 来源 |
+|---|---|---|
+| `dt_bias` | softplus⁻¹(dt)，dt = exp(U(ln 10⁻³, ln 10⁻¹))，下限 10⁻⁴ | `Mamba2.__init__` |
+| `A_log` | ln U(1, 16) | `Mamba2.__init__` |
+| `D_param` | 1 | `Mamba2.__init__` |
+| `conv_weight`、`conv_bias` | U(±1/√K)，K 为 `conv_kernel` | PyTorch `Conv1d` 默认值（depthwise，fan_in = K） |
+| `in_proj_weight`、`qkv_weight`、`mlp_up_weight`，untied 的 LM head | U(±1/√fan_in) | PyTorch `Linear` 默认值（`kaiming_uniform_`，a = √5） |
+| `out_proj_weight`、`out_weight`、`mlp_down_weight` | U(±1/√fan_in) ÷ √(2L)，L 为 `num_hidden_layers` | `_init_weights`，`n_residuals_per_layer=2` |
+| embedding | N(0, 0.02) | `_init_weights` |
+| 各 norm 权重 | 1 | — |
+
+- 来源：state-spaces/mamba（main，提交 e9594ce1）中 mamba_ssm 的 `modules/mamba2.py`（`Mamba2.__init__`）和 `models/mixer_seq_simple.py`（`_init_weights`）。attention 层按 mamba_ssm 混合模型中 MHA 的做法处理：qkv 是普通 Linear，输出投影与 Mamba 的 `out_proj` 一样缩放。
+- 残差缩放取 √(2L)：每层有一次 mixer 写入和一次 MLP 写入，`MixerModel` 在层带 MLP 时传 `n_residuals_per_layer=2`。`MambaLMHeadModel` 随后用默认值 1 再执行一次 `_init_weights`，实际效果是 √L；TLC 按支持方案（M4）取 √(2L)，常量为 `surogate_tlc.init.RESIDUAL_WRITES_PER_LAYER`。
+- 新增的参数字段必须在 `surogate_tlc.init.RULES` 中有规则，否则报错。
+- 张量名是 IR 的 `hf_mapping` 名，没有映射时就是 IR 参数名，与原生 loader 查找的名字相同；冻结的 RoPE 表由运行时计算，不写入；tied 时不写 `lm_head.weight`，原生 loader 退回读取 embedding。dtype 与 IR 参数一致：`A_log`、`D_param`、`dt_bias` 为 fp32，其余为 bf16。safetensors 元数据记录 `tlc_init_version`（方案改动时加一）和 `tlc_init_seed`。
+- 每个张量用自己的随机数发生器，种子由 (`init_seed`, 层号, 字段名) 派生。同一 seed 下 A0-split 得到的就是 A0 的权重，只是名字按 `split_param_name()` 改过，所以 G1(d) 直接比较两个用同一 seed 初始化的目录。
+- CPU 测试：张量名由单层模型的层内参数名和模型级映射重新推导，不复用初始化代码的命名逻辑；形状、dtype、各类参数的分布统计；同一 seed 可复现、不同 seed 不同；A0-split 与 A0 一致。初始化后的 A0 在下文的数值参照上，随机 token 的初始 loss 与 ln 16384 ≈ 9.70 相差不到 0.25（tied 的 N(0, 0.02) embedding 使期望值高出约 0.08），这是 G2 中 step-0 loss 的 CPU 预测。
+
+## 数值参照（G1(b)）
+
+[prototypes/ref_mamba2.py](prototypes/ref_mamba2.py) 是纯 PyTorch 的 Mamba-2 参照实现：读取模型目录的 config.json 与 `model.safetensors`，逐 op 复现原生图对 A0、A0-split 的计算（只支持 `M` 层，A1、A1h 不在范围内）。与原生对齐的细节：
+
+- in_proj 的输出顺序为 [z | x B C | dt]，conv 带 bias 后接 SiLU；
+- dt = clamp(softplus(dt_raw + dt_bias), time_step_limit)，softplus 在输入大于 20 时取线性；TLC 不设 `time_step_limit`，原生的 clamp 区间为 (0, 10⁹)；
+- gated norm 是 RMSNorm(y · silu(z))（先乘门再归一化），按 `n_groups` 分组求 RMS；
+- 残差与 RMSNorm 融合：norm 用 fp32 的和计算，存下的残差舍入到激活 dtype；
+- 求值顺序：goldens 用逐 token 递归，与原生 selective scan 的顺序一致；分块 SSD 与逐 token 解码（带 conv 和 SSM cache）作交叉检查，三者在 fp32 下一致（CPU 测试，误差小于 10⁻⁴）。
+- bf16 模式在原生以 bf16 存储张量的每个位置舍入，用来估计 bf16 与 fp32 的差距。
+
+CPU 测试另外检查参照实现的假设与编译出的 IR 一致（每层的 op 序列、scan 的 dt clamp、gated norm 的分组与顺序、所有 norm 的 eps），并检查参照读取的张量名与初始化写出的完全相同（A0 与 A0-split、tied 与 untied）。
+
+生成 G1(b) 的 goldens（CPU 即可，A0、batch 2、512 token 在单线程上约 6 秒）：
+
+```bash
+python -I -B fork/tlc/prototypes/ref_mamba2.py MODEL_DIR OUT.npz --batch 2 --seq-len 512 --seed 0
+```
+
+`.npz` 中的数组：`input_ids`、`targets`（int32，[batch, seq_len]，正是 `compute_logprobs` 的两个参数；`targets` 是下一个 token，最后一列为 −100）；`logprobs`（fp32 参照，逐 token 递归）；`logprobs_bf16`（bf16 模式）；`tolerance` = 2 × max |`logprobs_bf16` − `logprobs`|；`meta`（JSON：`model.safetensors` 的 sha256、seed、dt clamp 区间、求值顺序）。G1(b) 的判据：原生 `compute_logprobs(input_ids, targets, use_lora=False)` 与 `logprobs` 的最大绝对差不超过 `tolerance`，且 `meta` 中的 sha256 与所测目录的权重文件一致。本环境中 `init_seed=1` 的 A0 得到的 `tolerance` 约为 0.045。
 
 ## 上游接口的 pin
 
@@ -157,7 +202,7 @@ GPU 小时 = Σ 种子数 × 名义 token 数 ÷ 实测 tokens/s × (1 + 评测�
 
 ### G1 因果性
 
-待填写。范围：修改位置 t 之后的 token 不改变位置 ≤ t 的 logprobs（前缀长度 1、2、7、64、511）；原生全序列 logprobs 与参照实现的逐 token 递归一致；A1 打包与分开运行一致；A0-split 与 A0 等价（同一份权重按 `split_param_name()` 改名，logits 与梯度在容差内一致）。
+待填写。范围：修改位置 t 之后的 token 不改变位置 ≤ t 的 logprobs（前缀长度 1、2、7、64、511）；原生全序列 logprobs 与参照实现的逐 token 递归一致（goldens 与判据见上文“数值参照”）；A1 打包与分开运行一致；A0-split 与 A0 等价（两个目录用同一 `init_seed` 初始化即得同一份权重，logits 与梯度在容差内一致）。
 
 ### G2 数学与梯度
 
