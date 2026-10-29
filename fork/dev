@@ -45,7 +45,8 @@ Commands
                                     fork/tools/requirements-cpu-lane.txt (default .venv/bin/python)
   test experimental                 experimental tests in fork/.venv-experimental (needs uv;
                                     FORK_TORCH_INDEX=pypi without download.pytorch.org)
-  test patches                      CPU tests of the GRPO patches (FORK_PY, default .venv/bin/python)
+  test patches                      CPU tests of the patches to upstream files: GRPO tests and native
+                                    source pins under fork/patches/tests (FORK_PY, default .venv/bin/python)
   test tlc                          CPU tests of the TLC package fork/tlc (FORK_PY, default .venv/bin/python;
                                     no native extension needed)
   test openmp                       OpenMP contract test in build/fork-openmp

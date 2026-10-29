@@ -245,8 +245,7 @@ conflict_history = [
 [[topic]]
 id = "T10"
 title = "tied lm_head shares the embedding in full training"
-# The commit that adds this topic: `git log --grep 'tie a tied lm_head to the embedding'`.
-commits = []
+commits = ["5722fc7f"]
 switch = "always on for tie_word_embeddings models; LoRA/QLoRA unchanged"
 # Defect (upstream 282f9901, unchanged since 2580d6cc / 4ac6a3d8): in full training the IR's lm_head is a
 # trainable parameter of its own, while its gradient is the embedding's buffer (dsl_grad_store.cpp:104-113)
