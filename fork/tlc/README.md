@@ -22,34 +22,61 @@ TLC 代码不进任何其他 wheel：根目录 `pyproject.toml` 的原生 wheel 
 - GPU 主机（RTX 5090）：专用环境 `fork/.venv-tlc` 装有原生构建，本包以 editable 方式装入。创建步骤写在下文 G0 中。
 - 原型：在 `fork/.venv-experimental` 或任一装有 CPU torch 的环境中运行，见 [prototypes/README.md](prototypes/README.md)。
 
+## 注册
+
+训练器按 config.json 的 `architectures` 在上游 DSL 注册表中查找模型，并用 transformers 的 `AutoConfig` 读取 config。`surogate_tlc.register()` 做两件事，可重复调用：
+
+- import `surogate_tlc.dsl`，其中 `@nn.hf_config` 把 `TLCModel`（架构名 `TLCForCausalLM`）加进 DSL 注册表。构建 TLC 的 IR 总是需要这一步。
+- 把 `TLCConfig` 注册为 `model_type="tlc"` 的 `AutoConfig`。注册后它优先于目录中的 `auto_map`；不注册时，带 `auto_map` 的目录照样能被读取。
+
+DSL 类名一律带 `TLC` 前缀：注册表按类名做键，同名类会悄悄覆盖上游的定义。CPU 测试检查 `register()` 只新增 `TLCModel`，不替换任何上游条目。
+
 ## 模型目录与 checkpoint 契约
+
+相关模块：`surogate_tlc.hf`（config 的 schema 与检查）、`surogate_tlc.modeldir`（写出和检查模型目录）、`surogate_tlc.checkpoint`（收尾与导出）。
 
 ### config.json 的不变量
 
-由 CPU 测试断言：
+`surogate_tlc.hf.check_config()` 逐条检查并列出全部问题；fork 的入口在构建或加载模型之前调用它。原生训练器自己读 config.json，下面几种错误它都不报错。所有 P0 行（含 A1 这类非 TLC 架构）都要满足：
 
-- `architectures=["TLCForCausalLM"]`，`model_type="tlc"`。`model_type` 不能是 `qwen*`（模型会被交给服务引擎执行），也不能含 `vl` 或 `vision`（会打开视觉输入）。DSL 类名一律带 `TLC` 前缀：注册表按类名做键，同名类会悄悄覆盖上游的定义。
-- 通用键齐全：`hidden_size`、`num_hidden_layers`、`vocab_size`、`max_position_embeddings=512`、`bos_token_id`、`eos_token_id`、`pad_token_id`、`tie_word_embeddings`。`vocab_size` 至少是最大 token id 加 1，特殊 token 也在词表之内（原生侧不检查 id 范围）。
-- 没有 attention 的 A0 也给出 `num_attention_heads>0` 或 `head_dim>0`：原生侧在 `head_dim` 为 0 时用 attention 头数做除数。
-- `hybrid_pattern` 是字符串（A0 为 L 个 `M`）。list 类型的属性在 DSL 编译时被丢弃。
-- Mamba 维度（头数 H、头维 P、状态维 N、组数 G）显式写入，不依赖默认值。P0 暂按 H=12、P=64、N=64、G=1；N 取 64 而不取 128，因为状态维上的循环是串行的。
-- 含 GDN 的模型显式给出全部 `linear_*` 键：缺少时 kernel 会退回按 attention 的几何编译，而且不报错。
+- 通用键齐全：`vocab_size`、`hidden_size`、`num_hidden_layers`、`intermediate_size` 为正整数，`max_position_embeddings=512`，`tie_word_embeddings` 显式给出，`bos_token_id`、`eos_token_id`、`pad_token_id` 都在词表之内（原生侧不检查 id 范围）。
+- `num_attention_heads>0` 或 `head_dim>0`，没有 attention 的 A0 也一样：原生侧在 `head_dim` 为 0 时用 attention 头数做除数。
+- 出现任一 GDN 几何键（`linear_num_key_heads`、`linear_num_value_heads`、`linear_key_head_dim`、`linear_value_head_dim`）时四个都要给出：缺少时 kernel 退回按 attention 的几何编译，而且不报错。
+
+TLC 行另外要满足：
+
+- `architectures=["TLCForCausalLM"]`，`model_type="tlc"`，`auto_map={"AutoConfig": "configuration_tlc.TLCConfig"}`。`model_type` 不能是 `qwen*`（模型会被交给服务引擎执行），也不能含 `vl` 或 `vision`（会打开视觉输入）。
+- `tlc_layer_pattern` 是字符串，长度等于 `num_hidden_layers`，每层一个字符：`M` 为 Mamba-2 + SwiGLU，`A` 为 attention 层（复用上游 `Qwen3Block`）。A0 为 12 个 `M`，A1h 含 1–2 个 `A`。DSL 把它原样写进 IR 的 `hybrid_pattern`；list 类型的属性在 DSL 编译时会被丢弃。
+- 含 `M` 时 Mamba 的几何显式写入，不依赖默认值：`mamba_num_heads`（H）、`mamba_head_dim`（P）、`ssm_state_size`（N）、`n_groups`（G，整除 H）、`conv_kernel`、`chunk_size`。P0 暂按 H=12、P=64、N=64、G=1；N 取 64 而不取 128，因为状态维上的循环是串行的。
+- 含 `A` 时 `num_attention_heads`、`num_key_value_heads`、`head_dim` 为正，且头数是 KV 头数的整数倍。
+
+`surogate_tlc.hf.default_config()` 给出 TLC v0.6 的 A0 候选（12 × 384，SwiGLU 1024，词表 16384），可按键覆盖。
 
 ### 目录中的文件
 
 可用作 `model_dir` 的目录包含：
 
-- `config.json`，带 `auto_map`，指向同目录的 `configuration_tlc.py`，因此不 import fork 的进程也能用 transformers 读取它；
-- `configuration_tlc.py`；
-- tokenizer 文件：`tokenizer.json` 与带 `chat_template` 的 `tokenizer_config.json`；
-- `model.safetensors`：从零训练时由 fork 的初始化工具按 IR 的参数名写出全部权重。Mamba-2 的 `A_log`、`dt_bias`、`D` 用标准初始化（原生侧按参数名初始化的结果对 Mamba 不对：`dt_bias` 为 0，`A_log` 与 `D` 服从正态分布）；tied 时不写 `lm_head`。训练经 `from_pretrained(model_dir)` 加载它；
-- `tlc_meta.json`：标签本体版本、shard 与 sidecar 版本、初始化种子。
+- `config.json`，满足上面的不变量；
+- `configuration_tlc.py`：`auto_map` 指向它，内容就是包里的 `surogate_tlc.configuration_tlc`，只依赖 transformers，因此不 import fork 的进程也能读取 config；
+- tokenizer 文件：`tokenizer.json` 与带 `chat_template` 的 `tokenizer_config.json`（也可以是单独的 `chat_template.jinja`）。`bos_token`、`eos_token`、`pad_token` 在 tokenizer 中的 id 必须等于 config.json 中的值，最大 token id 小于 `vocab_size`；
+- `tlc_meta.json`：`tlc_meta_version`（当前为 1）、`init_seed`、`label_ontology_version`、`shard_version`、`sidecar_version`，后几项在用到之前为 null；checkpoint 与导出目录另有 `step`；
+- `model.safetensors`：从零训练时由 fork 的初始化工具按 IR 的参数名写出全部权重。Mamba-2 的 `A_log`、`dt_bias`、`D` 用标准初始化（原生侧按参数名初始化的结果对 Mamba 不对：`dt_bias` 为 0，`A_log` 与 `D` 服从正态分布）；tied 时不写 `lm_head`。训练经 `from_pretrained(model_dir)` 加载它。
+
+`surogate_tlc.modeldir.write_model_dir()` 写出除权重以外的全部文件；`check_model_dir()` 检查一个目录并列出全部问题，`weights=False` 时不要求 `model.safetensors`。
 
 ### checkpoint 与导出
 
-- 原生 checkpoint 只写通用 config 键，没有 `auto_map`、TLC 自有的键和 tokenizer；导出只复制一份固定的文件清单。所以每次保存和导出之后，由收尾 hook（计划为 `surogate_tlc.checkpoint.finalize_dir()`）把完整的源 config.json、上面的附带文件和 fork 的 sidecar 状态（sampler 状态、标签本体版本、shard 版本）补进目标目录。
+原生训练器把 checkpoint 存到 `<checkpoint_dir>/step_<8 位步数>/`，最后写 `checkpoint.json`。其中的 config.json 只有通用键，没有 `auto_map`、TLC 自有的键和 tokenizer；训练结束时的导出只从源目录复制一份固定的文件清单，不含 `configuration_tlc.py` 和 `tlc_meta.json`。所以每次保存和导出之后都要收尾，`surogate_tlc.checkpoint` 提供：
+
+- `finalize_dir(target, source, meta=None)`：把源模型目录的 config.json、`configuration_tlc.py`、tokenizer 文件和 `tlc_meta.json`（并入 `meta`）复制进 `target`，原生写的 config.json 被源目录的完整版本替换。`target` 中原生写的结构键（架构、模型类型、词表、宽度、层数、FFN 宽度）与源目录不一致时拒绝执行，以免配错源目录。可重复执行；`tlc_meta.json` 最后写入，中途失败的目录通不过 `check_model_dir()`。
+- `finalize_checkpoints(checkpoint_dir, source)`：对每个已写完 `checkpoint.json` 的 step 目录执行 `finalize_dir`，`tlc_meta.json` 记下 `step`；还在写的目录不动。
+- `export(checkpoint, source, out)`：从一个 step 目录导出干净的模型目录，只带 `model.safetensors` 和收尾文件，不带优化器状态和分片。`out` 必须不存在或为空。
+
+规则：
+
 - 未经收尾的原始 checkpoint 目录不得直接用作 `model_dir`。
-- 收尾后的目录能在不 import fork 的新解释器中加载（CPU 测试）；save → resume 后 logits 和下一步 loss 能否复现，在 G2 中验证。
+- 收尾后的目录能在不 import fork 的新解释器中用 transformers 读取 config 与 tokenizer（CPU 测试）；save → resume 后 logits 和下一步 loss 能否复现，在 G2 中验证。
+- CPU 测试钉住原生的 step 目录命名、`checkpoint.json` 在全部分片之后写入，以及上游导出复制的文件清单；上游改动这些时测试失败。
 
 ## 数据打包
 
