@@ -80,7 +80,7 @@ plan job 在构建之前检查全部条件，不满足时运行失败，不会�
 2. 在 GitHub 上打开 Actions → Native Wheel Release → Run workflow，“Use workflow from” 选 `main`，勾选 `publish`，然后运行。不需要也不要手动推送 `native-v*` tag。
 3. 构建期间不要把修改 `.github/workflows` 的提交（例如上游同步）合并进 `main`，否则 release job 按条件 4 拒绝发布，需要在新的 `main` 上重新运行。
 4. 冷构建需要数小时。构建步骤超时或运行被取消时，工作流先停止构建容器，再把已经编译完成的结果存进 Actions 缓存；这次运行中 ccache 没有写入或使用任何条目（例如在编译之前就被停止）时不保存，以免这个几乎为空的条目在下次恢复时被选中。在 GitHub 上对这次运行选择 “Re-run all jobs”（推荐，plan 会在重新构建之前检查条件）或 “Re-run failed jobs”：新的尝试恢复同一提交最新的缓存，只编译缺少的部分，被停止时正在编译的单元重新编译。两种重新运行都会在发布前重新检查，tag 已经存在时拒绝发布。需要改代码才能修复时，把修复合并进 `main` 后重新运行工作流；这个版本还没有发布时不用改 `VERSION`。
-5. release job 在创建 Release 之后失败（例如上传中断）时，tag 已经存在，重新运行会被拒绝。此时在 GitHub 上删除这个 Release 和 tag，再对原运行选择 “Re-run failed jobs”（重用 90 天内的 wheel 产物）；或者把 `VERSION` 改成下一个版本后重新运行。
+5. release job 在创建 Release 之后失败（例如上传中断）时，tag 已经存在，重新运行会被拒绝。此时在 GitHub 上删除这个 Release 和 tag，然后：在原运行开始后 30 天内，对它选择 “Re-run failed jobs”，重用它的 wheel 产物，不重新构建；超过 30 天后 GitHub 不再允许重新运行这次运行（Actions 产物的保留期更长，但工作流只在原运行的新尝试中使用它），这时在 `main` 上重新运行工作流并勾选 `publish`，它会重新构建，`VERSION` 不用改（plan 仍按条件 2 检查它）。也可以把 `VERSION` 改成下一个版本后重新运行。
 6. 构建在没有 GPU 的 runner 上完成，发布前没有在 GPU 上运行过。安装后在 GPU 主机上运行 `fork/dev test gpu`。
 
 不勾选 `publish` 时，工作流可以在任意分支上运行，只构建 wheel（版本 `0.0.0.dev0`）并上传为 Actions 产物，不创建 tag；plan job 以 notice 列出发布运行会拒绝的原因。`archs` 输入可以改架构，例如 `89;120a`，每多一个架构，构建时间大致按比例增加。
