@@ -11,13 +11,19 @@
 //   - 1 when n < kOmpMinParallelElems: the region's if clause is false and the loop runs on the calling thread,
 //     because below that size the fork/join costs more than the parallel loop saves;
 //   - otherwise the CPUs in the calling thread's affinity mask, divided by the number of callers whose masks
-//     overlap it and that are in a region or left one within kOmpSharerWindowNs (a process's rank threads can
+//     overlap it and that are in a region or left one within their sharing window (a process's rank threads can
 //     all pin to the same CPUs), at least 1 and at most omp_get_max_threads(), so OMP_NUM_THREADS still lowers it.
 // The mask is read on every such call (one sched_getaffinity syscall), so a thread that re-pins is followed;
 // worker threads libgomp already created for it keep the mask they started with.
-// A caller is counted from its first such region until its thread exits; one idle for longer than the window
-// stops counting, so a thread that ran the optimizer once does not halve its neighbours' teams forever. The
-// registry's mutex is held only for that bookkeeping; a forked child that never runs the optimizer is unaffected.
+// A caller is counted from its first such region until its thread exits, except while it has been idle for
+// longer than its sharing window: kOmpSharerGapFactor times the longest idle interval it has had between two of
+// its regions, and at least kOmpSharerWindowNs. A rank thread's longest interval is a forward/backward pass, so
+// it keeps counting between optimizer steps however long they take, from its third step on (it has no interval
+// before its second region, and an interval longer than twice the longest so far is not covered either); a
+// thread that ran the optimizer a few times in a row and stopped (the Python thread through the AsyncStaleAdamW
+// debug binding with overlap=False) stops counting after kOmpSharerWindowNs and does not halve its neighbours'
+// teams for the rest of the process. The registry's mutex is held only for that bookkeeping; a forked child that
+// never runs the optimizer is unaffected.
 //
 // ordered_block_sum() is the reduction the gradient norm uses. Each kOrderedSumBlock-element block is summed in
 // index order and the block sums are added in block order, so the result is the same for every team size: it
@@ -51,16 +57,20 @@ namespace surogate_fork {
 inline constexpr std::size_t kOmpMinParallelElems = SUROGATE_FORK_OMP_MIN_PARALLEL_ELEMS;
 // Block of ordered_block_sum. It fixes the summation order: changing it changes the norm's last bits.
 inline constexpr std::size_t kOrderedSumBlock = 16384;
-// How long a caller that left its last region still counts as sharing its CPUs.
+// A caller that left its last region still counts as sharing its CPUs for kOmpSharerGapFactor times the longest
+// interval it has been idle between two regions, and for at least kOmpSharerWindowNs.
 inline constexpr std::int64_t kOmpSharerWindowNs = 1'000'000'000;
+inline constexpr std::int64_t kOmpSharerGapFactor = 2;
 
 #ifdef _OPENMP
 namespace detail {
 
 struct OmpCaller {
     cpu_set_t mask;
-    int active = 0;
-    std::int64_t last_ns = 0;
+    int active = 0;                               // regions entered and not yet left
+    bool has_left = false;                        // it has left a region, so last_ns is a leave time when idle
+    std::int64_t last_ns = 0;                     // when it last entered or left a region
+    std::int64_t window_ns = kOmpSharerWindowNs;  // how long after leaving it still counts
 };
 
 struct OmpCallers {
@@ -103,6 +113,10 @@ public:
             mCaller = new OmpCaller;
             callers.live.push_back(mCaller);
         }
+        if (mCaller->active == 0 && mCaller->has_left) {
+            const std::int64_t idle_ns = now_ns - mCaller->last_ns;
+            if (idle_ns > mCaller->window_ns / kOmpSharerGapFactor) mCaller->window_ns = kOmpSharerGapFactor * idle_ns;
+        }
         mCaller->mask = mask;
         ++mCaller->active;
         mCaller->last_ns = now_ns;
@@ -110,8 +124,7 @@ public:
         for (const OmpCaller* other : callers.live) {
             cpu_set_t common;
             CPU_AND(&common, &other->mask, &mask);
-            if (CPU_COUNT(&common) > 0 && (other->active > 0 || now_ns - other->last_ns <= kOmpSharerWindowNs))
-                ++sharers;
+            if (CPU_COUNT(&common) > 0 && (other->active > 0 || now_ns - other->last_ns <= other->window_ns)) ++sharers;
         }
         return std::clamp(CPU_COUNT(&mask) / sharers, 1, std::max(1, max_threads));
     }
@@ -120,6 +133,7 @@ public:
         auto& callers = omp_callers();
         std::lock_guard<std::mutex> lock(callers.mu);
         --mCaller->active;
+        mCaller->has_left = true;
         mCaller->last_ns = now_ns;
     }
 

@@ -8,7 +8,7 @@
 // Link it with a cpu_adamw.cpp object built from the trainer's compile command (with or
 // without -fopenmp); run.sh does that.
 //
-// usage: pinbench R PIN SOCKETS STEPS SHAPE
+// usage: pinbench R PIN SOCKETS STEPS SHAPE [GAP_MS]
 //   R        rank threads, all running the step at the same time
 //   PIN      CPUs in each rank's mask, 0 = leave the process mask
 //   SOCKETS  disjoint masks; rank r uses CPUs [g*PIN, g*PIN+PIN) with g = r % SOCKETS
@@ -16,6 +16,8 @@
 //   SHAPE    toy:N         one N-element tensor and 64 tensors of 4096 elements
 //            flat:N:K      K tensors of N elements (for the serial threshold)
 //            llama:L:H:I:V a Llama-shaped model (embedding, L layers, final norm, lm_head)
+//   GAP_MS   idle milliseconds before each step, standing for the GPU forward/backward pass (default 0); the
+//            CPUs a rank shares stay idle meanwhile, so team sizing that depends on recent use shows here
 // Output, for the slowest rank: the median step time and its norm and update parts, then the
 // norm as a hexfloat and an FNV-1a hash of every master weight and moment after the last step,
 // so builds can be compared bit for bit. Gradients span 2^-24..2^0 so that the norm's last bits
@@ -99,8 +101,8 @@ std::uint64_t fnv1a(const void* data, std::size_t bytes, std::uint64_t h) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 6) {
-        std::fprintf(stderr, "usage: %s R PIN SOCKETS STEPS SHAPE\n", argv[0]);
+    if (argc != 6 && argc != 7) {
+        std::fprintf(stderr, "usage: %s R PIN SOCKETS STEPS SHAPE [GAP_MS]\n", argv[0]);
         return 2;
     }
     const int R = std::atoi(argv[1]);
@@ -108,6 +110,7 @@ int main(int argc, char** argv) {
     const int sockets = std::atoi(argv[3]);
     const int steps = std::atoi(argv[4]);
     const std::vector<Param> params = shape(argv[5]);
+    const int gap_ms = argc == 7 ? std::atoi(argv[6]) : 0;
     std::size_t total = 0;
     for (const auto& p : params)
         total += p.n;
@@ -157,6 +160,7 @@ int main(int argc, char** argv) {
             std::vector<double> times, norm_times, update_times;
             double nsq = 0.0;
             for (int s = 0; s < steps; ++s) {
+                if (gap_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(gap_ms));
                 sync.arrive_and_wait();
                 const auto t0 = std::chrono::steady_clock::now();
                 nsq = optimizers::cpu_gradient_norm_squared(grads, names);
@@ -205,12 +209,13 @@ int main(int argc, char** argv) {
     for (int r = 1; r < R; ++r)
         differing += norm[r] != norm[0] || hash[r] != hash[0];
     const int slowest = static_cast<int>(std::max_element(median.begin(), median.end()) - median.begin());
-    std::printf("R=%d pin=%d sockets=%d %s tensors=%zu elements=%zu: median %.2f ms (norm %.2f, update %.2f), "
-                "norm %a, hash %016llx%s\n",
+    std::printf("R=%d pin=%d sockets=%d %s gap=%d ms tensors=%zu elements=%zu: median %.2f ms (norm %.2f, "
+                "update %.2f), norm %a, hash %016llx%s\n",
                 R,
                 pin,
                 sockets,
                 argv[5],
+                gap_ms,
                 params.size(),
                 total,
                 median[slowest],

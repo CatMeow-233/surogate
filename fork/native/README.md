@@ -46,7 +46,7 @@ git diff -U0 upstream/main -- csrc/CMakeLists.txt   # 只有一个 hunk，恰好
 
 运行 `fork/dev test openmp`（不需要 GPU、CUDA 编译器或 CUDA 头文件）。测试用 `surogate_enable_training_openmp()` 构建一个主机共享库，检查它确实以两个 worker 运行，并得到与串行参考完全一致的整数结果。如果运行时把线程上限设为 1（例如 `OMP_THREAD_LIMIT=1`），测试以退出码 77 报告跳过，ctest 将其列为 Skipped；`OMP_NUM_THREADS` 不影响结果，因为测试用 `num_threads(2)` 显式请求两个线程。
 
-同一个库还编译了 `include/surogate_fork/omp_team.h`（与 `surogate-common` 中的 `cpu_adamw.cpp` 用同一个 OpenMP 辅助函数 `surogate_enable_training_openmp()`；该测试不设构建类型，不使用训练库的优化级别），`training-openmp-team` 检查：低于阈值的循环串行；按 NVML 方式绑定的线程，其线程数不超过自身掩码中的 CPU 数，且每个 team 线程都在调用线程的掩码内；共用 CPU 的线程平分 CPU，掩码不相交的线程不平分，线程退出或空闲超过共享窗口后不再计入；`ordered_block_sum` 在任何线程数下的结果都与串行的分块顺序逐位相同。需要更多 CPU 的检查在 CPU 不足时打印 skipped，其余检查照常运行。构建目录 `build/fork-openmp` 已被根目录的 `.gitignore` 忽略。
+同一个库还编译了 `include/surogate_fork/omp_team.h`（与 `surogate-common` 中的 `cpu_adamw.cpp` 用同一个 OpenMP 辅助函数 `surogate_enable_training_openmp()`；该测试不设构建类型，不使用训练库的优化级别），`training-openmp-team` 检查：低于阈值的循环串行；按 NVML 方式绑定的线程，其线程数不超过自身掩码中的 CPU 数，且每个 team 线程都在调用线程的掩码内；共用 CPU 的线程平分 CPU，掩码不相交的线程不平分，线程退出或空闲超过共享窗口（它两次并行区之间最长空闲间隔的 2 倍，至少 1 秒）后不再计入；`ordered_block_sum` 在任何线程数下的结果都与串行的分块顺序逐位相同。需要更多 CPU 的检查在 CPU 不足时打印 skipped，其余检查照常运行。构建目录 `build/fork-openmp` 已被根目录的 `.gitignore` 忽略。
 
 ## 运行 fork 的 C++ 测试
 

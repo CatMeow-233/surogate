@@ -15,7 +15,8 @@
 #   CPU_ADAMW_SRC=<file>  compile this cpu_adamw.cpp instead of the checkout's, e.g. an older revision:
 #                         CPU_ADAMW_SRC=<(git show <rev>:csrc/src/runtime/optimizers/cpu_adamw.cpp)
 #   ROUNDS=<n>            repetitions of the whole matrix (default 3); compare medians across rounds
-#   CONFIGS="<R PIN SOCKETS STEPS SHAPE>;..."  replaces the default matrix (pinbench.cpp explains the fields)
+#   CONFIGS="<R PIN SOCKETS STEPS SHAPE [GAP_MS]>;..."  replaces the default matrix (pinbench.cpp explains the
+#                         fields)
 # The pinned configurations use CPUs 0-3. Other processes on the host distort the pinned runs most: a team
 # thread that loses its CPU stalls every barrier of its region.
 set -euo pipefail
@@ -63,7 +64,11 @@ cat "$SRC" > "$OUT/cpu_adamw.cpp"
 "${CC[0]}" "$OUT/pinbench.o" "$OUT/cpu_adamw_omp.o" -o "$OUT/pinbench-openmp" -fopenmp -pthread
 "${CC[0]}" "$OUT/pinbench.o" "$OUT/cpu_adamw_serial.o" -o "$OUT/pinbench-serial" -pthread
 
-IFS=';' read -r -a configs <<< "${CONFIGS:-1 2 1 7 toy:8388608;2 2 2 7 toy:8388608;2 2 1 7 toy:8388608;1 0 1 7 toy:8388608;1 2 1 5 llama:8:896:4864:32000;2 2 2 5 llama:8:896:4864:32000;2 2 1 5 llama:8:896:4864:32000;1 0 1 5 llama:8:896:4864:32000}"
+# The table's rows; the two with a 1200 ms gap leave the shared CPUs idle between steps as a GPU pass would.
+TOY="1 2 1 7 toy:8388608;2 2 2 7 toy:8388608;2 2 1 7 toy:8388608;2 2 1 7 toy:8388608 1200;1 0 1 7 toy:8388608"
+LLAMA=llama:8:896:4864:32000
+LLAMA="1 2 1 5 $LLAMA;2 2 2 5 $LLAMA;2 2 1 5 $LLAMA;2 2 1 5 $LLAMA 1200;1 0 1 5 $LLAMA"
+IFS=';' read -r -a configs <<< "${CONFIGS:-$TOY;$LLAMA}"
 for round in $(seq "${ROUNDS:-3}"); do
     for config in "${configs[@]}"; do
         for build in serial openmp; do

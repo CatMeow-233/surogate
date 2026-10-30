@@ -6,7 +6,8 @@
 //   2. a thread pinned the way NVML pins a rank thread gets a team no larger than its mask, and every team thread
 //      stays inside that mask;
 //   3. threads that share CPUs split them, threads on disjoint CPUs do not, and a caller stops counting when its
-//      thread exits or after the sharing window;
+//      thread exits or once it has been idle for longer than its sharing window (twice its longest idle interval,
+//      at least the minimum window), so a rank thread still counts between two optimizer steps;
 //   4. ordered_block_sum gives the same bits for every team size, equal to the serial block order, and equal to
 //      the plain left-to-right sum up to one block.
 // Checks that need more CPUs than the process may use are reported as skipped, and the others still run.
@@ -190,6 +191,41 @@ void check_sharing_rule() {
     fork_slot_destroy(9);
 }
 
+// The sharing window of one caller: two ranks on one mask, steps separated by a forward/backward pass longer
+// than the minimum window, synthetic clocks.
+void check_sharing_window() {
+    const long long window = fork_omp_sharer_window_ns();
+    const cpu_set_t mask = mask_of({0, 1});
+    const long long t = 2'000'000'000'000;
+    const long long pass = 3 * window;  // the forward/backward pass between two optimizer steps
+    // Rank 10, step 1: two regions.
+    fork_slot_enter(10, mask, t, 64);
+    fork_slot_leave(10, t + 1);
+    fork_slot_enter(10, mask, t + 2, 64);
+    fork_slot_leave(10, t + 3);
+    // Before its second step a caller has no long interval yet: it counts for the minimum window only.
+    int got = fork_slot_enter(11, mask, t + 3 + pass - 1, 64);
+    expect(got == 2, "after one step a caller counts for the minimum window", got, 2);
+    fork_slot_destroy(11);
+    // Rank 10, step 2: two regions, the second after a short interval that must not shrink the window.
+    const long long step2 = t + 3 + pass;
+    fork_slot_enter(10, mask, step2, 64);
+    fork_slot_leave(10, step2 + 1);
+    fork_slot_enter(10, mask, step2 + 2, 64);
+    fork_slot_leave(10, step2 + 3);
+    // Step 3: another rank arrives a pass later, before rank 10 does.
+    got = fork_slot_enter(12, mask, step2 + 3 + pass, 64);
+    expect(got == 1, "a caller counts between steps for twice its longest idle interval", got, 1);
+    fork_slot_destroy(12);
+    got = fork_slot_enter(13, mask, step2 + 3 + 2 * pass, 64);
+    expect(got == 1, "the window reaches twice the longest interval", got, 1);
+    fork_slot_destroy(13);
+    got = fork_slot_enter(14, mask, step2 + 4 + 2 * pass, 64);
+    expect(got == 2, "a caller idle for longer than twice its longest interval stops counting", got, 2);
+    fork_slot_destroy(14);
+    fork_slot_destroy(10);
+}
+
 std::vector<float> wide_range(std::size_t n) {
     std::vector<float> d(n);
     for (std::size_t i = 0; i < n; ++i) {
@@ -270,6 +306,7 @@ int main() {
     dynamic = fork_omp_dynamic();
     const std::size_t big = 4 * fork_omp_min_parallel_elems();
     check_sharing_rule();
+    check_sharing_window();
     check_threshold(big);
     check_pinned(cpus, big, max_threads);
     check_threads_sharing(cpus, big, max_threads);

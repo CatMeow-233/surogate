@@ -50,9 +50,9 @@ nsys stats --report cuda_gpu_mem_size_sum train-trace.nsys-rep
 因此 `cpu_adamw.cpp` 的每个并行区都由 `fork/native/include/surogate_fork/omp_team.h` 的 `OmpTeam` 决定线程数（ledger T5）：
 
 - 元素数少于 `kOmpMinParallelElems` = 65536 时用 1 个线程：并行区的 `if` 子句为假，循环在调用线程上执行。
-- 否则用调用线程当前掩码中的 CPU 数（每次进入这样的并行区都重新读取，一次 `sched_getaffinity` 系统调用），除以掩码与它重叠、且正在并行区中或 1 秒内离开过并行区的调用线程数（含它自己），至少 1，至多 `omp_get_max_threads()`。
+- 否则用调用线程当前掩码中的 CPU 数（每次进入这样的并行区都重新读取，一次 `sched_getaffinity` 系统调用），除以掩码与它重叠、且正在并行区中或离开并行区还不超过自己共享窗口的调用线程数（含它自己），至少 1，至多 `omp_get_max_threads()`。一个调用线程的共享窗口是它两次并行区之间最长空闲间隔的 2 倍，至少 1 秒（`kOmpSharerGapFactor`、`kOmpSharerWindowNs`）。
 
-team 因而不超过调用线程掩码中的 CPU 数；同一组 CPU 上的几个 rank 平分这些 CPU，绑在不相交 CPU 上的 rank 互不影响。线程退出时注销，空闲超过 1 秒不再计入，所以只调用过一次优化器的线程不会长期占用份额。一步开始时最先进入的 rank 可能在其他 rank 进入之前用满整组 CPU，持续到其他 rank 的第一个并行区。
+team 因而不超过调用线程掩码中的 CPU 数；同一组 CPU 上的几个 rank 平分这些 CPU，绑在不相交 CPU 上的 rank 互不影响。rank 线程两步之间的空闲是一次前向/反向加梯度卸载，它的共享窗口随之变长，所以从第 3 步起，无论前向/反向多长，同一组 CPU 上的 rank 在步与步之间仍互相计入。前两步例外：第 1 步时各 rank 还没有登记，第 2 步时它们还没有步间间隔可参考，窗口只有 1 秒；前向/反向超过 1 秒时，这一步最先进入的 rank 在其他 rank 的第一个并行区之前用满整组 CPU。之后某次步间空闲超过此前最长间隔的 2 倍时（例如中途保存 checkpoint），那一步也是如此。用满整组 CPU 时，libgomp 为该 rank 创建的 worker 在并行区结束后先空转一段时间（`GOMP_SPINCOUNT`）再睡眠；每个 rank 只分到 1 个 CPU 时，它与其他 rank 争用 CPU（见下文 R=2 共用 2 个 CPU 的几行）。线程退出时注销；只连续调用过几次优化器就停下的线程（例如 Python 线程通过 `AsyncStaleAdamW` 调试接口以 `overlap=False` 运行）空闲 1 秒后不再计入，不会长期占用份额。
 
 环境变量：
 
@@ -68,21 +68,24 @@ team 因而不超过调用线程掩码中的 CPU 数；同一组 CPU 上的几�
 
 ### 测量
 
-主机：4 vCPU 的 KVM 虚拟机（Intel Xeon，family 6 model 207，2.1 GHz，1 个 socket，无 SMT，16 GB 内存），没有 GPU，测量时与其他会话共用。“两个 socket”用两组不相交的 2-CPU 掩码模拟：rank 线程像 NVML 那样只绑定自己。代码：`cpu_adamw.cpp` 用训练库的编译命令（GCC 13.3，`-O3 -fopenmp`，libgomp）编译，链接进 `fork/native/bench/cpu-optimizer/pinbench.cpp`；该程序在每个 rank 线程上执行 `step_cpu_streaming` 的 CPU 部分（范数，然后每个参数一次 `cpu_adamw_step_bf16`，FP32 master、BF16 梯度）。负载：toy 是一个 8M 元素的张量加 64 个 4096 元素的张量；Llama 形状是 L=8、h=896、im=4864、V=32000（embedding、`lm_head` 与各层矩阵，共 75 个张量、1.78 亿元素，近似 Qwen 0.5B 但词表较小）。每格是 3 轮的中位数，每轮取最慢 rank 的步耗时中位数（toy 6 步，Llama 4 步，均不含预热步）；只在机器其余进程占用低于 0.25 个 CPU 时计时，否则重测。
+主机：4 vCPU 的 KVM 虚拟机（Intel Xeon，family 6 model 207，2.1 GHz，1 个 socket，无 SMT，16 GB 内存），没有 GPU，测量时与其他会话共用。“两个 socket”用两组不相交的 2-CPU 掩码模拟：rank 线程像 NVML 那样只绑定自己。代码：`cpu_adamw.cpp` 用训练库的编译命令（GCC 13.3，`-O3 -fopenmp`，libgomp）编译，链接进 `fork/native/bench/cpu-optimizer/pinbench.cpp`；该程序在每个 rank 线程上执行 `step_cpu_streaming` 的 CPU 部分（范数，然后每个参数一次 `cpu_adamw_step_bf16`，FP32 master、BF16 梯度）。负载：toy 是一个 8M 元素的张量加 64 个 4096 元素的张量；Llama 形状是 L=8、h=896、im=4864、V=32000（embedding、`lm_head` 与各层矩阵，共 75 个张量、1.78 亿元素，近似 Qwen 0.5B 但词表较小）。每格是 3 轮的中位数，每轮取最慢 rank 的步耗时中位数（toy 6 步，Llama 4 步，均不含预热步）；只在机器其余进程占用低于 0.25 个 CPU 时计时，否则重测。“每步前空闲 1.2 s”的两行在每步之前让所有 rank 先睡 1.2 秒（`pinbench` 的 `GAP_MS`），代替 GPU 上超过 1 秒的前向/反向。R=2 共用 2 个 CPU 的 4 行是共享窗口改为随步间间隔放大之后重测的（同一台虚拟机，toy 9 轮，Llama 形状 3 轮）；其余各行只有一个调用线程或掩码不相交，不受共享窗口影响，沿用第一次测量。
 
 | 配置 | 负载 | 串行（T5 之前） | OpenMP 默认（修复前） | 修复后 |
 |---|---|---:|---:|---:|
 | R=1，绑定 2/4 个 CPU | toy | 43.6 ms | 1056 ms | 27.3 ms |
 | R=2，两个“socket”各 2 个 CPU | toy | 46.9 ms | 32.0 ms | 25.7 ms |
-| R=2，共用 2 个 CPU（上游的 GPU 0 绑定） | toy | 45.1 ms | 49.9 ms | 47.6 ms |
+| R=2，共用 2 个 CPU（上游的 GPU 0 绑定） | toy | 47.1 ms | 56.2 ms | 50.1 ms |
+| R=2，共用 2 个 CPU，每步前空闲 1.2 s | toy | 49.1 ms | 56.1 ms | 51.8 ms |
 | R=1，不绑定（对照） | toy | 44.5 ms | 13.1 ms | 13.3 ms |
 | R=1，绑定 2/4 个 CPU | Llama 形状 | 945 ms | 1540 ms | 479 ms |
 | R=2，两个“socket”各 2 个 CPU | Llama 形状 | 949 ms | 554 ms | 504 ms |
-| R=2，共用 2 个 CPU | Llama 形状 | 956 ms | 952 ms | 961 ms |
+| R=2，共用 2 个 CPU | Llama 形状 | 997 ms | 1010 ms | 1007 ms |
+| R=2，共用 2 个 CPU，每步前空闲 1.2 s | Llama 形状 | 1008 ms | 1057 ms | 1022 ms |
 | R=1，不绑定（对照） | Llama 形状 | 925 ms | 279 ms | 255 ms |
 
 - 修复前，绑定 2 个 CPU 的单 rank 开 4 个线程（`/proc/<pid>/task` 中 4 个线程的掩码是 0-1），两个 rank 共用 2 个 CPU 时开 8 个；修复后分别是 2 个和 3 个（第 3 个是一步开始时短暂用满 2 个 CPU 时创建的 worker，之后在 libgomp 的线程池中睡眠）。修复前在该配置下设 `OMP_NUM_THREADS=2` 得 21.1–24.3 ms，`OMP_WAIT_POLICY=PASSIVE` 得 28.0–30.9 ms；修复后设 `OMP_NUM_THREADS=1` 得 44.8–48.6 ms，与串行相同。
-- 两个 rank 共用 2 个 CPU 时，每个 rank 只分到 1 个线程，与串行相同：这里没有可并行的 CPU。修复前的 8 个线程比串行慢。
+- 两个 rank 共用 2 个 CPU 时没有可并行的 CPU，修复前的 8 个线程比串行慢。修复后从第 3 步起每个 rank 的每个并行区都只有 1 个线程（在测量程序中逐个并行区记录线程数核对过），但仍比串行慢约 3 ms（toy 约 6%，9 轮分别是 47.8–58.2 对 46.5–48.7 ms；Llama 形状约 1%）。这个差距不来自线程数，具体来源没有单独测量。
+- 每步前空闲 1.2 s 时，第一版修复的固定 1 秒共享窗口每步都会过期：每步最先进入的 rank 都用满 2 个 CPU，并留下一个空转的 worker，toy 为 57.9 ms（9 轮 55.5–60.1 ms），Llama 形状为 1060 ms，与修复前相当。共享窗口随步间间隔放大后，这种情况只出现在前两步（计时的只有第 2 步），toy 为 51.8 ms，Llama 形状为 1022 ms。
 - 不绑定时 toy 修复后略慢（13.3 对 13.1 ms，3 轮分别是 11.9–14.4 对 11.8–15.3 ms）：64 个 4096 元素的张量在阈值以下串行执行。
 - 修复前 toy 负载的两个 R=2 格是 5 次有效运行的中位数：第一版测量程序在 rank 的结果不同时中止，第 2 轮的这两次因此没有计时，之后又补测了 3 轮。
 - 所有配置中，更新后的 master 与两份矩逐位相同（FNV 哈希一致）。
@@ -113,7 +116,7 @@ team 因而不超过调用线程掩码中的 CPU 数；同一组 CPU 上的几�
 
 ### OpenMP 测试
 
-独立的回归测试用 `fork/dev test openmp` 运行，需要 C++ 编译器和 OpenMP，但不需要 GPU 或 CUDA 头文件。`training-openmp-contract` 检查训练用的 OpenMP 辅助函数能让一个真实的双 worker 主机库生效，并得到精确的整数输出；运行时的线程数限制可能导致显式跳过。`training-openmp-team` 用同一个 OpenMP 辅助函数（`surogate_enable_training_openmp()`）编译 `omp_team.h`（该测试不设构建类型，优化级别与训练库的 `-O3` 不同），检查阈值、绑定线程的线程数及其 team 线程的掩码、共用与不相交掩码的分配规则，以及 `ordered_block_sum` 在 1–4 个线程下与串行分块顺序逐位相同。这两个测试都不编译 CUDA 训练库；`cpu_adamw.cpp` 中的并行区由源码 pin `fork/patches/tests/native/test_cpu_adamw_openmp.py`（`fork/dev test patches`）检查。
+独立的回归测试用 `fork/dev test openmp` 运行，需要 C++ 编译器和 OpenMP，但不需要 GPU 或 CUDA 头文件。`training-openmp-contract` 检查训练用的 OpenMP 辅助函数能让一个真实的双 worker 主机库生效，并得到精确的整数输出；运行时的线程数限制可能导致显式跳过。`training-openmp-team` 用同一个 OpenMP 辅助函数（`surogate_enable_training_openmp()`）编译 `omp_team.h`（该测试不设构建类型，优化级别与训练库的 `-O3` 不同），检查阈值、绑定线程的线程数及其 team 线程的掩码、共用与不相交掩码的分配规则和共享窗口，以及 `ordered_block_sum` 在 1–4 个线程下与串行分块顺序逐位相同。这两个测试都不编译 CUDA 训练库；`cpu_adamw.cpp` 中的并行区由源码 pin `fork/patches/tests/native/test_cpu_adamw_openmp.py`（`fork/dev test patches`）检查。
 
 ## RTX 5090 32 GB：稠密与 MoE 微调
 
