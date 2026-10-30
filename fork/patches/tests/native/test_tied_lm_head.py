@@ -3,8 +3,9 @@
 The fix edits upstream C++ and the Gemma 3 declaration; the native suite (fork/native/tests/test-fork-tied-lm-head.cpp)
 and the TLC gate G2 check the behaviour on a GPU. These pins fail on a CPU-only machine when a sync drops or reshapes a
 hunk, or when upstream changes the code the fix relies on: the optimizers and both gradient norms handling a shared
-gradient once, the lm_head gradient being the embedding's, and a missing tie_word_embeddings key resolving to the
-declaration. Each pin reads one function body, so moved lines do not matter.
+gradient once, the lm_head gradient being the embedding's, a missing tie_word_embeddings key resolving to the
+declaration, and a checkpoint without lm_head.weight loading the embedding into a head that is not aliased. Each pin
+reads one function body, so moved lines do not matter.
 """
 
 import json
@@ -198,6 +199,18 @@ def test_upstream_still_sums_the_tied_gradient_and_updates_it_once():
     cpu_norm = body(OPTIMIZERS / "cpu_adamw.cpp", r"double cpu_gradient_norm_squared\(")
     assert "if (seen.count(it->second.Data)) continue; seen.insert(it->second.Data);" in cpu_norm
     assert cpu_norm.count("for (const auto& name : param_names)") == 1
+
+
+def test_a_tied_export_still_loads_where_the_head_has_its_own_storage():
+    """T10's exports and weight shards have no lm_head.weight, as HF writes a tied model. Full training aliases the
+    head and skips it on import, but QLoRA and LoRA with the weight manager keep a separate head and fill it through
+    the loader's tied fallback, which upstream added for HF checkpoints and T10 relies on, unedited."""
+    load = body(DSL / "dsl_weight_loader.cpp", r"bool DslWeightLoader::load_direct\(")
+    fallback = load[load.index('if (mConfig.TiedWordEmbeddings && hf_name == "lm_head.weight") {') :]
+    assert 'if (const auto* emb_spec = find_mapping_spec("embedding", emb_layer_idx)) {' in fallback
+    assert "candidates.push_back(format_hf_name(emb_spec->source, emb_layer_idx));" in fallback
+    assert 'candidates.push_back("model.embed_tokens.weight");' in fallback
+    assert "entry_ptr = &mReader.find_entry(candidate); break;" in fallback
 
 
 @pytest.mark.parametrize(
