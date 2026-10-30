@@ -20,7 +20,9 @@ if TYPE_CHECKING:
     from surogate.experimental.train.config import TrainConfig
 
 CHECKPOINT_KIND = "surogate.experimental.train"
-CHECKPOINT_VERSION = 2
+# Version 3: rank-scaled optimizer state keeps per-parameter clocks across LISA
+# drops; version-2 checkpoints are refused, not migrated.
+CHECKPOINT_VERSION = 3
 
 
 def _check_single_process() -> None:
@@ -67,7 +69,10 @@ def _load_checkpoint(path: str, contract: str) -> dict[str, Any]:
     if not isinstance(state, dict) or state.get("kind") != CHECKPOINT_KIND:
         raise ValueError("resume requires a surogate experimental PyTorch checkpoint")
     if state.get("checkpoint_version") != CHECKPOINT_VERSION:
-        raise ValueError("unsupported experimental checkpoint version")
+        raise ValueError(
+            f"unsupported experimental checkpoint version {state.get('checkpoint_version')!r}; "
+            f"this trainer resumes only version {CHECKPOINT_VERSION}"
+        )
     if state.get("config_fingerprint") != contract:
         raise ValueError("resume configuration changes the model, algorithm, or data processing contract")
     if not isinstance(state.get("step"), int) or state["step"] < 0:

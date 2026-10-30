@@ -300,7 +300,50 @@ def test_load_hooks_transform_full_checkpoint_and_observe_final_fp32_state_once(
     assert optimizer.state[parameter]["exp_avg"].count_nonzero() > 0
 
 
-def test_dropping_state_restarts_the_parameter_with_its_original_seed():
+def test_reset_keeps_clocks_so_reactivation_draws_a_fresh_basis_and_rounding_noise():
+    matrix = torch.nn.Parameter(torch.ones(16, 4096, dtype=torch.bfloat16))
+    vector = torch.nn.Parameter(torch.ones(1 << 16, dtype=torch.bfloat16))
+    optimizer = RankScaledAdamW(
+        [matrix, vector], lr=1e-2, weight_decay=1e-2, update_interval=1000, stochastic_rounding=True
+    )
+
+    def decay_step():
+        # Zero gradients make both paths a pure decay 1 -> 1 - 1e-4, a sub-ULP
+        # update that stochastic rounding resolves element by element.
+        for parameter in (matrix, vector):
+            with torch.no_grad():
+                parameter.fill_(1)
+            parameter.grad = torch.zeros_like(parameter)
+        optimizer.step()
+        return [(parameter != 1).clone() for parameter in (matrix, vector)]
+
+    first = decay_step()
+    first_basis = optimizer.state[matrix]["projector"].clone()
+    for parameter in (matrix, vector):
+        optimizer.reset_parameter_state(parameter)
+        state = optimizer.state[parameter]
+        assert not any(isinstance(value, torch.Tensor) for value in state.values())
+        assert state["step"] == 1 and state["moment_step"] == 0
+    optimizer.reset_parameter_state(matrix)  # idempotent while inactive
+    second = decay_step()
+    for parameter in (matrix, vector):
+        state = optimizer.state[parameter]
+        assert state["step"] == 2 and state["moment_step"] == 1
+        assert state["exp_avg"].dtype == torch.float32
+    assert optimizer.state[matrix]["projection_index"] == 1
+    assert not torch.equal(optimizer.state[matrix]["projector"], first_basis)
+    for before, after in zip(first, second, strict=True):
+        # Independent noise rounds down a fraction p ~= 1e-4 / 2**-8 of the elements
+        # each time, overlapping in ~p**2 of them; replayed noise repeats the same set.
+        probability = 1e-4 / 2**-8
+        assert abs(before.float().mean().item() - probability) < 0.005
+        assert abs(after.float().mean().item() - probability) < 0.005
+        assert (before & after).float().mean().item() < 2 * probability**2
+    with pytest.raises(ValueError, match="not registered"):
+        optimizer.reset_parameter_state(torch.nn.Parameter(torch.ones(2)))
+
+
+def test_deleting_state_instead_of_resetting_restarts_the_clocks():
     parameter = torch.nn.Parameter(_values((4, 9)))
     optimizer = RankScaledAdamW([parameter], update_interval=1)
     parameter.grad = torch.ones_like(parameter)

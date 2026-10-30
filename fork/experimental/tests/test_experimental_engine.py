@@ -137,7 +137,8 @@ def test_ga_uses_valid_token_sum_instead_of_microbatch_mean_of_means(tmp_path):
         torch.testing.assert_close(micro[name], batch[name], rtol=1e-5, atol=1e-6)
 
 
-def test_resume_restores_projection_layers_data_and_rng_exactly(tmp_path):
+@pytest.mark.parametrize("policy", ["cpu", "drop"])
+def test_resume_restores_projection_layers_data_and_rng_exactly(tmp_path, policy):
     config = tiny_config(
         tmp_path,
         "uninterrupted",
@@ -145,7 +146,7 @@ def test_resume_restores_projection_layers_data_and_rng_exactly(tmp_path):
         shuffle=True,
         lisa_layers=1,
         lisa_interval=1,
-        lisa_state_policy="cpu",
+        lisa_state_policy=policy,
         layer_path="model.layers",
         warmup_steps=3,
     )
@@ -246,6 +247,13 @@ def test_resume_rejects_changed_math_data_and_foreign_checkpoint(tmp_path):
     torch.save({"model": {}}, foreign)
     with pytest.raises(ValueError, match="experimental PyTorch checkpoint"):
         run_training(config, resume_from=str(foreign))
+    # Version 2 (0.1.0a1-a3) optimizer state predates the LISA clocks kept across drops.
+    older = checkpoint(result)
+    older["checkpoint_version"] = 2
+    older_path = tmp_path / "version-2.pt"
+    torch.save(older, older_path)
+    with pytest.raises(ValueError, match="checkpoint version 2"):
+        run_training(replace(config, output_dir=str(tmp_path / "from-version-2")), resume_from=str(older_path))
 
 
 def test_does_not_overwrite_artifacts_or_accept_targetless_window(tmp_path):

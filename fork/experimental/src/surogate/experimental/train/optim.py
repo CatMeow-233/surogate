@@ -5,6 +5,12 @@ APOLLO-Mini, but implements the mathematical construction below independently.
 It is an experimental variant, not the official APOLLO implementation: each
 projection refresh also resets its moments and their bias-correction clock.
 Only projected statistics persist; the parameter has no FP32 master copy.
+
+State contract per parameter: the integer clocks ``step`` (gradient-bearing
+updates) and ``projection_index`` (bases drawn so far) only increase, and every
+random draw is seeded from them, so no two updates of one parameter reuse a
+stochastic-rounding stream and no two projections reuse a basis.
+``reset_parameter_state`` releases the tensors but keeps these clocks.
 """
 
 from __future__ import annotations
@@ -141,11 +147,12 @@ class RankScaledAdamW(Optimizer):
     to the projected variant. Weight decay is decoupled in both paths.
 
     Refreshes occur on gradient-bearing parameter steps 1, 1+update_interval,
-    etc. They reset projected moments and their bias-correction step, while
-    preserving the total step count. CPU generators derived from parameter and
-    refresh seeds leave the global RNG unchanged. Inactive parameters neither
-    advance clocks nor receive weight decay. CPU-offloaded state is restored
-    lazily when that parameter next has a gradient.
+    etc., and on the first step after ``reset_parameter_state``. They reset
+    projected moments and their bias-correction step, while preserving the
+    total step count. CPU generators derived from parameter and refresh seeds
+    leave the global RNG unchanged. Inactive parameters neither advance clocks
+    nor receive weight decay. CPU-offloaded state is restored lazily when that
+    parameter next has a gradient.
 
     ``stochastic_rounding=True`` combines each BF16 update with decay in FP32
     chunks of at most 1,048,576 elements before stochastic BF16 rounding. It
@@ -231,11 +238,12 @@ class RankScaledAdamW(Optimizer):
                 projected=projected,
                 projection_index=-1,
             )
-            if not projected:
-                state["exp_avg"] = torch.zeros_like(param, dtype=torch.float32)
-                state["exp_avg_sq"] = torch.zeros_like(param, dtype=torch.float32)
         elif tuple(state["parameter_shape"]) != tuple(param.shape) or state["rank"] != group["rank"]:
             raise RuntimeError("parameter shape or projection rank changed; create a new optimizer")
+        if not state["projected"] and "exp_avg" not in state:
+            # First step, or the first step after reset_parameter_state.
+            state["exp_avg"] = torch.zeros_like(param, dtype=torch.float32)
+            state["exp_avg_sq"] = torch.zeros_like(param, dtype=torch.float32)
         for key in _FLOAT_STATE_KEYS:
             value = state.get(key)
             if isinstance(value, Tensor):
@@ -296,7 +304,7 @@ class RankScaledAdamW(Optimizer):
 
         grad = None if stochastic else gradient.to(dtype=torch.float32)
         if state["projected"]:
-            if (state["step"] - 1) % group["update_interval"] == 0:
+            if "projector" not in state or (state["step"] - 1) % group["update_interval"] == 0:
                 self._refresh_projection(param, state, group["rank"])
             basis = state["projector"]
             # A post-accumulate hook can execute inside the caller's autocast
@@ -338,6 +346,26 @@ class RankScaledAdamW(Optimizer):
         if group["weight_decay"]:
             param.mul_(1 - group["lr"] * group["weight_decay"])
         param.add_(update, alpha=-group["lr"])
+
+    def reset_parameter_state(self, param: Tensor) -> None:
+        """Release one parameter's moments and projector, keeping its clocks.
+
+        LISA's ``drop`` policy calls this for inactive parameters. The next
+        gradient-bearing step starts new zero moments with a new bias-correction
+        clock and, for a projected matrix, draws a new basis. ``step`` and
+        ``projection_index`` keep counting, so its stochastic-rounding noise and
+        basis are fresh draws, not a replay of the first activation's: unbiased
+        rounding needs independent noise at every update. Deleting the entry from
+        ``self.state`` instead restarts those clocks too.
+        """
+        if param not in self._parameter_groups:
+            raise ValueError("parameter is not registered with this optimizer")
+        state = self.state.get(param)
+        if not state:
+            return
+        for key in (*_FLOAT_STATE_KEYS, "projection_side"):
+            state.pop(key, None)
+        state["moment_step"] = 0
 
     @torch.no_grad()
     def step_parameter(self, param: Tensor) -> None:

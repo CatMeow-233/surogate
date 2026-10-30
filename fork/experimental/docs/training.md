@@ -78,8 +78,10 @@ with FP32 moments. `projection_scale` applies to the projected path only.
 The defaults are `projection_rank: 1`, `projection_interval: 200`, and
 `projection_scale: 1`. There is no persistent FP32 master copy. With BF16
 parameters, `stochastic_rounding: true` applies experimental stochastic rounding
-to avoid systematically losing sub-ULP updates. FP32 update temporaries are
-bounded in chunks; disable the option for round-to-nearest comparisons. This is
+to avoid systematically losing sub-ULP updates. Its noise is seeded per parameter
+and per update from the parameter's step counter, which only increases, so no
+update reuses another's noise. FP32 update temporaries are bounded in chunks;
+disable the option for round-to-nearest comparisons. This is
 BF16 weight updating, **not NVFP4 training**.
 The chunk limit bounds individual conversion/update inputs, not total allocator
 peak: rounding and moment temporaries can coexist. The initial stochastic path
@@ -95,9 +97,14 @@ and kernel launches; it is not a measured GPU throughput optimization.
 motivate selective layer optimization. This implementation offers explicit state
 policies rather than assuming that freezing parameters releases history:
 
-- `lisa_state_policy: drop` deletes inactive optimizer state. It saves state
+- `lisa_state_policy: drop` releases inactive optimizer state. It saves state
   memory but resets momentum when that layer is selected again, making this a
-  LISA-style variation.
+  LISA-style variation. With `rank_scaled` the step counter and projection index
+  of each parameter survive the drop: a re-activated layer starts new moments
+  with a new bias-correction clock and draws a **new** basis and new rounding
+  noise. Replaying the first activation's draws would round the same elements on
+  every activation and bias stochastic rounding. With `adamw` the state entry is
+  deleted.
 - `lisa_state_policy: cpu` retains inactive state on the CPU. It requires the
   rank-scaled optimizer, which migrates state lazily when the parameter next has
   a gradient. GPU savings then require additional host RAM and transfers.
@@ -229,6 +236,10 @@ accepted.
 
 You may increase `max_steps` or change `save_every` and `output_dir` on resume;
 numerical/model configuration changes and different dataset contents are rejected.
+The checkpoint format is version 3. The trainer refuses version-2 checkpoints,
+written by 0.1.0a1–a3: their dropped LISA layers lost the step counters that
+seed rounding noise and bases. Finish such a run with the release that started
+it, or start a new one.
 Use a new output directory if its recorded metrics extend beyond the requested
 checkpoint. The runner does not overwrite an existing unrelated training run.
 

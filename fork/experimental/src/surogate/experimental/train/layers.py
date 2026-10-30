@@ -61,9 +61,14 @@ class LayerSampler:
     through its trainable counterpart. Storage sharing within one domain, or
     between initially frozen parameters only, preserves its existing semantics.
 
-    ``drop`` is a reset variant: inactive blocks lose optimizer history.
-    ``cpu`` retains history on CPU; the optimizer must restore active state
-    lazily (the experimental rank-scaled optimizer supports this).
+    ``drop`` is a reset variant: inactive blocks lose optimizer history. An
+    optimizer with ``reset_parameter_state(parameter)`` (the experimental
+    rank-scaled optimizer) releases the moments and projector but keeps its
+    per-parameter clocks, so a re-activated layer draws fresh stochastic-rounding
+    noise and a fresh basis instead of replaying its first activation's. For other
+    optimizers the parameter's state entry is deleted. ``cpu`` retains history on
+    CPU; the optimizer must restore active state lazily (the experimental
+    rank-scaled optimizer supports this).
     """
 
     def __init__(self, model, active_layers, interval, state_policy="drop", layer_path=None, seed=42):
@@ -171,10 +176,14 @@ class LayerSampler:
             self._last_selection_step = step
             self._apply_selection()
         self._last_step = step
+        reset = getattr(optimizer, "reset_parameter_state", None)
         for parameter in list(optimizer.state):
             if id(parameter) in self._owners and not parameter.requires_grad:
                 if self.state_policy == "drop":
-                    del optimizer.state[parameter]
+                    if reset is None:
+                        del optimizer.state[parameter]
+                    else:
+                        reset(parameter)
                 else:
                     optimizer.state[parameter] = _cpu_state(optimizer.state[parameter])
         counts = {}

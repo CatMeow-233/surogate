@@ -2,11 +2,13 @@
 
 import copy
 import json
+import math
 import random
 
 import pytest
 import torch
 from surogate.experimental.train.layers import LayerSampler
+from surogate.experimental.train.optim import RankScaledAdamW
 from torch import nn
 
 
@@ -255,6 +257,67 @@ def test_resumed_training_matches_uninterrupted_with_tied_parameters(policy):
             assert actual.keys() == expected.keys()
             for key in actual:
                 torch.testing.assert_close(actual[key], expected[key], rtol=0, atol=0)
+
+
+class _RoundingBlock(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.vector = nn.Parameter(torch.ones(1 << 16, dtype=torch.bfloat16))  # AdamW path
+        self.matrix = nn.Parameter(torch.ones(64, 1024, dtype=torch.bfloat16))  # projected path
+
+
+def _decay_with_layer_sampling(policy, steps=200, lr=1e-2, weight_decay=1e-2):
+    model = nn.Module()
+    model.model = nn.Module()
+    model.model.layers = nn.ModuleList([_RoundingBlock(), _RoundingBlock()])
+    optimizer = RankScaledAdamW(
+        model.parameters(), lr=lr, weight_decay=weight_decay, update_interval=1000, stochastic_rounding=True
+    )
+    sampler = LayerSampler(model, 1, 1, state_policy=policy, seed=3)
+    active_steps, activations = [0, 0], [0, 0]
+    for step in range(steps):
+        optimizer.zero_grad(set_to_none=True)
+        previous = sampler.selected_layers
+        sampler.on_step(step, optimizer)
+        for index, block in enumerate(model.model.layers):
+            if block.vector.requires_grad:
+                active_steps[index] += 1
+                activations[index] += index not in previous
+                for parameter in block.parameters():
+                    parameter.grad = torch.zeros_like(parameter)
+        optimizer.step()
+    return model, optimizer, active_steps, activations
+
+
+def test_drop_policy_rounding_stays_unbiased_across_reactivations():
+    """Zero gradients reduce every update to decay by 1 - 1e-4, a sub-ULP step at 1.0.
+
+    Every element starts at 1.0, so the elements of one parameter are independent
+    samples of the same per-element distribution: their mean estimates each
+    element's expectation, which unbiased rounding keeps at (1 - 1e-4)**k after k
+    active steps. Replaying an activation's noise on re-activation rounds the same
+    elements every time: about 12% instead of 90% of them move, and the mean is
+    biased upward by several standard errors.
+    """
+    dropped, optimizer, active_steps, activations = _decay_with_layer_sampling("drop")
+    retained = _decay_with_layer_sampling("cpu")[0]
+    assert min(activations) > 20  # the layers were re-activated many times
+    probability = 1e-4 / 2**-8  # the chance that one decay step leaves 1.0
+    for index, block in enumerate(dropped.model.layers):
+        state = optimizer.state[block.matrix]
+        assert state["step"] == active_steps[index]  # the clock survived every drop
+        assert state["projection_index"] == activations[index] - 1  # one new basis per activation
+        for parameter in block.parameters():
+            values = parameter.detach().double().flatten()
+            expected = (1 - 1e-4) ** active_steps[index]
+            standard_error = values.std().item() / math.sqrt(values.numel())
+            assert abs(values.mean().item() - expected) < 4 * standard_error
+            moved = (values != 1).double().mean().item()
+            assert abs(moved - (1 - (1 - probability) ** active_steps[index])) < 0.01
+    # With zero gradients the moments and bases do not matter, and the seeds follow
+    # the per-parameter clocks under either policy, so the trajectories agree bitwise.
+    for actual, expected in zip(dropped.parameters(), retained.parameters(), strict=True):
+        assert torch.equal(actual, expected)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device to verify actual state transfer")
