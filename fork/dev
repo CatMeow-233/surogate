@@ -30,15 +30,20 @@ fork/dev: maintenance commands for CatMeow-233/surogate (run from any directory;
 in arguments are relative to the current directory).
 
 Artefacts (details: fork/docs/build-and-release.md)
-  artefact                      fork/dev command         output                               published by (on the fork)
-  trainer extension _surogate   build train              surogate/_surogate*.so               native wheel (disabled)
-  serving engine + libsinfer    build serve              csrc/build-serve/, surogate/*.so     native wheel (disabled)
-  STT / TTS engines             build stt | build tts    csrc/build-stt/, csrc/build-tts/     native wheel (disabled)
-  quantizer llama-quantize      build quantizer          surogate/serve/_llama_cpp/bin/       native wheel (disabled)
+  artefact                      fork/dev command         output                               published on the fork by
+  trainer extension _surogate   build train              surogate/_surogate*.so               fork native wheel (native-release.yml)
+  serving engine + libsinfer    build serve              csrc/build-serve/, surogate/*.so     fork native wheel (native-release.yml)
+  STT / TTS engines             build stt | build tts    csrc/build-stt/, csrc/build-tts/     fork native wheel (native-release.yml)
+  quantizer llama-quantize      build quantizer          surogate/serve/_llama_cpp/bin/       fork native wheel (native-release.yml)
   native wheel (RTX 50 sm_120a) (none: manual CI run)    wheelhouse/ (CI job)                 native-release.yml, run on main with publish
-  Docker, jackalope             (none: upstream workflows, disabled on the fork)
   surogate-experimental         release experimental     build/experimental-release/artifacts experimental-release.yml, on a pushed
                                                                                               experimental-v<version> tag of a main commit
+  Docker images, jackalope      (none)                   -                                    none for the fork (upstream workflows, below)
+Upstream's release workflows publish upstream's artefacts and stay active on CatMeow-233/surogate until
+the owner disables them (fork/dev setup prints the checklist and the current state): wheel.yml ("Build
+Wheels") runs on v* tags, docker.yml ("Build Docker Images") after it, and jackalope.yml on every push
+to main that touches jackalope/** (a merged upstream sync can do that) and on jackalope-v* tags. Disable:
+  for w in wheel.yml docker.yml jackalope.yml; do gh workflow disable "$w" -R CatMeow-233/surogate; done
 
 Commands
   help                              this text
@@ -87,9 +92,11 @@ setup() {
     cat <<'EOF'
 
 GitHub settings for CatMeow-233/surogate (owner actions, see fork/docs/sync.md; fork/dev does not change them):
-  1. Workflows "Build Wheels", "Build Docker Images" and "jackalope" are disabled;
-     "Experimental Trainer Release" and "Fork CI" stay active.
-       gh workflow disable "Build Wheels" -R CatMeow-233/surogate   (same for the other two)
+  1. Upstream's release workflows wheel.yml ("Build Wheels"), docker.yml ("Build Docker Images") and
+     jackalope.yml ("jackalope") must be disabled: they stay active until you disable them, and
+     jackalope.yml publishes on every push to main that touches jackalope/**. "Experimental Trainer
+     Release", "Native Wheel Release" and "Fork CI" stay active.
+       for w in wheel.yml docker.yml jackalope.yml; do gh workflow disable "$w" -R CatMeow-233/surogate; done
   2. Squash and rebase merging are off, merge commits on:
        gh repo edit CatMeow-233/surogate --enable-squash-merge=false --enable-rebase-merge=false --enable-merge-commit
   3. Repository description: "Fork of invergent-ai/surogate. Maintainers: start at fork/README.md"

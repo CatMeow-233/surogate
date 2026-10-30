@@ -50,7 +50,7 @@ fork 的工具不修改 GitHub 设置，以下各项由仓库所有者完成。
    gh workflow list -R CatMeow-233/surogate --all
    ```
 
-   最后一条命令应显示这三个为 `disabled_manually`，“Experimental Trainer Release” 和 “Fork CI” 为 `active`。
+   最后一条命令应显示这三个为 `disabled_manually`，“Experimental Trainer Release”、“Native Wheel Release” 和 “Fork CI” 为 `active`。
 
 2. 关闭 squash 与 rebase 合并，保留 merge commit，并把仓库描述指向维护入口：
 
