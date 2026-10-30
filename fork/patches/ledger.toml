@@ -220,6 +220,7 @@ fork_files = [
     "fork/native/include/surogate_fork/omp_team.h",
     "fork/native/openmp-contract/CMakeLists.txt",
     "fork/native/openmp-contract/check.cpp",
+    "fork/native/openmp-contract/hook_contract.cmake",
     "fork/native/openmp-contract/probe.cpp",
     "fork/native/openmp-contract/team.cpp",
     "fork/native/openmp-contract/team_api.h",
@@ -230,8 +231,10 @@ fork_files = [
 ]
 tests = [
     "fork/native/openmp-contract/check.cpp",
+    "fork/native/openmp-contract/hook_contract.cmake",
     "fork/native/openmp-contract/team_check.cpp",
     "fork/patches/tests/native/test_cpu_adamw_openmp.py",
+    "fork/tools/tests/test_native_hook_contract.py",
 ]
 conflict_history = [
     "2026-10-27 reverse replay from b5af2f8e, conflict blocks at 90/30/14 days: none",
