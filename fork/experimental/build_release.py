@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -18,6 +19,34 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 METADATA = Path(__file__).resolve().parent
+
+# The canonical PEP 440 spelling (str(packaging.version.Version(v)) == v) of a version without an epoch
+# or a local part; RELEASE_VERSION_PATTERN in fork/tools/release_gate.sh is the same pattern. Another
+# spelling of a published version (0.1.0.a3 or 0.1.0-alpha3 for 0.1.0a3) names a tag that does not
+# exist yet, but the wheel gets the normalised version and the published wheel's file name.
+CANONICAL_VERSION = re.compile(
+    r"(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))*((a|b|rc)(0|[1-9][0-9]*))?(\.post(0|[1-9][0-9]*))?(\.dev(0|[1-9][0-9]*))?"
+)
+
+
+def check_version(version: str, tag: str | None) -> str:
+    """Refuse a non-canonical version, and with a tag, any tag but experimental-v<version> of a release
+    that is not a development release; return the tag the version publishes as."""
+    if not CANONICAL_VERSION.fullmatch(version):
+        raise ValueError(
+            f"fork/experimental/pyproject.toml version {version!r} is not a PEP 440 version without a local "
+            "part in canonical spelling (for example 0.1.0a4, not 0.1.0.a4 or 0.1.0a04)"
+        )
+    expected_tag = f"experimental-v{version}"
+    if tag is not None:
+        if tag != expected_tag:
+            raise ValueError(f"release tag must match the package version: {expected_tag}")
+        if ".dev" in version:
+            raise ValueError(
+                f"{version} is a development version: between releases the checkout carries the next "
+                "version with .dev0, which no published wheel may share; set the release version first"
+            )
+    return expected_tag
 
 
 def check_archives(wheel: Path, sdist: Path, version: str) -> None:
@@ -91,9 +120,7 @@ def sha256(path: Path) -> str:
 def build(output: Path, tag: str | None) -> list[Path]:
     metadata = tomllib.loads((METADATA / "pyproject.toml").read_text())
     version = metadata["project"]["version"]
-    expected_tag = f"experimental-v{version}"
-    if tag is not None and tag != expected_tag:
-        raise ValueError(f"release tag must match the package version: {expected_tag}")
+    expected_tag = check_version(version, tag)
     if shutil.which("uv") is None:
         raise RuntimeError("uv is required to build the experimental release")
     source = METADATA / "src" / "surogate" / "experimental"

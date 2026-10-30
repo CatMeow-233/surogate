@@ -36,7 +36,7 @@
 | `fork/dev test tools` | `fork/tools/tests`：同步脚本、`check_divergence.py`、`fork/dev` 的超时与参数传递、`csrc/CMakeLists.txt` 挂接点的 configure 检查，都在临时 git 仓库中运行 | `FORK_PY`，需要 pytest 和 pytest-timeout；git；挂接点用例需要 CMake 和主机 C++ 编译器，缺少时跳过 |
 | `fork/dev test tlc` | `fork/tlc/tests/cpu`：TLC 包的 CPU 测试，不需要原生扩展。GPU 测试 `fork/tlc/tests/gpu` 按 [TLC 运行手册](../tlc/docs/runbook.md) 在 GPU 主机上运行 | `FORK_PY`（默认 `.venv/bin/python`），需要 CPU torch 和 [requirements-cpu-lane.txt](../tools/requirements-cpu-lane.txt) |
 | `fork/dev test openmp` | OpenMP 接线测试和 CPU 优化器的线程数契约（`fork/native/include/surogate_fork/omp_team.h`），构建目录 `build/fork-openmp` | 主机 C++ 编译器、OpenMP、CMake；不需要 GPU 或 CUDA |
-| `fork/dev test release` | `fork/native/release/test_plan.sh`：在临时目录中建立合成的上游仓库和 fork 仓库，检查 `plan.sh` 的每个发布条件，以及 `native-release.yml` 在构建之前和发布之前调用它 | git、bash；不访问网络 |
+| `fork/dev test release` | `fork/native/release/test_plan.sh`：在临时目录中建立合成的上游仓库和 fork 仓库，检查 `plan.sh` 的每个发布条件、`build-wheel.sh` 的版本检查和两者共用的 `fork/tools/release_gate.sh`，以及 `native-release.yml` 在构建之前和发布之前调用 `plan.sh` | git、bash；不访问网络 |
 | `fork/dev test native` | 先 `make configure`，再加 `-DBUILD_TESTS=ON` 重新配置 `csrc/build`，构建并用 ctest 运行 `dsl-weight-loader-tests`、`dsl-run-state-tests`、`integration-tests`（fork 的 C++ 用例编译在后两个里，见 [native/README.md](../native/README.md)） | CUDA 构建环境；GPU 用例无 GPU 时跳过 |
 | `fork/dev test gpu` | `test native`，再 `make test-py`、`make serve-check`、`make grpo-test` | GPU 主机；`make grpo-test` 需要 `SUROGATE_TEST_MODEL` |
 
@@ -48,7 +48,7 @@
 
 ## 发布实验版本
 
-`surogate-experimental` 的版本号写死在 `fork/experimental/pyproject.toml` 中，tag 必须是 `experimental-v<版本>`。推送这个 tag 会运行 `.github/workflows/experimental-release.yml`，它重新测试、构建并发布预发布 Release。手动触发（包括在 `experimental-v*` tag 上手动运行）只构建和检查，不发布。已发布的 Release 不会被替换：发布前 `fork/experimental/release_guard.py` 检查这个 tag 是否已有 Release，已有资产必须与本次构建逐字节相同，此时只补传缺失的资产（重新运行同一次运行中失败的 release job 可以补完中途中断的上传），否则 job 失败。构建产物带时间戳，重新构建同一提交也会得到不同的 SHA-256，所以要修正已发布的版本只能发布新版本号。在 `main` 上按顺序操作：
+`surogate-experimental` 的版本号写死在 `fork/experimental/pyproject.toml` 中，按 PEP 440 的规范写法书写（例如 `0.1.0a4`，不能写成 `0.1.0.a4` 或 `0.1.0a04`，`build_release.py` 拒绝其他写法），tag 必须是 `experimental-v<版本>`。推送这个 tag 会运行 `.github/workflows/experimental-release.yml`，它重新测试、构建并发布预发布 Release。手动触发（包括在 `experimental-v*` tag 上手动运行）只构建和检查，不发布。已发布的 Release 不会被替换：发布前 `fork/experimental/release_guard.py` 检查这个 tag 是否已有 Release，已有资产必须与本次构建逐字节相同，此时只补传缺失的资产（重新运行同一次运行中失败的 release job 可以补完中途中断的上传），否则 job 失败。构建产物带时间戳，重新构建同一提交也会得到不同的 SHA-256，所以要修正已发布的版本只能发布新版本号。在 `main` 上按顺序操作：
 
 1. 更新版本号：两次发布之间，`fork/experimental/pyproject.toml` 中是下一个版本加 `.dev0`（例如 `0.1.0a4.dev0`），这样从检出目录构建的 wheel 不会与已发布的 wheel 同名。把它改为新版本（去掉 `.dev0`；忘记去掉时，第 4 步的 `--tag` 检查因版本不符而失败），再用 `git grep -n '<上一个发布版本>' -- fork/experimental` 列出其余写有版本号的地方（`fork/experimental/README.md` 与 `fork/experimental/docs/training.md` 中的下载文件名，以及 `fork/experimental/RELEASE_NOTES.md`），全部改为新版本。`training.md` 的“Differences from <上一个发布版本>”一节写的是检出目录与上一个发布版本的差异，发布时删除它，需要保留的内容并入发布说明。
 2. 改写 `fork/experimental/RELEASE_NOTES.md`：它就是 Release 的正文。
@@ -72,7 +72,7 @@ fork 的原生 wheel 由 `.github/workflows/native-release.yml` 在 GitHub 免�
 工作流只能手动运行：推送（包括合并到 `main`）既不构建也不发布。手动运行要求工作流文件已经在默认分支 `main` 上。一次运行能否发布由 `fork/native/release/plan.sh` 判断，条件是：
 
 1. 运行在 `main` 上，并勾选了 `publish`。
-2. `VERSION` 是不带本地部分的 PEP 440 版本，并且形如 `<上游版本>.postN`。上游版本是被构建的提交历史中最新的上游发布 tag `vX.Y.Z`。`fork/dev sync` 合并的是上游 `main`，不一定正好是这个 tag，所以 Release 说明另外写明 fork 合并的上游提交（被构建的提交与上游 `main` 的 merge base，与 `check_divergence.py` 的定义相同）以及它比该发布多出的提交数，例如 “at `<sha>` (v1.5.12 + 3 commits)”。
+2. `VERSION` 是不带本地部分的 PEP 440 版本，按规范写法书写（数字不带前导零，例如 `1.5.12.post1`，不能写成 `1.5.12.post01` 或 `1.5.12post1`：它们与 `1.5.12.post1` 是同一个版本，wheel 文件名相同，却对应另一个还不存在的 tag），并且形如 `<上游版本>.postN`。上游版本是被构建的提交历史中最新的上游发布 tag `vX.Y.Z`。`fork/dev sync` 合并的是上游 `main`，不一定正好是这个 tag，所以 Release 说明另外写明 fork 合并的上游提交（被构建的提交与上游 `main` 的 merge base，与 `check_divergence.py` 的定义相同）以及它比该发布多出的提交数，例如 “at `<sha>` (v1.5.12 + 3 commits)”。
 3. tag `native-v<版本>` 还不存在。已发布的版本不会被重新构建或替换。
 4. 被构建的提交仍在 `main` 的历史中，并且 `.github/workflows` 与 `main` 的当前提交相同：GitHub 不允许 `GITHUB_TOKEN` 在工作流文件与默认分支不同的提交上创建 tag。
 

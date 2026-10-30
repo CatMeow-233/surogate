@@ -11,9 +11,9 @@
 # Run from the repository root inside nvidia/cuda:13.1.1-cudnn-devel-ubuntu24.04 (as root):
 #   RELEASE_TAG=native-v1.5.12.post1 bash fork/native/release/build-wheel.sh
 # Environment:
-#   RELEASE_TAG   native-v<PEP 440 version> (a publish run of the workflow derives it from
-#                 fork/native/release/VERSION); without it, as in build-only runs, the wheel is
-#                 versioned 0.0.0.dev0
+#   RELEASE_TAG   native-v<PEP 440 version, canonical spelling, no local part> (a publish run of the
+#                 workflow derives it from fork/native/release/VERSION); without it, as in build-only
+#                 runs, the wheel is versioned 0.0.0.dev0
 #   ARCHS         CUDA architectures for trainer and engine, ';'-separated (default 120a)
 #   CCACHE_DIR    compiler cache (default /ccache)
 #   HOST_UID      if set, the checkout is chowned back to it at the end (the build runs as root)
@@ -23,11 +23,15 @@ set -euo pipefail
 ARCHS=${ARCHS:-120a}
 export CCACHE_DIR=${CCACHE_DIR:-/ccache}
 cd "$(dirname "$0")/../../.."
+# shellcheck source=../../tools/release_gate.sh
+. fork/tools/release_gate.sh # release_version_ok: the check plan.sh applies to VERSION
 
 if [ -n "${RELEASE_TAG:-}" ]; then
     VERSION=${RELEASE_TAG#native-v}
-    [[ "$RELEASE_TAG" == native-v* && "$VERSION" =~ ^[0-9]+(\.[0-9]+)*((a|b|rc)[0-9]+)?(\.post[0-9]+)?(\.dev[0-9]+)?$ ]] ||
-        { echo "RELEASE_TAG must be native-v<PEP 440 version without a local part>, got '$RELEASE_TAG'" >&2; exit 2; }
+    if [[ "$RELEASE_TAG" != native-v* ]] || ! release_version_ok "$VERSION"; then
+        echo "RELEASE_TAG must be native-v<PEP 440 version without a local part, canonical spelling>, got '$RELEASE_TAG'" >&2
+        exit 2
+    fi
 else
     VERSION=0.0.0.dev0
 fi

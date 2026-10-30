@@ -10,7 +10,8 @@
 #                                         the plan job's outputs, which may be days old)
 #
 # Conditions for publishing; VERSION is fork/native/release/VERSION at the run's commit:
-#   1. VERSION is a PEP 440 version without a local part (the pattern build-wheel.sh also checks).
+#   1. VERSION is a PEP 440 version without a local part, spelled canonically (release_version_ok in
+#      fork/tools/release_gate.sh, which build-wheel.sh also uses): 1.5.12.post1, not 1.5.12.post01.
 #   2. The run is on the default branch.
 #   3. The tag native-v<VERSION> does not exist on the remote. A published version is never rebuilt
 #      or replaced: set a new VERSION instead.
@@ -37,6 +38,7 @@
 # Needs the full history (actions/checkout with fetch-depth: 0). Moves no ref, so it can run as a
 # local preflight: the fetches write only FETCH_HEAD and the fetched objects, and their empty --refmap
 # keeps git from updating a remote-tracking branch (refs/remotes/<REMOTE>/<DEFAULT_BRANCH>).
+# Shared checks (the version spelling, the default-branch ancestry) are in fork/tools/release_gate.sh.
 set -euo pipefail
 
 mode=${1:-}
@@ -48,6 +50,8 @@ case "$mode" in
         ;;
 esac
 cd "$(dirname "$0")/../../.."
+# shellcheck source=../../tools/release_gate.sh
+. fork/tools/release_gate.sh
 
 REMOTE=${REMOTE:-origin}
 UPSTREAM_URL=${UPSTREAM_URL:-https://github.com/invergent-ai/surogate.git}
@@ -56,15 +60,7 @@ DEFAULT_BRANCH=${DEFAULT_BRANCH:-main}
 sha=$(git rev-parse --verify "${GITHUB_SHA:-HEAD}^{commit}")
 ref=${GITHUB_REF:-$(git symbolic-ref -q HEAD || echo "a detached HEAD")}
 
-say() { # level message
-    if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::$1::$2"; else echo "$1: $2"; fi
-}
-
-problems=0
-problem() {
-    problems=$((problems + 1))
-    if [ "$mode" = build ]; then say notice "a publish run would refuse: $*"; else say error "$*"; fi
-}
+problems=0 # counted by problem (release_gate.sh)
 
 # Prints "X.Y.Z <commit>" for the newest X.Y.Z among the upstream vX.Y.Z tags (git ls-remote --tags
 # output on stdin) whose commit is in the history of $sha. Annotated tags are followed to their
@@ -92,9 +88,9 @@ newest_upstream_release() {
 # 1. VERSION
 version=$(git show "$sha:fork/native/release/VERSION" | tr -d '[:space:]')
 tag=native-v$version
-pep440='^[0-9]+(\.[0-9]+)*((a|b|rc)[0-9]+)?(\.post[0-9]+)?(\.dev[0-9]+)?$'
-[[ $version =~ $pep440 ]] ||
-    problem "fork/native/release/VERSION is '$version', not a PEP 440 version without a local part"
+release_version_ok "$version" ||
+    problem "fork/native/release/VERSION is '$version', not a PEP 440 version without a local part in" \
+        "canonical spelling (for example 1.5.12.post1, not 1.5.12.post01 or 1.5.12post1)"
 if [ "$mode" = recheck ] && [ "${RELEASE_TAG:-}" != "$tag" ]; then
     problem "the plan job chose '${RELEASE_TAG:-}', but VERSION at $sha gives $tag"
 fi
@@ -103,9 +99,9 @@ fi
 [ "$ref" = "refs/heads/$DEFAULT_BRANCH" ] ||
     problem "the run is on $ref; publish only from refs/heads/$DEFAULT_BRANCH"
 
-# 3. The tag must not exist (exit code 2 of ls-remote --exit-code: no matching ref)
+# 3. The tag must not exist
 rc=0
-git ls-remote --exit-code --tags "$REMOTE" "refs/tags/$tag" >/dev/null || rc=$?
+release_remote_tag "$REMOTE" "$tag" >/dev/null || rc=$?
 case $rc in
     0) problem "$tag already exists on $REMOTE; a published version is never replaced, so set a new VERSION" ;;
     2) ;;
@@ -113,18 +109,9 @@ case $rc in
 esac
 
 # 4. The commit is on the default branch, with the default branch's workflow files
-if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
-    problem "the clone is shallow; plan.sh needs the full history (actions/checkout fetch-depth: 0)"
-elif ! git fetch --quiet --no-tags --refmap= "$REMOTE" "refs/heads/$DEFAULT_BRANCH"; then
-    problem "cannot fetch $DEFAULT_BRANCH from $REMOTE"
-else
-    tip=$(git rev-parse FETCH_HEAD)
-    if ! git merge-base --is-ancestor "$sha" "$tip"; then
-        problem "$sha is not in the history of $DEFAULT_BRANCH (now $tip)"
-    elif ! git diff --quiet "$sha" "$tip" -- .github/workflows; then
-        problem ".github/workflows at $sha differs from $DEFAULT_BRANCH (now $tip), so GITHUB_TOKEN cannot" \
-            "create the tag there; run the workflow again on the current $DEFAULT_BRANCH"
-    fi
+if release_on_default_branch "$sha" && ! git diff --quiet "$sha" "$release_tip" -- .github/workflows; then
+    problem ".github/workflows at $sha differs from $DEFAULT_BRANCH (now $release_tip), so GITHUB_TOKEN cannot" \
+        "create the tag there; run the workflow again on the current $DEFAULT_BRANCH"
 fi
 
 # 5. VERSION names the upstream release the commit is based on. For the release notes, also find the

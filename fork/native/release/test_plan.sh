@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# Tests of fork/native/release/plan.sh, the only gate between a run of
-# .github/workflows/native-release.yml and a published release. Run with `fork/dev test release`;
-# the Fork CI check job runs it too.
+# Tests of fork/native/release/plan.sh, the gate between a run of
+# .github/workflows/native-release.yml and a published release, and of the checks in
+# fork/tools/release_gate.sh. Run with `fork/dev test release`; the Fork CI check job runs it too.
 #
 # Each case runs plan.sh in a clone of a synthetic fork and checks its exit code, its messages and
 # the outputs it writes to GITHUB_OUTPUT. The synthetic upstream (vX.Y.Z tags) and fork (origin,
 # with main) live in a temporary directory, with their own git configuration; the script needs only
-# git and bash, no network, and changes nothing outside that directory. The last section checks
-# that native-release.yml still calls plan.sh where publishing depends on it.
+# git and bash, no network, and changes nothing outside that directory. Section V runs the version
+# check of build-wheel.sh. The last section checks that native-release.yml still calls plan.sh where
+# publishing depends on it.
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PLAN=$HERE/plan.sh
+GATE=$HERE/../../tools/release_gate.sh
 WORKFLOW=$HERE/../../../.github/workflows/native-release.yml
 
 T=$(mktemp -d "${TMPDIR:-/tmp}/fork-plan-test.XXXXXX")
@@ -64,9 +66,10 @@ U2=$(git -C "$T/up" rev-parse 'v1.5.12^{commit}')
 # Fork: main = upstream v1.5.12 + a fork commit with VERSION, plan.sh and a workflow.
 git init -q "$T/seed" && cd "$T/seed" || exit 1
 git fetch -q "$T/up.git" refs/tags/v1.5.12 && git reset -q --hard "$U2"
-mkdir -p fork/native/release .github/workflows
+mkdir -p fork/native/release fork/tools .github/workflows
 echo 1.5.12.post1 >fork/native/release/VERSION
 cp "$PLAN" fork/native/release/plan.sh
+cp "$GATE" fork/tools/release_gate.sh
 echo 'on: workflow_dispatch' >.github/workflows/native-release.yml
 git add -A && git commit -qm F1
 F1=$(git rev-parse HEAD)
@@ -135,16 +138,31 @@ o=$(run publish GITHUB_SHA="$WTIP" GITHUB_REF=refs/heads/main)
 check "F commit no longer on main" 1 $? "$o" "is not in the history of main"
 git push -q -f origin "$WTIP:main"
 
-# G. VERSION checks: format, and the upstream release the commit is based on (NR-3)
-for v in 1.5.9.post1 1.5.12 1.5.13.post1 1.5.12.post1+cu130 abc; do
+# G. VERSION checks: format, and the upstream release the commit is based on (NR-3). Other spellings
+# of a version (1.5.12.post01 is 1.5.12.post1 to PEP 440, and the wheel's file name says so) are
+# refused, so a published version cannot be published again under a second tag.
+noncanonical='1.5.12.post01 1.5.12post1 1.5.12.post-1 1.5.12-post1 1.5.12.POST1 01.5.12.post1 1.05.12.post1
+    1.5.12.post1.dev01 1.5.12.post1.dev 1.5.12.post 1.5.12.r1 1.5.12.post1_dev1 1.5.12.0post1 v1.5.12.post1
+    1!1.5.12.post1'
+for v in 1.5.9.post1 1.5.12 1.5.13.post1 1.5.12.post1+cu130 abc $noncanonical; do
     git checkout -q -B vtest "$WTIP" && echo "$v" >fork/native/release/VERSION && git commit -qam "v $v" &&
         git push -q -f origin vtest:main
     o=$(run publish GITHUB_SHA="$(git rev-parse HEAD)" GITHUB_REF=refs/heads/main)
     rc=$?
     case $v in
-        abc | *+*) check "G VERSION $v" 1 $rc "$o" "not a PEP 440 version" ;;
-        *) check "G VERSION $v" 1 $rc "$o" "does not name the upstream release .* \(v1\.5\.12\); use 1\.5\.12\.post<N>" ;;
+        1.5.9.post1 | 1.5.12 | 1.5.13.post1)
+            check "G VERSION $v" 1 $rc "$o" "does not name the upstream release .* \(v1\.5\.12\); use 1\.5\.12\.post<N>" ;;
+        *) check "G VERSION $v" 1 $rc "$o" "not a PEP 440 version without a local part in canonical spelling" ;;
     esac
+done
+# The shared pattern itself, without git: canonical spellings pass, every other spelling fails.
+for v in 0 1.0 1.5.12 10.20.30 1.5.12.post1 1.5.12.post10 1.5.12.post1.dev0 1.5.12a1 1.5.12b2 1.5.12rc3 \
+    1.5.12rc3.post2.dev4 0.1.0a4.dev0 1.0.0.0.0; do
+    if bash -c '. "$1" && release_version_ok "$2"' _ "$GATE" "$v"; then ok "G canonical $v"; else not_ok "G canonical $v refused"; fi
+done
+for v in $noncanonical 1.5.12.post1+cu130 '' ' 1.5.12' 1.5.12a 0.1.0.a3 0.1.0-alpha3 0.1.0alpha3 0.1.0c1 0.1.0pre1 \
+    0.1.0a03 1.5..12 1.5.12.; do
+    if bash -c '. "$1" && release_version_ok "$2"' _ "$GATE" "$v"; then not_ok "G '$v' accepted"; else ok "G refused '$v'"; fi
 done
 for v in 1.5.12.post2 1.5.12.post3.dev1; do
     git checkout -q -B vtest "$WTIP" && echo "$v" >fork/native/release/VERSION && git commit -qam "v $v" &&
@@ -244,6 +262,16 @@ check "N build after origin's main moved" 0 $? "$o" "is not in the history of ma
 if [ "$(git for-each-ref)" = "$refs_before" ]; then ok "N plan.sh moved no ref"; else
     not_ok "N plan.sh moved a ref" && diff <(echo "$refs_before") <(git for-each-ref); fi
 git -C "$T/origin.git" update-ref refs/heads/main "$WTIP"
+
+# V. build-wheel.sh takes its version from RELEASE_TAG and refuses what plan.sh refuses, before it
+# changes anything: a stand-in apt-get (its first command after the check) stops an accepted tag.
+mkdir -p "$T/bin" && printf '#!/bin/sh\nexit 97\n' >"$T/bin/apt-get" && chmod +x "$T/bin/apt-get"
+for t in native-v1.5.12.post01 native-v1.5.12.post1+cu130 v1.5.12.post1 native-v; do
+    o=$(env PATH="$T/bin:$PATH" RELEASE_TAG="$t" bash "$HERE/build-wheel.sh" 2>&1)
+    check "V build-wheel.sh refuses RELEASE_TAG=$t" 2 $? "$o" "RELEASE_TAG must be native-v<PEP 440 version"
+done
+o=$(env PATH="$T/bin:$PATH" RELEASE_TAG=native-v1.5.12.post1 bash "$HERE/build-wheel.sh" 2>&1)
+check "V build-wheel.sh accepts native-v1.5.12.post1" 97 $? "$o" "^::group::System packages"
 
 # W. native-release.yml runs plan.sh before the build and again right before publishing, and never
 # replaces a published file
