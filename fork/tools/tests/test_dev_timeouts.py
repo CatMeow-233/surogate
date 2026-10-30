@@ -3,6 +3,7 @@ and name it, and fork/dev passes extra arguments to pytest (verification finding
 
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -94,7 +95,7 @@ def test_a_blocking_test_fails_by_name_within_the_limit(tmp_path):
             "fork/patches/tests/test_blocks.py": (
                 "import threading\n\n\n"
                 "def test_waits_for_a_batch_that_never_arrives():\n"
-                "    threading.Event().wait()\n\n\n"
+                "    threading.Event().wait(300)  # bounded: a pytest left behind by a failure still ends\n\n\n"
                 "def test_still_runs():\n"
                 "    assert True\n"
             )
@@ -102,16 +103,28 @@ def test_a_blocking_test_fails_by_name_within_the_limit(tmp_path):
     )
     env = {k: v for k, v in os.environ.items() if k != "FORK_TEST_TIMEOUT"}
     start = time.monotonic()
-    result = subprocess.run(
+    # fork/dev runs pytest as a child of its own: when this test fails because fork/dev lost --timeout,
+    # killing fork/dev alone would leave that pytest blocked. So run it in a session of its own and kill
+    # the whole session afterwards, pass or fail.
+    proc = subprocess.Popen(
         ["fork/dev", "test", "patches"],
         cwd=tmp_path,
         env={**env, "FORK_PY": sys.executable, "FORK_TEST_TIMEOUT": "2"},
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=60,
+        start_new_session=True,
     )
+    try:
+        stdout, stderr = proc.communicate(timeout=60)
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.communicate()
     assert time.monotonic() - start < 50
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "FAILED fork/patches/tests/test_blocks.py::test_waits_for_a_batch_that_never_arrives" in result.stdout
-    assert "Timeout" in result.stdout
-    assert "1 failed, 1 passed" in result.stdout
+    assert proc.returncode == 1, stdout + stderr
+    assert "FAILED fork/patches/tests/test_blocks.py::test_waits_for_a_batch_that_never_arrives" in stdout
+    assert "Timeout" in stdout
+    assert "1 failed, 1 passed" in stdout
