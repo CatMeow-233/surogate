@@ -37,7 +37,8 @@ Artefacts (details: fork/docs/build-and-release.md)
   quantizer llama-quantize      build quantizer          surogate/serve/_llama_cpp/bin/       native wheel (disabled)
   native wheel (RTX 50 sm_120a) (none: manual CI run)    wheelhouse/ (CI job)                 native-release.yml, run on main with publish
   Docker, jackalope             (none: upstream workflows, disabled on the fork)
-  surogate-experimental         release experimental     build/experimental-release/artifacts experimental-release.yml on experimental-v* tags
+  surogate-experimental         release experimental     build/experimental-release/artifacts experimental-release.yml, on a pushed
+                                                                                              experimental-v<version> tag of a main commit
 
 Commands
   help                              this text
@@ -57,8 +58,9 @@ Commands
                                     cpu, patches, tlc, tools: a test fails after FORK_TEST_TIMEOUT
                                     seconds (default 120); FORK_PY needs pytest-timeout
   test openmp                       OpenMP contract test and csrc hook check in build/fork-openmp
-  test release                      fork/native/release/plan.sh, the native release gate, against synthetic
-                                    git repositories in a temporary directory (git and bash only)
+  test release                      the release gates fork/native/release/plan.sh and
+                                    fork/experimental/release_plan.sh against synthetic git repositories
+                                    in a temporary directory (git, bash and python3 only)
   test native                       fork and upstream C++ test executables (GPU host)
   test gpu                          test native, then make test-py, serve-check and grpo-test (GPU host)
   release experimental [--tag experimental-vX] [--output-dir DIR]
@@ -166,7 +168,12 @@ test_suite() {
             run cmake --build build/fork-openmp
             run ctest --test-dir build/fork-openmp --output-on-failure
             ;;
-        release) run fork/native/release/test_plan.sh ;;
+        release)
+            local failed=0
+            run fork/native/release/test_plan.sh || failed=1
+            run fork/experimental/test_release_plan.sh || failed=1
+            [ "$failed" = 0 ]
+            ;;
         native) native_tests ;;
         gpu)
             native_tests

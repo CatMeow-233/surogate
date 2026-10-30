@@ -1,6 +1,7 @@
-"""experimental-release.yml publishes only from a tag push, uploads to a draft and publishes it only
-after fork/tools/release_guard.py has refused an existing release and verified the uploaded files
-(its behaviour is tested in fork/tools/tests/test_release_guard.py)."""
+"""experimental-release.yml publishes only from a tag push that fork/experimental/release_plan.sh
+accepted, uploads to a draft and publishes it only after fork/tools/release_guard.py has refused an
+existing release and verified the uploaded files. The behaviour of the two scripts is tested in
+fork/experimental/test_release_plan.sh and fork/tools/tests/test_release_guard.py."""
 
 from __future__ import annotations
 
@@ -19,9 +20,16 @@ def step_index(steps, text):
     return next(index for index, step in enumerate(steps) if text in step.get("run", "") + step.get("uses", ""))
 
 
-def test_only_a_tag_push_publishes():
-    release = load()["jobs"]["release"]
-    assert "github.event_name == 'push'" in release["if"]
+def test_only_a_tag_push_the_plan_accepted_publishes():
+    jobs = load()["jobs"]
+    assert "github.event_name == 'push'" in jobs["release"]["if"]
+    assert "needs.build.outputs.publish == 'true'" in jobs["release"]["if"]
+    plan = next(step for step in jobs["build"]["steps"] if step.get("id") == "plan")
+    assert plan["run"] == 'fork/experimental/release_plan.sh "$MODE"'
+    assert plan["env"]["MODE"] == "${{ github.event_name == 'push' && 'publish' || 'build' }}"
+    assert jobs["build"]["outputs"]["publish"] == "${{ steps.plan.outputs.publish }}"
+    steps = jobs["release"]["steps"]
+    assert step_index(steps, "release_plan.sh recheck") < step_index(steps, "softprops/action-gh-release@")
 
 
 def test_the_release_job_uploads_to_a_draft_and_publishes_it_after_checking():

@@ -17,7 +17,7 @@
 | 原生 wheel `surogate-<版本>+cu130-cp312-abi3-manylinux_2_39_{x86_64,aarch64}` | 无 | 本地等价命令 `make wheel-cu130` | scikit-build 临时目录 | `dist/*.whl`（auditwheel 修复后） | `wheel.yml` | `v*` tag | invergent-ai 的 GitHub Release（附 `install.sh`） | 禁用 |
 | Docker 镜像（训练加服务、语音） | 无 | `docker build -f Dockerfile.cu130` / `Dockerfile-speech.cu130`（从已发布的 wheel 安装，不复制仓库文件） | — | 镜像 | `docker.yml` | “Build Wheels” 在 `v*` tag 上成功后（`workflow_run`） | `ghcr.io/invergent-ai/surogate` | 禁用 |
 | jackalope 终端界面二进制 | 无 | 在 `jackalope/` 下用 bun 构建（见 `.github/workflows/jackalope.yml`） | `jackalope/dist` | 5 个平台的二进制 | `jackalope.yml` | 推送到 `main` 且改动 `jackalope/**`，或 `jackalope-v*` tag | invergent-ai 的 GitHub Release（`jackalope-latest` 或 `jackalope-v*`） | 禁用 |
-| `surogate-experimental`（纯 Python wheel、sdist、示例 zip） | `fork/dev release experimental [--tag experimental-vX]` | `python3 fork/experimental/build_release.py` | 临时目录 | `build/experimental-release/artifacts`：wheel、sdist、`experimental-examples.zip`、`README.md`、`build-info.json`、`SHA256SUMS` | `.github/workflows/experimental-release.yml` | `experimental-v*` tag（手动触发时只构建和检查，不发布） | `CatMeow-233/surogate` 的预发布 Release | **启用** |
+| `surogate-experimental`（纯 Python wheel、sdist、示例 zip） | `fork/dev release experimental [--tag experimental-vX]` | `python3 fork/experimental/build_release.py` | 临时目录 | `build/experimental-release/artifacts`：wheel、sdist、`experimental-examples.zip`、`README.md`、`build-info.json`、`SHA256SUMS` | `.github/workflows/experimental-release.yml` | 推送 `experimental-v<版本>` tag：tag 指向 `main` 历史中的提交、版本与该提交的 `pyproject.toml` 一致时发布（手动触发只构建和检查，不发布） | `CatMeow-233/surogate` 的预发布 Release | **启用** |
 | fork 原生 wheel `surogate-<版本>+cu130-cp312-abi3-manylinux_2_39_x86_64`（训练加服务，GPU 代码只含 sm_120a） | 无（在 GitHub 上手动运行 Native Wheel Release） | `fork/native/release/build-wheel.sh`，在 `nvidia/cuda:13.1.1-cudnn-devel-ubuntu24.04` 容器中运行 | `build/cp312-abi3-linux_x86_64`（`pyproject.toml` 的 `build-dir = "build/{wheel_tag}"`，scikit-build-core 填入 wheel tag） | `wheelhouse/`：wheel、`build-info.json`、`SHA256SUMS` | `.github/workflows/native-release.yml` | 只能手动运行（`workflow_dispatch`）：在 `main` 上勾选 `publish` 才发布，否则只构建 | `CatMeow-233/surogate` 的预发布 Release | **启用** |
 
 “fork 上”一列是目标状态：上游的三个发布工作流 “Build Wheels”、“Build Docker Images” 和 “jackalope” 应在 GitHub 设置中禁用，因为它们使用 fork 没有的 Blacksmith runner，并把镜像推到写死的 `ghcr.io/invergent-ai/surogate`。禁用是仓库所有者在 GitHub 上的操作，`fork/dev setup` 会打印检查清单，`fork/dev sync` 在推送前检查它们确实已禁用；在完成之前，这些工作流在 fork 上仍然是启用的。fork 不修改上游工作流文件，所以同步不会带来冲突。
@@ -36,7 +36,7 @@
 | `fork/dev test tools` | `fork/tools/tests`：同步脚本、`check_divergence.py`、`fork/dev` 的超时与参数传递、`csrc/CMakeLists.txt` 挂接点的 configure 检查，都在临时 git 仓库中运行；以及发布检查 `fork/tools/release_guard.py`，对着一个假的 GitHub CLI 运行 | `FORK_PY`，需要 pytest 和 pytest-timeout；git；挂接点用例需要 CMake 和主机 C++ 编译器，缺少时跳过 |
 | `fork/dev test tlc` | `fork/tlc/tests/cpu`：TLC 包的 CPU 测试，不需要原生扩展。GPU 测试 `fork/tlc/tests/gpu` 按 [TLC 运行手册](../tlc/docs/runbook.md) 在 GPU 主机上运行 | `FORK_PY`（默认 `.venv/bin/python`），需要 CPU torch 和 [requirements-cpu-lane.txt](../tools/requirements-cpu-lane.txt) |
 | `fork/dev test openmp` | OpenMP 接线测试和 CPU 优化器的线程数契约（`fork/native/include/surogate_fork/omp_team.h`），构建目录 `build/fork-openmp` | 主机 C++ 编译器、OpenMP、CMake；不需要 GPU 或 CUDA |
-| `fork/dev test release` | `fork/native/release/test_plan.sh`：在临时目录中建立合成的上游仓库和 fork 仓库，检查 `plan.sh` 的每个发布条件、`build-wheel.sh` 的版本检查和两者共用的 `fork/tools/release_gate.sh`，以及 `native-release.yml` 在构建之前和发布之前调用 `plan.sh` | git、bash；不访问网络 |
+| `fork/dev test release` | 两个发布闸门的测试，都在临时目录中建立合成的 fork 仓库（原生的还有上游仓库）：`fork/native/release/test_plan.sh` 检查 `plan.sh` 的每个发布条件、`build-wheel.sh` 的版本检查和共用的 `fork/tools/release_gate.sh`，以及 `native-release.yml` 在构建之前和发布之前调用 `plan.sh`；`fork/experimental/test_release_plan.sh` 检查 `release_plan.sh` 的每个发布条件，以及 `experimental-release.yml` 在测试和构建之前、上传之前调用它 | git、bash、python3（3.11 及以上）；不访问网络 |
 | `fork/dev test native` | 先 `make configure`，再加 `-DBUILD_TESTS=ON` 重新配置 `csrc/build`，构建并用 ctest 运行 `dsl-weight-loader-tests`、`dsl-run-state-tests`、`integration-tests`（fork 的 C++ 用例编译在后两个里，见 [native/README.md](../native/README.md)） | CUDA 构建环境；GPU 用例无 GPU 时跳过 |
 | `fork/dev test gpu` | `test native`，再 `make test-py`、`make serve-check`、`make grpo-test` | GPU 主机；`make grpo-test` 需要 `SUROGATE_TEST_MODEL` |
 
@@ -48,16 +48,27 @@
 
 ## 发布实验版本
 
-`surogate-experimental` 的版本号写死在 `fork/experimental/pyproject.toml` 中，按 PEP 440 的规范写法书写（例如 `0.1.0a4`，不能写成 `0.1.0.a4` 或 `0.1.0a04`，`build_release.py` 拒绝其他写法），tag 必须是 `experimental-v<版本>`。推送这个 tag 会运行 `.github/workflows/experimental-release.yml`，它重新测试、构建并发布预发布 Release。手动触发（包括在 `experimental-v*` tag 上手动运行）只构建和检查，不发布。上传与发布按 [一个版本只发布一次](#一个版本只发布一次) 的步骤进行：这个 tag 已有 Release（包括草稿）时不上传，文件先传到草稿，逐个校验后才发布；要修正已发布的版本只能发布新版本号。在 `main` 上按顺序操作：
+`surogate-experimental` 的版本号写死在 `fork/experimental/pyproject.toml` 中，按 PEP 440 的规范写法书写（例如 `0.1.0a4`，不能写成 `0.1.0.a4` 或 `0.1.0a04`，`build_release.py` 拒绝其他写法），tag 必须是 `experimental-v<版本>`。推送这个 tag 会运行 `.github/workflows/experimental-release.yml`，它重新测试、构建并发布预发布 Release。手动触发（包括在 `experimental-v*` tag 上手动运行）只构建和检查，不发布。
+
+与原生版本不同，实验版本由推送 tag 发布，而不是由默认分支上的手动运行发布：原生构建需要数小时，不能由一次推送启动；实验构建只需几分钟，而推送 tag 本身就是仓库所有者明确的发布操作，并且指定了唯一的提交。tag 可以推送到任何提交上，所以 `fork/experimental/release_plan.sh` 在构建 job 一开始（测试和构建之前）检查，并在 release job 上传之前按远端的最新状态再检查一次，任何一条不满足都不发布：
+
+1. 运行由推送 `refs/tags/experimental-v<版本>` 触发。
+2. `<版本>` 等于被 tag 的提交上 `fork/experimental/pyproject.toml` 中的版本，按规范写法书写，并且不是开发版本（`.devN`：两次发布之间检出目录用的就是它）。
+3. 远端的这个 tag 仍然指向本次运行的提交（推送后被移动或删除的 tag 不再描述这次构建）。
+4. 被 tag 的提交在刚从远端取回的默认分支 `main` 的历史中；克隆必须是完整历史，浅克隆一律拒绝。功能分支上的提交永远不会发布。
+
+检查与原生的 `plan.sh` 共用 `fork/tools/release_gate.sh`（版本写法、远端 tag、默认分支祖先关系）。这些检查写在被 tag 的提交上的工作流中，所以只对包含它们的提交生效：只给当前 `main` 上、在加入这些检查之后的提交打 tag。上传与发布按 [一个版本只发布一次](#一个版本只发布一次) 的步骤进行：这个 tag 已有 Release（包括草稿）时不上传，文件先传到草稿，逐个校验后才发布；要修正已发布的版本只能发布新版本号。在 `main` 上按顺序操作：
 
 1. 更新版本号：两次发布之间，`fork/experimental/pyproject.toml` 中是下一个版本加 `.dev0`（例如 `0.1.0a4.dev0`），这样从检出目录构建的 wheel 不会与已发布的 wheel 同名。把它改为新版本（去掉 `.dev0`；忘记去掉时，第 4 步的 `--tag` 检查因版本不符而失败），再用 `git grep -n '<上一个发布版本>' -- fork/experimental` 列出其余写有版本号的地方（`fork/experimental/README.md` 与 `fork/experimental/docs/training.md` 中的下载文件名，以及 `fork/experimental/RELEASE_NOTES.md`），全部改为新版本。`training.md` 的“Differences from <上一个发布版本>”一节写的是检出目录与上一个发布版本的差异，发布时删除它，需要保留的内容并入发布说明。
 2. 改写 `fork/experimental/RELEASE_NOTES.md`：它就是 Release 的正文。
 3. 在 GPU 主机上运行 `fork/dev test gpu`。整理后的 fork 原生 C++ 用例（`fork/native/tests`）、GRPO 周期计时指标和 T10 的 tied LM head 修复只在没有 GPU 的环境中验证过编译和 CPU 行为，下一个实验 tag 之前必须在 GPU 上通过一次（T10 还要通过 TLC 运行手册 G2 的 `test_g2_tied_head_trains_as_the_embedding`，并做 [upstream-errata.md](upstream-errata.md#全量训练时-tied-的-lm-head-停在初始值fork-已修复ledger-t10) 验证段中 Gemma 3 的全量训练检查：这两项测试都不经过 Gemma 3 的路径）；结果记在对应 topic（T1–T4、T6、T10）的 `conflict_history` 中。
 4. 运行 `fork/dev test experimental` 和 `fork/dev release experimental --tag experimental-v<新版本>`，确认测试通过、产物能构建。
 5. 提交并推送 `main`，等 fork CI 通过。
-6. 只推送这一个 tag：
+6. 在 `main` 的最新提交上只推送这一个 tag。推送之前可以在本地预检：除了“tag 在远端还不存在”之外不应再有其他 notice。
 
    ```bash
+   git switch main && git pull --ff-only
+   GITHUB_REF=refs/tags/experimental-v<新版本> fork/experimental/release_plan.sh build
    git tag experimental-v<新版本>
    git push origin experimental-v<新版本>
    ```

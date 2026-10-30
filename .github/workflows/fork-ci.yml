@@ -30,7 +30,7 @@ jobs:
         run: git fetch --no-tags https://github.com/invergent-ai/surogate.git main:refs/remotes/upstream/main
       - name: Ledger, maps, doc links and make targets
         run: fork/dev check
-      - name: Native release gate (plan.sh against synthetic repositories)
+      - name: Release gates (plan.sh, release_plan.sh against synthetic repositories)
         run: fork/dev test release
 
   experimental:

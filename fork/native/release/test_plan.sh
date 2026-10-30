@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Tests of fork/native/release/plan.sh, the gate between a run of
 # .github/workflows/native-release.yml and a published release, and of the checks in
-# fork/tools/release_gate.sh. Run with `fork/dev test release`; the Fork CI check job runs it too.
+# fork/tools/release_gate.sh. Run with `fork/dev test release` (with the experimental gate's
+# fork/experimental/test_release_plan.sh); the Fork CI check job runs both.
 #
 # Each case runs plan.sh in a clone of a synthetic fork and checks its exit code, its messages and
 # the outputs it writes to GITHUB_OUTPUT. The synthetic upstream (vX.Y.Z tags) and fork (origin,

@@ -2,6 +2,7 @@
 # functions and one variable and runs nothing. Its users:
 #   fork/native/release/plan.sh          may this run of native-release.yml publish native-v<VERSION>?
 #   fork/native/release/build-wheel.sh   the version it writes into the native wheel
+#   fork/experimental/release_plan.sh    may this tag push run of experimental-release.yml publish?
 # Tested through those scripts by `fork/dev test release`.
 #
 # say and problem use the caller's mode (build, publish or recheck) and count into its problems:

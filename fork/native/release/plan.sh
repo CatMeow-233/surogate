@@ -38,7 +38,7 @@
 # Needs the full history (actions/checkout with fetch-depth: 0). Moves no ref, so it can run as a
 # local preflight: the fetches write only FETCH_HEAD and the fetched objects, and their empty --refmap
 # keeps git from updating a remote-tracking branch (refs/remotes/<REMOTE>/<DEFAULT_BRANCH>).
-# Shared checks (the version spelling, the default-branch ancestry) are in fork/tools/release_gate.sh.
+# The checks it shares with fork/experimental/release_plan.sh are in fork/tools/release_gate.sh.
 set -euo pipefail
 
 mode=${1:-}
