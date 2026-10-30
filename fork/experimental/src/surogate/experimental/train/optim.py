@@ -94,15 +94,33 @@ def _project_bfloat16_chunked(gradient: Tensor, basis: Tensor, side: str) -> Ten
         return sketch
 
 
-def _nonzeros_per_matrix(gradient: Tensor) -> Tensor:
-    """Count each matrix's nonzero entries, reading at most one update chunk at a time."""
+def _effective_support(gradient: Tensor) -> Tensor:
+    """Per matrix, the number of entries that carry the gradient's norm.
+
+    ``min(nnz(G), (pi / 2) * (||G||_1 / ||G||_2) ** 2)``: the participation ratio,
+    scaled so that a dense gradient with Gaussian-like entries counts all of
+    them, and capped by the nonzero count. Exact zeros (an untied embedding's
+    untouched rows) and near-zero entries (an LM head's non-target rows) both
+    drop out. A ratio that cannot be formed, an all-zero gradient or sums beyond
+    FP32 range, falls back to the nonzero count. Reads at most one update chunk
+    at a time.
+    """
     flat = gradient.reshape(-1, gradient.shape[-2] * gradient.shape[-1])
     matrices, elements = flat.shape
     width = max(1, _BF16_UPDATE_CHUNK_SIZE // matrices)
-    counts = torch.zeros(matrices, dtype=torch.int64, device=gradient.device)
+    nonzeros = torch.zeros(matrices, dtype=torch.int64, device=gradient.device)
+    absolute = torch.zeros(matrices, dtype=torch.float32, device=gradient.device)
+    squares = torch.zeros(matrices, dtype=torch.float32, device=gradient.device)
     for start in range(0, elements, width):
-        counts += torch.count_nonzero(flat[:, start : start + width], dim=-1)
-    return counts.view(gradient.shape[:-2])
+        block = flat[:, start : start + width].to(dtype=torch.float32)
+        nonzeros += torch.count_nonzero(block, dim=-1)
+        absolute += torch.linalg.vector_norm(block, 1, dim=-1)
+        squares += torch.linalg.vector_norm(block, 2, dim=-1).square_()
+    counts = nonzeros.to(dtype=torch.float32)
+    support = absolute.square_().div_(squares).mul_(math.pi / 2)
+    # A nonzero gradient has a participation ratio of at least 1, so 0 means overflow.
+    formed = torch.isfinite(support) & (support > 0)
+    return torch.where(formed, torch.minimum(support, counts), counts).view(gradient.shape[:-2])
 
 
 def _apply_bfloat16_chunk(param: Tensor, direction: Tensor, group: dict[str, Any], generator: torch.Generator) -> None:
@@ -160,18 +178,32 @@ class RankScaledAdamW(Optimizer):
     ``min(M, N)`` use ordinary AdamW with FP32 moments; ``scale`` and ``d``
     apply only to the projected variant. Weight decay is decoupled in both paths.
 
-    ``d`` puts matrix updates on AdamW's per-element scale. The basis preserves
+    ``d`` brings matrix updates to AdamW's per-element scale. The basis preserves
     ``||G||_F`` in expectation, so the update's norm is about ``lr * scale * d *
-    ||U||_F``, spread over the ``nnz(G)`` nonzero gradient entries, while the
-    sketch's Adam update spreads ``||U||_F`` over its ``nnz(U)`` entries.
-    ``scale_rule="rms"`` (default) uses ``d = sqrt(nnz(G) / nnz(U))``, so each
-    updated element moves about ``lr * scale * rms(U)``, as AdamW moves it by
-    ``lr * rms(Adam direction)``. For a dense gradient ``d = sqrt(n / r)``, with
-    ``n`` the projected (larger) dimension; counting nonzeros also covers
-    row-sparse gradients such as an untied embedding's. ``scale_rule="constant"``
-    uses ``d = 1``, the rule of releases 0.1.0a1-a3: matrix updates are then about
-    ``sqrt(r / n)`` times AdamW's, tens to hundreds of times smaller at LLM
-    shapes, while vectors take full AdamW steps at the same ``lr``.
+    ||U||_F``, while the sketch's Adam update spreads ``||U||_F`` over its
+    ``nnz(U)`` entries. ``scale_rule="rms"`` (default) uses
+    ``d = sqrt(S(G) / nnz(U))``, where ``S(G)`` is the gradient's effective
+    support (``_effective_support``): the number of entries that carry its norm.
+    Those entries then move about ``lr * scale * rms(U)``, AdamW's
+    ``lr * rms(Adam direction)``. For a dense gradient with Gaussian-like entries
+    ``S(G) = nnz(G)`` and ``d = sqrt(n / r)``, with ``n`` the projected (larger)
+    dimension. An untied embedding's gradient is zero outside the rows of the
+    batch's tokens; an LM head's softmax gradient, also a tied embedding's, is
+    nonzero everywhere but its norm lies in the rows of the batch's target
+    tokens. ``S(G)`` counts about those rows' entries in both cases, where the
+    nonzero count would move an LM head's target rows about
+    ``sqrt(vocabulary / target rows)`` times further than AdamW.
+
+    One scalar per matrix cannot reproduce AdamW's coordinate-wise steps: the
+    update follows the gradient, so entries move in proportion to their
+    gradient. Entries well below the typical carrying entry, such as an LM
+    head's non-target rows, move far less than under AdamW, which moves every
+    entry by about ``lr``; the largest entries move more. A heavy-tailed
+    gradient (a few outlier input channels) has a smaller ``S(G)``, so its bulk
+    moves less than under AdamW. ``scale_rule="constant"`` uses ``d = 1``, the
+    rule of releases 0.1.0a1-a3: matrix updates are then about ``sqrt(r / n)``
+    times AdamW's, tens to hundreds of times smaller at LLM shapes, while
+    vectors take full AdamW steps at the same ``lr``.
 
     Refreshes occur on gradient-bearing parameter steps 1, 1+update_interval,
     etc., and on the first step after ``reset_parameter_state``. They reset
@@ -360,9 +392,9 @@ class RankScaledAdamW(Optimizer):
             sketch_norm = torch.linalg.vector_norm(sketch, dim=(-2, -1), keepdim=True)
             multiplier = update_norm / (sketch_norm + group["eps"]) * group["scale"]
             if group["scale_rule"] == "rms":
-                gradient_nonzeros = _nonzeros_per_matrix(gradient)
+                gradient_support = _effective_support(gradient)
                 update_nonzeros = torch.count_nonzero(adam_update, dim=(-2, -1)).clamp_(min=1)
-                multiplier = multiplier * (gradient_nonzeros / update_nonzeros).sqrt_()[..., None, None]
+                multiplier = multiplier * (gradient_support / update_nonzeros).sqrt_()[..., None, None]
             if stochastic:
                 factors = multiplier.view(-1)
                 matrix_elements = math.prod(param.shape[-2:])

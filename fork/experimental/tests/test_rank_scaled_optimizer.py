@@ -23,13 +23,21 @@ def _numpy_sketch(gradient, basis, side):
     return np.matmul(np.swapaxes(basis, -2, -1), gradient)
 
 
+def _support(gradient):
+    """Per matrix min(nnz(G), pi / 2 * (||G||_1 / ||G||_2) ** 2), nnz(G) when G == 0."""
+    nonzeros = np.count_nonzero(gradient, axis=(-2, -1)).astype(np.float64)
+    absolute = np.abs(gradient).sum(axis=(-2, -1))
+    squares = np.square(gradient).sum(axis=(-2, -1))
+    ratio = np.divide(math.pi / 2 * absolute**2, squares, out=np.zeros_like(squares), where=squares > 0)
+    return np.where(squares > 0, np.minimum(ratio, nonzeros), nonzeros)
+
+
 def _rms_factor(gradient, adam_update, scale_rule):
-    """Per matrix sqrt(nnz(G) / nnz(U)) for the "rms" rule, 1 for "constant"."""
+    """Per matrix sqrt(S(G) / nnz(U)) for the "rms" rule, 1 for "constant"."""
     if scale_rule == "constant":
         return 1.0
-    gradient_nonzeros = np.count_nonzero(gradient, axis=(-2, -1))
     update_nonzeros = np.maximum(np.count_nonzero(adam_update, axis=(-2, -1)), 1)
-    return np.sqrt(gradient_nonzeros / update_nonzeros)[..., None, None]
+    return np.sqrt(_support(gradient) / update_nonzeros)[..., None, None]
 
 
 @pytest.mark.parametrize("scale_rule", ["rms", "constant"])
@@ -133,10 +141,11 @@ def test_default_rms_rule_puts_matrix_updates_on_the_adamw_scale(shape, rank):
 def test_rms_rule_matches_adamw_on_the_rows_a_row_sparse_gradient_touches(stochastic_rounding, monkeypatch):
     """An untied embedding's gradient is nonzero only in the rows of the batch's tokens.
 
-    Counting nonzeros moves the touched rows at AdamW's per-element scale. A dense
-    sqrt(n / r) factor would move them about sqrt(n / k) = 16 times too far.
+    The effective support counts only the touched rows' entries, which move at
+    AdamW's per-element scale. A dense sqrt(n / r) factor would move them about
+    sqrt(n / k) = 16 times too far.
     """
-    monkeypatch.setattr(optim_module, "_BF16_UPDATE_CHUNK_SIZE", 4096)  # count nonzeros chunk by chunk
+    monkeypatch.setattr(optim_module, "_BF16_UPDATE_CHUNK_SIZE", 4096)  # measure the support chunk by chunk
     shape, touched = (8192, 64), 32
 
     def touched_rms(make_optimizer, dtype):
@@ -162,6 +171,72 @@ def test_rms_rule_matches_adamw_on_the_rows_a_row_sparse_gradient_touches(stocha
         torch.bfloat16 if stochastic_rounding else torch.float32,
     )
     assert 0.75 < rank_scaled / adamw < 1.33, (rank_scaled, adamw)
+
+
+def test_rms_rule_keeps_lm_head_target_rows_near_the_adamw_step():
+    """An LM head's softmax gradient is dense, but its norm lies in the target tokens' rows.
+
+    Every vocabulary row receives p * h, so the nonzero count is V * H. It would
+    move the target rows about sqrt(V / target rows) times further than AdamW, 8
+    to 11 times here, and the rows of frequent tokens further still. The
+    effective support counts about the target rows' entries.
+    """
+    vocabulary, hidden_size, tokens = 32768, 32, 512
+    generator = torch.Generator(device="cpu").manual_seed(0)
+    initial = torch.randn(vocabulary, hidden_size, generator=generator) * 0.02
+    frequencies = 1 / torch.arange(1, vocabulary + 1, dtype=torch.float64)  # Zipf targets
+    batches = [
+        (
+            torch.randn(tokens, hidden_size, generator=generator),
+            torch.multinomial(frequencies, tokens, replacement=True, generator=generator),
+        )
+        for _ in range(4)
+    ]
+
+    def target_row_rms(make_optimizer):
+        parameter = torch.nn.Parameter(initial.clone())
+        optimizer = make_optimizer(parameter)
+        sizes = []
+        for hidden, targets in batches:
+            logits = (hidden @ parameter.detach().T).requires_grad_()
+            torch.nn.functional.cross_entropy(logits, targets).backward()
+            parameter.grad = logits.grad.T @ hidden
+            assert parameter.grad.count_nonzero() == parameter.numel()
+            before = parameter.detach().clone()
+            optimizer.step()
+            rows = torch.zeros(vocabulary, dtype=torch.bool)
+            rows[targets] = True
+            sizes.append((parameter.detach() - before)[rows].square().mean().sqrt().item())
+        return torch.tensor(sizes)
+
+    adamw = target_row_rms(lambda parameter: torch.optim.AdamW([parameter], lr=1e-3, weight_decay=0))
+    rank_scaled = target_row_rms(lambda parameter: RankScaledAdamW([parameter], lr=1e-3, update_interval=1000))
+    ratios = rank_scaled / adamw
+    assert ((0.4 < ratios) & (ratios < 2)).all(), ratios
+
+
+def test_effective_support_counts_the_entries_that_carry_the_gradient(monkeypatch):
+    generator = torch.Generator(device="cpu").manual_seed(0)
+    dense = torch.randn(3, 128, 256, generator=generator)
+    support = optim_module._effective_support(dense)
+    assert support.shape == (3,)
+    assert ((0.97 * dense[0].numel() < support) & (support <= dense[0].numel())).all(), support
+    np.testing.assert_allclose(support.numpy(), _support(dense.double().numpy()), rtol=1e-5)
+    # Equal magnitudes are capped by the nonzero count; zeros never count.
+    signs = torch.sign(torch.randn(64, 32, generator=generator))
+    signs[::2] = 0
+    assert optim_module._effective_support(signs).item() == signs.count_nonzero().item()
+    # A few large entries carry the norm of an otherwise near-zero gradient.
+    concentrated = torch.full((64, 32), 1e-6)
+    concentrated[:4] = torch.randn(4, 32, generator=generator)
+    assert optim_module._effective_support(concentrated).item() < 1.1 * 4 * 32
+    assert optim_module._effective_support(torch.zeros(5, 7)).item() == 0
+    # Sums beyond FP32 range fall back to the nonzero count instead of NaN.
+    assert optim_module._effective_support(torch.full((4, 4), 1e30)).item() == 16
+    # Chunked reads give the same per-matrix support, for BF16 gradients too.
+    expected = optim_module._effective_support(dense.bfloat16())
+    monkeypatch.setattr(optim_module, "_BF16_UPDATE_CHUNK_SIZE", 1000)
+    torch.testing.assert_close(optim_module._effective_support(dense.bfloat16()), expected, rtol=1e-5, atol=0)
 
 
 def test_states_saved_before_scale_rule_load_with_the_constant_rule():

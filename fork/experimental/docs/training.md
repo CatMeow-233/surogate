@@ -64,19 +64,47 @@ For each matrix gradient `G`, including each matrix in a batched MoE parameter:
 3. Update using the **original full gradient** multiplied by
    `projection_scale * d * norm(U) / (norm(R) + eps)` per matrix.
 
-`d` keeps matrix updates on AdamW's per-element scale. The basis preserves
+`d` brings matrix updates to AdamW's per-element scale. The basis preserves
 `norm(G)` in expectation, so the update's norm is about `learning_rate *
-projection_scale * d * norm(U)`, spread over the `nnz(G)` nonzero entries of the
-gradient, while the sketch update spreads `norm(U)` over its `nnz(U)` entries.
-The default `projection_scale_rule: rms` uses `d = sqrt(nnz(G) / nnz(U))` per
-matrix. Each updated element then moves about `learning_rate * projection_scale
-* rms(U)`, the counterpart of AdamW's `learning_rate * rms(Adam direction)`: one
-learning rate suits matrices and vectors, and `projection_scale: 1` matches
-AdamW's step size. For a dense gradient `d = sqrt(n / r)`, where `n` is the
-projected dimension of that matrix (the larger one). Counting nonzeros also
-covers row-sparse gradients: an untied embedding's gradient is nonzero only in
-the rows of the batch's tokens, and a dense `sqrt(n / r)` would move those rows
-`sqrt(n / touched rows)` times too far.
+projection_scale * d * norm(U)`, while the sketch update spreads `norm(U)` over
+its `nnz(U)` entries. The default `projection_scale_rule: rms` uses
+`d = sqrt(S(G) / nnz(U))` per matrix. `S(G)`, the gradient's effective support,
+estimates how many entries carry its norm: `min(nnz(G), pi/2 *
+(sum(abs(G)) / norm(G))^2)`, a participation ratio scaled so that a dense
+gradient with Gaussian-like entries counts all of them. Those entries then move about
+`learning_rate * projection_scale * rms(U)`, the counterpart of AdamW's
+`learning_rate * rms(Adam direction)`: one learning rate suits matrices and
+vectors, and `projection_scale: 1` matches AdamW's step size. For a dense
+Gaussian-like gradient `d = sqrt(n / r)`, where `n` is the projected dimension
+of that matrix (the larger one).
+
+`S(G)` also covers gradients whose norm lies in a few rows. An untied
+embedding's gradient is zero outside the rows of the batch's tokens. An LM
+head's softmax gradient, and therefore that of a tied embedding and LM head such
+as Qwen3-4B's, is nonzero in every vocabulary row, but its norm lies in the rows
+of the batch's target tokens. Counting nonzeros there would move the target
+rows about `sqrt(vocabulary / target rows)` times further than AdamW.
+
+One scalar per matrix cannot reproduce AdamW's coordinate-wise steps: the update
+follows the gradient, so each entry moves in proportion to its gradient, while
+AdamW moves every entry by about the learning rate. A CPU emulation with a
+softmax LM-head gradient (151,936-token vocabulary, Zipf-distributed targets,
+2,048 tokens and about 1,200 distinct targets per batch) measured these per-step
+movements relative to AdamW's:
+
+| Rows | `rms` | nonzero count instead of `S(G)` |
+| --- | --- | --- |
+| All target rows | 0.6–1.4 | 6–10 |
+| Tokens seen once in the batch | 0.5–1.1 | 6–8 |
+| Tokens seen ten or more times | 3–7 | 38–46 |
+| Other rows (AdamW moves them a full step) | 0.0002–0.04 | 0.002–0.3 |
+
+A heavy-tailed dense gradient, for example one with a few outlier input
+channels, has a smaller `S(G)`: in emulations its whole-matrix update RMS was
+0.4–0.9 times AdamW's, with the outlier channels moving 4–6 times AdamW's step
+(0.7–1.3 and 4–9 times with the nonzero count). In a 20-step CPU run of a tiny
+Llama with the real trainer, the attention and MLP matrices moved 8–23% less in
+total than with the nonzero count.
 
 `projection_scale_rule: constant` uses `d = 1`, the rule of releases
 0.1.0a1–a3, for comparisons with those runs. Matrix updates are then about
@@ -85,7 +113,8 @@ smaller for the attention and MLP matrices and about 390 times smaller for the
 151,936-row embedding, while vectors and norms, which use plain AdamW, take full
 steps at the same learning rate. CPU tests compare the per-step update RMS with
 AdamW's for several dense shapes and ranks, with consistent and with noisy
-gradients, and on the touched rows of a row-sparse gradient.
+gradients, on the touched rows of a row-sparse gradient, and on the target rows
+of a softmax LM-head gradient.
 
 The projection side minimizes the projector plus two moment tensors. With rank
 one, a 4096-by-4096 matrix stores 12,288 FP32 projector/moment elements instead
