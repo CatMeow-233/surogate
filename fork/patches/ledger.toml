@@ -152,7 +152,7 @@ conflict_history = [
 [[topic]]
 id = "T5"
 title = "OpenMP for CPU training kernels"
-commits = ["9a6018f2"]
+commits = ["9a6018f2", "0ba0f7f9"]   # 0ba0f7f9: teams sized per rank thread, ordered norm (finding T5-1)
 switch = "always on (links OpenMP::OpenMP_CXX into surogate-common; teams sized per calling thread)"
 # csrc/CMakeLists.txt carries only the two-line hook into fork_native.cmake,
 # which also adds the fork include root (T3) and attaches the T1-T4 tests.
