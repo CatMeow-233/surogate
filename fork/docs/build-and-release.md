@@ -47,7 +47,7 @@
 
 `surogate-experimental` 的版本号写死在 `fork/experimental/pyproject.toml` 中，tag 必须是 `experimental-v<版本>`。推送这个 tag 会运行 `.github/workflows/experimental-release.yml`，它重新测试、构建并发布预发布 Release。手动触发（包括在 `experimental-v*` tag 上手动运行）只构建和检查，不发布。已发布的 Release 不会被替换：发布前 `fork/experimental/release_guard.py` 检查这个 tag 是否已有 Release，已有资产必须与本次构建逐字节相同，此时只补传缺失的资产（重新运行同一次运行中失败的 release job 可以补完中途中断的上传），否则 job 失败。构建产物带时间戳，重新构建同一提交也会得到不同的 SHA-256，所以要修正已发布的版本只能发布新版本号。在 `main` 上按顺序操作：
 
-1. 更新版本号：`git grep -n '<旧版本>' -- fork/experimental` 列出所有写有版本号的地方（`fork/experimental/pyproject.toml`，`fork/experimental/README.md` 与 `fork/experimental/docs/training.md` 中的下载文件名，以及 `fork/experimental/RELEASE_NOTES.md`），全部改为新版本。
+1. 更新版本号：两次发布之间，`fork/experimental/pyproject.toml` 中是下一个版本加 `.dev0`（例如 `0.1.0a4.dev0`），这样从检出目录构建的 wheel 不会与已发布的 wheel 同名。把它改为新版本（去掉 `.dev0`；忘记去掉时，第 4 步的 `--tag` 检查因版本不符而失败），再用 `git grep -n '<上一个发布版本>' -- fork/experimental` 列出其余写有版本号的地方（`fork/experimental/README.md` 与 `fork/experimental/docs/training.md` 中的下载文件名，以及 `fork/experimental/RELEASE_NOTES.md`），全部改为新版本。`training.md` 的“Differences from <上一个发布版本>”一节写的是检出目录与上一个发布版本的差异，发布时删除它，需要保留的内容并入发布说明。
 2. 改写 `fork/experimental/RELEASE_NOTES.md`：它就是 Release 的正文。
 3. 在 GPU 主机上运行 `fork/dev test gpu`。整理后的 fork 原生 C++ 用例（`fork/native/tests`）、GRPO 周期计时指标和 T10 的 tied LM head 修复只在没有 GPU 的环境中验证过编译和 CPU 行为，下一个实验 tag 之前必须在 GPU 上通过一次（T10 还要通过 TLC 运行手册 G2 的 `test_g2_tied_head_trains_as_the_embedding`，并做 [upstream-errata.md](upstream-errata.md#全量训练时-tied-的-lm-head-停在初始值fork-已修复ledger-t10) 验证段中 Gemma 3 的全量训练检查：这两项测试都不经过 Gemma 3 的路径）；结果记在对应 topic（T1–T4、T6、T10）的 `conflict_history` 中。
 4. 运行 `fork/dev test experimental` 和 `fork/dev release experimental --tag experimental-v<新版本>`，确认测试通过、产物能构建。
@@ -60,6 +60,7 @@
    ```
 
    不要用 `git push --tags`，也不要推送 `v*` 或 `jackalope-v*` tag（见下文“版本号”）。
+7. 发布之后，把 `fork/experimental/pyproject.toml` 改为下一个版本加 `.dev0`（例如发布 `0.1.0a4` 之后改为 `0.1.0a5.dev0`）并提交。此后改变用户可见行为（配置项、默认值、checkpoint 格式、数据约定）的提交，同时在 `training.md` 中新建或更新“Differences from <新版本>”一节。
 
 ## 发布原生版本
 

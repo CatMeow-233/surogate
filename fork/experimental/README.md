@@ -55,6 +55,11 @@ accumulation, optimizer-in-backward, layer sampling, and checkpoint compatibilit
 python fork/experimental/build_release.py
 ```
 
+Between releases the checkout carries the next version with a `.dev0` suffix,
+so its builds never share a file name with a published wheel. The guide in the
+checkout, `fork/experimental/docs/training.md`, lists how it differs from the
+latest release.
+
 The builder stages only the experimental namespace and its package metadata in
 a temporary directory, then invokes `uv --no-config build` there. It never
 invokes the repository's CUDA/scikit-build backend. Artifacts, the examples

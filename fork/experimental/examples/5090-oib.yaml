@@ -2,6 +2,7 @@
 # No accumulation, checkpointing, global clipping, compile, or LISA in this mode.
 # Qwen3-4B ties its embedding and LM head: that one weight is updated once per
 # step, after backward has accumulated both of its gradient contributions.
+# The 0.1.0a3 wheel rejects tied weights here and the projection_scale_rule key.
 schema_version: 1
 model: Qwen/Qwen3-4B
 train_jsonl: ./train.tokens.jsonl
@@ -18,7 +19,7 @@ optimizer: rank_scaled
 projection_rank: 1
 projection_interval: 200
 projection_scale: 1.0
-projection_scale_rule: rms
+projection_scale_rule: rms  # not in the 0.1.0a3 wheel, which always uses constant
 gradient_checkpointing: false
 optimizer_in_backward: true
 max_grad_norm: 0

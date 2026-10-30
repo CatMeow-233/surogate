@@ -32,6 +32,10 @@ python -m surogate.experimental.train --help
 python -m surogate.experimental.train experimental-examples/examples/experimental/smoke.yaml
 ```
 
+0.1.0a3 is the latest release. This guide describes the unreleased trainer in
+this repository, which differs from it; see
+[Differences from 0.1.0a3](#differences-from-010a3).
+
 Verify downloaded assets against `SHA256SUMS`; a complete downloaded asset set can
 be checked with `sha256sum --check SHA256SUMS`. The tiny smoke example uses a
 randomly initialized local Llama configuration and local token data: it requires
@@ -45,6 +49,26 @@ From a checkout use `fork/dev test experimental` and `fork/dev exp-train <config
 They run in an isolated virtual environment, `.venv-experimental` under `fork/`,
 because an installed native `surogate` hides this namespace. Never use
 `uv run`/`uv sync` at the repository root.
+
+### Differences from 0.1.0a3
+
+The checkout's version is `0.1.0a4.dev0`; its builds are not the published
+0.1.0a3 wheel. This guide describes the checkout; the guide in the 0.1.0a3
+examples archive describes that release, which behaves differently:
+
+- 0.1.0a3 has no `projection_scale_rule`: it always uses the `constant` rule
+  and rejects the key as unknown. Delete that line to run this checkout's
+  `5090-lisa.yaml` with 0.1.0a3.
+- 0.1.0a3 rejects `optimizer_in_backward` for tied weights such as Qwen3-4B's
+  embedding and LM head, so `5090-oib.yaml`, this checkout's and the one in the
+  0.1.0a3 examples archive, fails at startup with it.
+- 0.1.0a3 writes and resumes checkpoint format 2, the checkout format 3;
+  neither resumes the other's checkpoints.
+- With `lisa_state_policy: drop`, 0.1.0a3 restarts a re-activated layer's step
+  counter and projection index, so it replays that layer's earlier rounding
+  noise and basis.
+- 0.1.0a3 rejects only the `packed`, `segments` and `position_ids` record keys,
+  accepts any other key, and ignores `attention_mask` values.
 
 ## Experiments
 

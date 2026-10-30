@@ -17,7 +17,7 @@ optimizer: rank_scaled
 projection_rank: 1
 projection_interval: 200
 projection_scale: 1.0
-projection_scale_rule: rms
+projection_scale_rule: rms  # not in the 0.1.0a3 wheel, which rejects this key and always uses constant
 lisa_layers: 2
 lisa_interval: 20
 lisa_state_policy: drop
