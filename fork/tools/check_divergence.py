@@ -11,10 +11,16 @@ count before they are committed; untracked files are not seen until `git add`.
   D  must be listed in [[deletion]]
   R  must match a [[relocation]] from/to pair at 100% similarity
 
-Any other change fails. --strict also fails on stale ledger entries: a topic
-file that no longer differs from upstream, an owned path, topic fork file or
-test that is not tracked, and a relocation or deletion that is not in the
-diff.
+Any other change fails. The check is per file, so a file whose whole diff is
+fixed (a hook of a few lines) also has an [[exact_diff]] entry: its
+`git diff -U0 <base>` changed lines must equal the entry's lines, in order, so
+losing or adding a line fails although the file stays M. [sync].last_synced
+must be an ancestor of upstream/main (an upstream commit); when it differs
+from <base> a warning is printed.
+
+--strict also fails on stale ledger entries: a topic file that no longer
+differs from upstream, an owned path, topic fork file or test that is not
+tracked, and a relocation or deletion that is not in the diff.
 
 Usage: python3 -I fork/tools/check_divergence.py [--strict]
 Exit status: 0 when everything is recorded, 1 otherwise.
@@ -35,6 +41,45 @@ def git(*args):
     if result.returncode != 0:
         sys.exit(f"git {' '.join(args)} failed: {result.stderr.strip()}")
     return result.stdout
+
+
+def is_ancestor(commit, rev):
+    result = subprocess.run(["git", "-C", str(ROOT), "merge-base", "--is-ancestor", commit, rev], capture_output=True)
+    return result.returncode == 0
+
+
+def changed_lines(base, path):
+    """The +/- lines of `git diff -U0 base -- path` (base against the working tree), in order."""
+    lines, in_hunk = [], False
+    for line in git("diff", "-U0", "--no-color", "--no-ext-diff", "--no-renames", base, "--", path).split("\n"):
+        if line.startswith("@@"):
+            in_hunk = True
+        elif in_hunk and line[:1] in ("+", "-"):
+            lines.append(line)
+    return lines
+
+
+def exact_diff_errors(entries, topics, base):
+    """Problems with the [[exact_diff]] entries: each names a file of its topic, and the file's
+    changed lines must be exactly the entry's lines."""
+    errors = []
+    for entry in entries:
+        path, expected = entry["path"], entry["lines"]
+        topic = next((t for t in topics if t["id"] == entry.get("topic")), None)
+        if topic is None or path not in topic.get("files", []):
+            errors.append(f"[[exact_diff]] {path}: topic {entry.get('topic')} does not list it in files")
+        actual = changed_lines(base, path)
+        if actual == expected:
+            continue
+        missing = [line for line in expected if line not in actual]
+        extra = [line for line in actual if line not in expected]
+        detail = "".join(f"\n      missing  {line}" for line in missing)
+        detail += "".join(f"\n      extra    {line}" for line in extra)
+        errors.append(
+            f"M {path}: the diff from upstream is not exactly the [[exact_diff]] lines of {entry.get('topic')}"
+            + (detail or " (same lines, different order)")
+        )
+    return errors
 
 
 def diff_entries(base):
@@ -88,6 +133,7 @@ def main():
             errors.append(f"{status} {path} -> {new_path}: not a recorded 100% [[relocation]]")
         else:
             errors.append(f"{status} {path}: unsupported change")
+    errors += exact_diff_errors(ledger.get("exact_diff", []), topics, base)
 
     if args.strict:
         tracked = set(git("ls-files", "-z").split("\0"))
@@ -109,7 +155,9 @@ def main():
             errors.append(f"stale: deletion {path} is not a deletion in the diff")
 
     last_synced = ledger.get("sync", {}).get("last_synced", "")
-    if last_synced != base:
+    if last_synced and not is_ancestor(last_synced, "upstream/main"):
+        errors.append(f"[sync].last_synced {last_synced} is not an upstream commit (not an ancestor of upstream/main)")
+    elif last_synced != base:
         print(f"warning: [sync].last_synced is {last_synced or 'unset'}, merge base is {base}")
 
     print(

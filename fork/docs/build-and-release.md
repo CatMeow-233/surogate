@@ -32,12 +32,15 @@
 |---|---|---|
 | `fork/dev test cpu` | `fork/tools/test_cpu.sh`：fork 的补丁测试（`fork/patches/tests`），以及上游 `tests/` 与 `csrc/src/testing/serve` 的 pytest，分 7 个进程运行，结果与 [known_failures.txt](../tools/known_failures.txt) 比较 | `FORK_PY` 指向装有 torch 和 [requirements-cpu-lane.txt](../tools/requirements-cpu-lane.txt) 的解释器（默认 `.venv/bin/python`） |
 | `fork/dev test experimental` | 在 `fork/` 下的 `.venv-experimental` 中运行 `fork/experimental/tests` | uv；无法访问 download.pytorch.org 时设 `FORK_TORCH_INDEX=pypi` |
-| `fork/dev test patches` | `fork/patches/tests` | `FORK_PY`（默认 `.venv/bin/python`） |
+| `fork/dev test patches` | `fork/patches/tests` | `FORK_PY`（默认 `.venv/bin/python`），需要 [requirements-cpu-lane.txt](../tools/requirements-cpu-lane.txt)（其中有 pytest-timeout） |
+| `fork/dev test tools` | `fork/tools/tests`：同步脚本、`check_divergence.py`、`fork/dev` 的超时与参数传递、`csrc/CMakeLists.txt` 挂接点的 configure 检查，都在临时 git 仓库中运行 | `FORK_PY`，需要 pytest 和 pytest-timeout；git；挂接点用例需要 CMake 和主机 C++ 编译器，缺少时跳过 |
 | `fork/dev test tlc` | `fork/tlc/tests/cpu`：TLC 包的 CPU 测试，不需要原生扩展。GPU 测试 `fork/tlc/tests/gpu` 按 [TLC 运行手册](../tlc/docs/runbook.md) 在 GPU 主机上运行 | `FORK_PY`（默认 `.venv/bin/python`），需要 CPU torch 和 [requirements-cpu-lane.txt](../tools/requirements-cpu-lane.txt) |
 | `fork/dev test openmp` | OpenMP 接线测试和 CPU 优化器的线程数契约（`fork/native/include/surogate_fork/omp_team.h`），构建目录 `build/fork-openmp` | 主机 C++ 编译器、OpenMP、CMake；不需要 GPU 或 CUDA |
 | `fork/dev test release` | `fork/native/release/test_plan.sh`：在临时目录中建立合成的上游仓库和 fork 仓库，检查 `plan.sh` 的每个发布条件，以及 `native-release.yml` 在构建之前和发布之前调用它 | git、bash；不访问网络 |
 | `fork/dev test native` | 先 `make configure`，再加 `-DBUILD_TESTS=ON` 重新配置 `csrc/build`，构建并用 ctest 运行 `dsl-weight-loader-tests`、`dsl-run-state-tests`、`integration-tests`（fork 的 C++ 用例编译在后两个里，见 [native/README.md](../native/README.md)） | CUDA 构建环境；GPU 用例无 GPU 时跳过 |
 | `fork/dev test gpu` | `test native`，再 `make test-py`、`make serve-check`、`make grpo-test` | GPU 主机；`make grpo-test` 需要 `SUROGATE_TEST_MODEL` |
+
+`fork/dev test cpu`、`patches`、`tlc`、`tools` 中每个用例最多运行 `FORK_TEST_TIMEOUT` 秒（默认 120；最慢的 fork 用例约 10 秒，最慢的上游 CPU 用例约 17 秒），超时的用例由 pytest-timeout 按名字报告失败，例如丢失 T7 进程内传递后一直等待批次的 GRPO 用例。`FORK_PY` 缺少 pytest-timeout 时命令直接报错。`patches`、`tlc`、`tools`、`experimental` 后面的参数原样传给 pytest，例如 `fork/dev test patches -k handoff`。`fork/dev test openmp` 在 configure 时还按 `csrc/CMakeLists.txt` 中的挂接行检查 `surogate-common` 会链接 OpenMP 并得到 fork 头文件目录（见 [native/README.md 的挂接约定](../native/README.md#挂接约定)）。
 
 `fork/dev test native` 替代坏掉的 `make test`（见下文“上游构建的已知问题”）。`fork/dev fmt` 需要 `ruff` 和 `git clang-format`（clang-format 自带的 git 子命令）。
 

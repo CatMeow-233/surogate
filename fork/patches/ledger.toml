@@ -6,6 +6,7 @@
 #   M (modified)  must be listed in the files of some [[topic]]
 #   D (deleted)   must be listed in [[deletion]]
 #   R (renamed)   must match a [[relocation]] from/to pair at 100% similarity
+# and a file with an [[exact_diff]] entry must differ by exactly those lines.
 # A commit that adds such a path, or edits another upstream file, updates this
 # ledger in the same commit.
 
@@ -31,7 +32,9 @@ files = [
 # Upstream notes that land in the repository root are moved to `dest` at each
 # sync: a root *.md matching `patterns` and not `never` is moved with git mv
 # and recorded as a [[relocation]]. A candidate whose basename appears in any
-# `tooling_refs` file is reported instead, because tooling refers to it by path.
+# `tooling_refs` file is reported instead, because tooling refers to it by path,
+# and so is one that a tracked .md/.mdx file links to, because the fork does not
+# edit upstream docs and the move would break the link.
 [root_rehome]
 dest = "docs/upstream-notes/"
 patterns = ["TODO*.md", "DESIGN-*.md", "RELEASE_*.md", "*PLAN*.md", "REFACTOR*.md", "NOTES*.md"]
@@ -79,6 +82,22 @@ commit the v1.4.0 tag points at, and never edited since. Nothing refers to it: \
 `git grep RELEASE_v1.4.0 upstream/main` finds no hit. Upstream now writes release notes with git-cliff \
 (.github/workflows/wheel.yml:321-328) and was at v1.5.12 (282f9901) at the last sync. \
 Recovery: git show f7980a9e:RELEASE_v1.4.0.md"""
+
+# Upstream files whose whole diff from upstream is fixed. The per-file check
+# above passes while any change remains, so check_divergence also requires the
+# changed lines of `git diff -U0 <base> -- <path>` to be exactly `lines`, in
+# order. Each path is also in the files of `topic`. When a sync moves or edits
+# these lines on purpose (for example upstream renames surogate-common), update
+# them here in the same commit. `fork/dev test openmp` additionally evaluates
+# the csrc/CMakeLists.txt hook on a stand-in target and checks that it links
+# OpenMP and adds the fork include root (fork/native/openmp-contract).
+[[exact_diff]]
+path = "csrc/CMakeLists.txt"
+topic = "T5"
+lines = [
+    "+include(${CMAKE_CURRENT_SOURCE_DIR}/../fork/native/cmake/fork_native.cmake)",
+    "+surogate_fork_configure_common(surogate-common)",
+]
 
 # Topics: one per fork change to upstream files.
 #   files       upstream paths the topic edits (status M)

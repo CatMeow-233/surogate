@@ -10,6 +10,9 @@ cd "$ROOT"
 
 EXP_VENV=fork/.venv-experimental
 EXP_PY=$EXP_VENV/bin/python
+# Seconds one test may run in the FORK_PY suites (pytest-timeout). A test that blocks, for example
+# a GRPO test whose in-process handoff was lost, then fails by name instead of hanging the run.
+TEST_TIMEOUT=${FORK_TEST_TIMEOUT:-120}
 
 run() {
     echo "+ $*" >&2
@@ -43,13 +46,17 @@ Commands
                                     make wheel-dev | serve-build | build-all | quantizer | serve-stt-build | serve-tts-build
   test cpu                          fork/tools/test_cpu.sh; FORK_PY is a python with torch and
                                     fork/tools/requirements-cpu-lane.txt (default .venv/bin/python)
-  test experimental                 experimental tests in fork/.venv-experimental (needs uv;
+  test experimental [pytest args]   experimental tests in fork/.venv-experimental (needs uv;
                                     FORK_TORCH_INDEX=pypi without download.pytorch.org)
-  test patches                      CPU tests of the patches to upstream files: GRPO tests and native
+  test patches [pytest args]        CPU tests of the patches to upstream files: GRPO tests and native
                                     source pins under fork/patches/tests (FORK_PY, default .venv/bin/python)
-  test tlc                          CPU tests of the TLC package fork/tlc (FORK_PY, default .venv/bin/python;
+  test tlc [pytest args]            CPU tests of the TLC package fork/tlc (FORK_PY, default .venv/bin/python;
                                     no native extension needed)
-  test openmp                       OpenMP contract test in build/fork-openmp
+  test tools [pytest args]          tests of the maintenance tools under fork/tools/tests (FORK_PY; the
+                                    hook-contract cases need cmake and a C++ compiler)
+                                    cpu, patches, tlc, tools: a test fails after FORK_TEST_TIMEOUT
+                                    seconds (default 120); FORK_PY needs pytest-timeout
+  test openmp                       OpenMP contract test and csrc hook check in build/fork-openmp
   test release                      fork/native/release/plan.sh, the native release gate, against synthetic
                                     git repositories in a temporary directory (git and bash only)
   test native                       fork and upstream C++ test executables (GPU host)
@@ -132,19 +139,28 @@ native_tests() {
         -R '^(dsl-weight-loader-tests|dsl-run-state-tests|integration-tests)$'
 }
 
+# pytest under FORK_PY with the per-test limit; extra arguments go to pytest.
+fork_pytest() {
+    local py=${FORK_PY:-.venv/bin/python}
+    "$py" -c 'import pytest, pytest_timeout' 2>/dev/null \
+        || die "$py cannot import pytest and pytest_timeout; set FORK_PY to a python with" \
+            "fork/tools/requirements-cpu-lane.txt installed (fork/README.md, 首次准备环境)"
+    run env PYTHONDONTWRITEBYTECODE=1 "$py" -m pytest -q -p no:cacheprovider --timeout="$TEST_TIMEOUT" "$@"
+}
+
 test_suite() {
-    case "${1:-}" in
-        cpu) run fork/tools/test_cpu.sh ;;
+    local suite=${1:-}
+    [ $# -eq 0 ] || shift
+    case "$suite" in
+        cpu) run env FORK_TEST_TIMEOUT="$TEST_TIMEOUT" fork/tools/test_cpu.sh ;;
         experimental)
             exp_venv
             cd fork/experimental
-            run ../.venv-experimental/bin/python -m pytest -q -p no:cacheprovider tests
+            run ../.venv-experimental/bin/python -m pytest -q -p no:cacheprovider tests "$@"
             ;;
-        patches) run "${FORK_PY:-.venv/bin/python}" -m pytest -q -p no:cacheprovider fork/patches/tests ;;
-        tlc)
-            run env PYTHONDONTWRITEBYTECODE=1 "${FORK_PY:-.venv/bin/python}" -m pytest -q -p no:cacheprovider \
-                fork/tlc/tests/cpu
-            ;;
+        patches) fork_pytest fork/patches/tests "$@" ;;
+        tlc) fork_pytest fork/tlc/tests/cpu "$@" ;;
+        tools) fork_pytest fork/tools/tests "$@" ;;
         openmp)
             run cmake -S fork/native/openmp-contract -B build/fork-openmp
             run cmake --build build/fork-openmp
@@ -158,7 +174,7 @@ test_suite() {
             run make serve-check
             run make grpo-test
             ;;
-        *) die "usage: fork/dev test cpu|experimental|patches|tlc|openmp|release|native|gpu" ;;
+        *) die "usage: fork/dev test cpu|experimental|patches|tlc|tools|openmp|release|native|gpu [pytest args]" ;;
     esac
 }
 

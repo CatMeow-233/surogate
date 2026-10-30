@@ -8,7 +8,7 @@
 fork/dev sync --dry-run    # 只报告，不改动任何东西
 fork/dev sync              # 合并到同步分支，归位笔记，刷新 ledger 和地图，检查，推送分支并开 PR
 fork/dev sync --continue   # 解决冲突或修复检查失败并提交之后，从归位步骤继续
-fork/dev sync --finish     # PR 的四个必需检查通过后，把 main 快进到同步分支并推送
+fork/dev sync --finish     # 同步分支当前提交（即 PR 的 head）上四个必需检查都通过后，把 main 快进到这个提交并推送
 ```
 
 退出码：0 完成；2 需要手动解决冲突；3 预检失败；4 检查失败；1 其他错误（例如某条 git 命令失败）。
@@ -69,9 +69,9 @@ fork 的工具不修改 GitHub 设置，以下各项由仓库所有者完成。
    gh api -X PUT repos/CatMeow-233/surogate/branches/main/protection --input protect.json
    ```
 
-   `fork/dev sync --finish` 用 `gh pr checks` 检查同样的四个 job（`fork/tools/sync_upstream.py` 中的 `REQUIRED_CHECKS`），所以设置分支保护之前也能完成同步；修改必需检查时两处一起改。`upstream-cpu-lane` 暂不设为必需：它在工作流中是 `continue-on-error: true`。`fork/tools/known_failures.txt` 是在没有 GPU 的容器中生成的；等 CI 上两次相同的运行确认它（或按 CI 上传的 JUnit 结果重新生成）之后，去掉 `continue-on-error` 并把它加入必需检查。
+   `fork/dev sync --finish` 用 `gh api repos/CatMeow-233/surogate/commits/<sha>/check-runs` 检查同样的四个 job（`fork/tools/sync_upstream.py` 中的 `REQUIRED_CHECKS`）在要推送的那个提交上是否通过，所以设置分支保护之前也能完成同步，而且 `enforce_admins` 为 `false` 时所有者推送的也只能是检查过的提交；修改必需检查时两处一起改。`upstream-cpu-lane` 暂不设为必需：它在工作流中是 `continue-on-error: true`。`fork/tools/known_failures.txt` 是在没有 GPU 的容器中生成的；等 CI 上两次相同的运行确认它（或按 CI 上传的 JUnit 结果重新生成）之后，去掉 `continue-on-error` 并把它加入必需检查。
 
-fork CI（`.github/workflows/fork-ci.yml`）在每个分支的每次推送时运行，各 job 执行的都是 `fork/dev` 命令：`check` 运行 `fork/dev check`（先获取上游 `main`）和 `fork/dev test release`，`experimental` 运行 `fork/dev test experimental` 和 `fork/dev release experimental`（只构建，不发布），`fork-tests` 运行 `fork/dev test patches` 和 `fork/dev test tlc`，`openmp-contract` 运行 `fork/dev test openmp`，`upstream-cpu-lane` 运行 `fork/tools/test_cpu.sh` 并上传 JUnit 结果。
+fork CI（`.github/workflows/fork-ci.yml`）在每个分支的每次推送时运行，各 job 执行的都是 `fork/dev` 命令：`check` 运行 `fork/dev check`（先获取上游 `main`）和 `fork/dev test release`，`experimental` 运行 `fork/dev test experimental` 和 `fork/dev release experimental`（只构建，不发布），`fork-tests` 运行 `fork/dev test patches`、`fork/dev test tlc` 和 `fork/dev test tools`（每个用例最多 120 秒，卡住的用例按名字报告失败，而不是等到 job 超时），`openmp-contract` 运行 `fork/dev test openmp`，`upstream-cpu-lane` 运行 `fork/tools/test_cpu.sh` 并上传 JUnit 结果。
 
 ## 每次同步做什么
 
@@ -82,14 +82,16 @@ fork CI（`.github/workflows/fork-ci.yml`）在每个分支的每次推送时运
 | 3. 报告 | 新提交数；用 `git merge-tree` 预演的冲突路径及其所属 ledger 条目；触及 ledger 中文件的上游提交，按 topic 分组；上游新增的根目录 `.md` 及其去向；`csrc/src` 与 `surogate/` 下新增的顶层目录；上游新增的工作流（检查它的触发条件，会发布的就在 GitHub 上禁用）。`--dry-run` 到此结束；否则报告写入 `.git/fork-sync-report.md`，作为 PR 正文的开头。 | — |
 | 4. 分支与合并 | `git switch -c sync/<yyyymmdd>-<sha 前 8 位>`，然后 `git merge --no-ff -m "sync: merge upstream/main <sha> (<n> commits)"`。 | — |
 | 5. 自动解决 | 只自动处理一种冲突：上游删除了一个已移到 `docs/upstream-notes/` 的笔记（索引中有 base 与 ours 两个 stage，没有上游 stage）。脚本 `git rm` 该文件，并删除 ledger 中对应的 `[[relocation]]`。另外检查 `[owned]` 中每个路径所在的上游目录在合并后是否还存在（见“目录重命名”）。 | 其他冲突或目录消失时停下：退出码 2，列出文件及其 ledger topic |
-| 6. 归位提交 | 提交 “sync: re-home upstream root notes”。本次合并新增到根目录的 `.md` 文件，如果匹配 ledger `[root_rehome]` 的 `patterns`、不匹配 `never`，且文件名没有出现在 `tooling_refs` 所列的文件中（出现即说明工具按路径引用它），就 `git mv` 到 `docs/upstream-notes/` 并登记 `[[relocation]]`；其余的只报告，由你决定。归位是单独的提交，合并提交保持纯合并；下一次同步时 merge base 已含根目录路径，上游对该文件的修改会跟随重命名合入。 | — |
-| 7. 刷新提交 | 提交 “sync: refresh ledger and maps”：`[sync].last_synced` 设为合并的上游提交；`gen_maps.py --write` 重新生成地图；`check_doc_links.py --update-baseline` 把上游文档中新出现的失效链接加入基线、删去上游已修复的条目，变化逐条写在提交说明里。 | — |
-| 8. 检查 | `fork/dev check`；不带 `--fast` 时还运行 `fork/dev test patches`、`fork/dev test experimental`、`fork/dev test tlc` 和 `fork/dev test cpu`，它们需要准备好的 `.venv`（或 `FORK_PY`）、uv，以及 download.pytorch.org（无法访问时设 `FORK_TORCH_INDEX=pypi`），见 [fork/README.md 的“首次准备环境”](../README.md#首次准备环境)。 | 退出码 4 |
+| 6. 归位提交 | 提交 “sync: re-home upstream root notes”。本次合并新增到根目录的 `.md` 文件，如果匹配 ledger `[root_rehome]` 的 `patterns`、不匹配 `never`，文件名没有出现在 `tooling_refs` 所列的文件中（出现即说明工具按路径引用它），并且没有任何 `.md`/`.mdx` 文件用链接指向它（按 `check_doc_links.py` 的链接语法解析；fork 不改上游文档，移动会让链接失效），就 `git mv` 到 `docs/upstream-notes/` 并登记 `[[relocation]]`；其余的留在根目录并在报告中写明原因，由你决定：留在根目录的文件要在 `fork/tools/gen_maps.py` 的 `DOC_RULES` 中分类（例如 `("N", "RELEASE_v1.6.0.md")`）并运行 `fork/dev map`，否则第 8 步的 `fork/dev check` 报告 “unclassified markdown file”。归位是单独的提交，合并提交保持纯合并；下一次同步时 merge base 已含根目录路径，上游对该文件的修改会跟随重命名合入。 | — |
+| 7. 刷新提交 | 提交 “sync: refresh ledger and maps”：`[sync].last_synced` 设为合并的上游提交；`gen_maps.py --write` 重新生成地图；`check_doc_links.py --update-baseline` 把上游文档中新出现的失效链接加入基线、删去上游已修复的条目，变化逐条写在提交说明里。新的失效链接指向 fork 移动（`[[relocation]]` 的 `from`）或删除（`[[deletion]]`）的上游路径时，失效是 fork 造成的，不自动加入基线：刷新撤销自己的改动并停下，见“移动过的上游笔记与删除的文件”。 | 链接指向 fork 移动或删除的路径时退出码 4 |
+| 8. 检查 | `fork/dev check`；不带 `--fast` 时还运行 `fork/dev test patches`、`fork/dev test experimental`、`fork/dev test tlc`、`fork/dev test tools` 和 `fork/dev test cpu`，它们需要准备好的 `.venv`（或 `FORK_PY`）、uv，以及 download.pytorch.org（无法访问时设 `FORK_TORCH_INDEX=pypi`），见 [fork/README.md 的“首次准备环境”](../README.md#首次准备环境)。 | 退出码 4 |
 | 9. 发布 | `git push -u origin <同步分支>`；PR 还没有打开时 `gh pr create -R CatMeow-233/surogate --base main`，正文（`.git/fork-sync-pr.md`）是第 3 步的报告加上同步分支的提交列表；PR 已经打开时（例如 `--continue` 之后）推送就更新了它，不再新建。`--local` 跳过此步。 | 退出码 1 |
-| 10. 完成 | PR 的检查通过后运行 `fork/dev sync --finish`：先用 `gh pr checks` 确认 `check`、`experimental`、`fork-tests`、`openmp-contract` 都已通过，再 `git switch main`、`git merge --ff-only <同步分支>`、`git push origin main`。 | 检查未全部通过时退出码 4，列出未通过的 job |
+| 10. 完成 | PR 的检查通过后运行 `fork/dev sync --finish`。它先 `git fetch origin main <同步分支>`，要求本地 `HEAD` 等于 `origin/<同步分支>` 和 PR 的 head（`gh pr view --json headRefOid`），并且包含 `origin/main`；再用 `gh api .../commits/<HEAD>/check-runs` 确认 `check`、`experimental`、`fork-tests`、`openmp-contract` 在这个提交上都已通过（同名检查重跑过时以最新一次为准）；然后 `git switch main`、`git merge --ff-only <HEAD>`、`git push origin <HEAD>:refs/heads/main`。推送的总是检查过的那个提交：本地还没推送的提交、比 PR head 旧的本地分支都不会进入 `main`。 | 任一条件不满足时退出码 4，列出原因或未通过的 job，`main` 不变 |
 | 11. GPU 复测 | 报告中出现 T1–T5、T6–T8 或 T10 的上游提交时，在 GPU 主机上运行 `fork/dev test gpu`，并在该 topic 的 `conflict_history` 末尾记一行（日期、上游 sha、结果）。 | — |
 
-`--continue` 在同步分支上重新执行第 6–9 步，已经完成的部分会跳过，所以修复之后可以反复运行。`--local` 与 `--fast` 用于演练：前者不访问 `origin`、不推送也不开 PR（之后用 `fork/dev sync --finish --local` 在本地快进），后者跳过第 8 步中的测试套件。
+`--continue` 在同步分支上重新执行第 6–9 步，已经完成的部分会跳过，所以修复之后可以反复运行。它按分支名 `sync/<日期>-<sha 前 8 位>` 找同步合并：同步分支第一父链上第二父提交以这 8 位开头、并且是 `upstream/main` 祖先的最新合并；找不到（例如 `git merge --abort` 之后）或该提交不在上游历史中时停下，不会把别的合并当作同步合并。
+
+同步期间 `main` 有了新提交（例如合并了别的 PR）时，在同步分支上 `git merge origin/main`，提交后运行 `fork/dev sync --continue`，等新的检查通过后再 `--finish`；`--finish` 在 `origin/main` 不是同步分支祖先时拒绝推送。`--local` 与 `--fast` 用于演练：前者不访问 `origin`、不推送也不开 PR（之后用 `fork/dev sync --finish --local` 在本地快进），后者跳过第 8 步中的测试套件。
 
 放弃一次同步：
 
@@ -182,6 +184,7 @@ git log --oneline HEAD..MERGE_HEAD -- <文件>                # 上游改了什�
 - 上游删除已移动的笔记：rename/delete 冲突，第 5 步自动处理。
 - 上游把已移动的笔记改名到别处：rename/rename 冲突，需要手动处理。通常接受上游的新位置：`git rm` fork 的副本，`git add` 上游的新路径，并删去对应的 `[[relocation]]`；新位置仍在根目录时，第 6 步会再次归位。
 - 上游重新修改 fork 已删除的 `RELEASE_v1.4.0.md`：modify/delete 冲突。确认仍没有引用后 `git rm`；如果上游重新启用了它，就保留文件并删去 `[[deletion]]`。
+- 上游文档新增指向已移动笔记（或已删除文件）旧路径的链接：第 7 步以退出码 4 停下并列出这些链接。通常把笔记移回根目录：`git mv docs/upstream-notes/<文件> <文件>`，删去 ledger 中对应的 `[[relocation]]`（已删除的文件则恢复它并删去 `[[deletion]]`），在 `fork/tools/gen_maps.py` 的 `DOC_RULES` 中给根目录的这个文件分类，运行 `fork/dev map`。确实要接受失效链接时，自己把第 7 步列出的行（`<文档>\t<链接目标>`）加入 `fork/tools/doc_links_baseline.txt`。然后提交并 `fork/dev sync --continue`。第 6 步不会移动有链接指向的新笔记，所以这种情况只发生在以前移动或删除的路径上。
 
 ### 目录重命名
 
@@ -198,6 +201,8 @@ git log --oneline HEAD..MERGE_HEAD -- <文件>                # 上游改了什�
 - `gen_maps.py` 报告 “not found; upstream moved or deleted it” 或 “no COMMAND_MAPPING”：上游移动或改写了脚本按固定路径解析的文件（例如 `surogate/cli/main.py`、`csrc/CMakeLists.txt`）。把 `fork/tools/gen_maps.py` 中的路径或解析方式改成上游的新写法，再运行 `fork/dev map`。
 - `check_doc_links.py` 报告 fork 文档中的问题：引用的上游路径已不存在。按上游的新内容更新 fork 文档。上游文档中新出现的失效链接已由刷新提交加入基线。
 - `check_divergence.py --strict` 报告 “is not modified (M)”：上游已经包含了该改动，从 topic 中删去该文件。报告 “not owned” 或 “outside the ledger”：合并结果带入了未登记的差异（通常是解决冲突时留下的改动），登记它或撤销它。
+- `check_divergence.py` 报告 “is not exactly the [[exact_diff]] lines”：该文件与上游的差异必须恰好是 ledger 中 `[[exact_diff]]` 列出的行（目前是 `csrc/CMakeLists.txt` 的两行挂接），按文件检查的 M 条目发现不了丢失的一行。按输出中的 missing/extra 恢复挂接行；有意修改挂接行时（例如上游改名 `surogate-common` 后修改参数），同时更新 `[[exact_diff]]` 的 `lines`。`fork/dev test openmp` 在 configure 时也会检查挂接点（报错以 “fork hook contract” 开头），见 [native/README.md 的挂接约定](../native/README.md#挂接约定)。
+- `check_divergence.py` 报告 “[sync].last_synced ... is not an upstream commit”：`last_synced` 只能是上游提交。改成本次同步合并的上游提交（同步合并的第二父提交）。
 - `make -n` 探测失败：上游改名或删除了 `fork/dev` 调用的 make 目标，更新 `fork/dev` 和 [build-and-release.md](build-and-release.md)。
 - 测试失败：如果上游测试在上游提交本身也失败，就把它加入 `fork/tools/known_failures.txt` 并注明该 sha；由 fork 造成的失败必须先修复，同步才能继续。
 

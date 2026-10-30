@@ -19,7 +19,7 @@
 | `csrc/src/third_party` | 第三方 | 228 | vendored 代码，不做格式化 |
 | `csrc/src/tokenizer` | 共享 | 9 | 分词器，训练与服务各编译一次（见下文“接缝”） |
 | `csrc/src/utilities` | 训练 | 33 | 分配器、GPU 信息等工具 |
-| `fork/native` | fork | 24 | fork 的 CMake 挂接、头文件、C++ 测试，以及编译进 `surogate-common` 的源文件（`fork/native/src`） |
+| `fork/native` | fork | 25 | fork 的 CMake 挂接、头文件、C++ 测试，以及编译进 `surogate-common` 的源文件（`fork/native/src`） |
 
 ## CMake 目标
 

@@ -31,11 +31,10 @@ surogate_fork_configure_common(surogate-common)
 - 训练和服务端的头文件根目录中都没有名为 `surogate_fork` 的目录，所以 fork 头文件不会遮蔽上游头文件，上游头文件也不会遮蔽 fork 头文件。
 - 原生构建因此依赖 `csrc/` 之外的 `fork/native/`：只复制 `csrc/` 的构建方式会在 configure 时找不到 `fork_native.cmake` 而失败。
 
-检查上游文件中的 fork 改动仍然只有这两行：
+两处自动检查这个约定，丢掉任何一行或 `fork_native.cmake` 中的调用都会让 fork CI 失败：
 
-```bash
-git diff -U0 upstream/main -- csrc/CMakeLists.txt   # 只有一个 hunk，恰好新增 2 行
-```
+- `fork/dev check`：ledger 的 `[[exact_diff]]` 列出这两行，`check_divergence.py` 要求 `git diff -U0 <merge base> -- csrc/CMakeLists.txt` 改动的行恰好是它们（按文件检查时，只要还有一行改动，文件就仍是登记过的 M）。
+- `fork/dev test openmp`：configure 时 [openmp-contract/hook_contract.cmake](openmp-contract/hook_contract.cmake) 从 `csrc/CMakeLists.txt` 读出挂接行，确认它们位于 `add_library(surogate-common ...)` 之后，在一个不编译的替身 `surogate-common` 目标上按原样执行，再检查目标链接了 `OpenMP::OpenMP_CXX` 并有 `fork/native/include` 头文件目录。同一个项目的 ctest 再确认 `OpenMP::OpenMP_CXX` 确实以多线程运行。
 
 ## 新增 fork 原生代码的规则
 

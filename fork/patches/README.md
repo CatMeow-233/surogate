@@ -64,6 +64,14 @@
 
 - RELEASE_v1.4.0.md：Dead v1.4.0 release handoff: one upstream commit, f7980a9e (2026-07-25), the commit the v1.4.0 tag points at, and never edited since. Nothing refers to it: `git grep RELEASE_v1.4.0 upstream/main` finds no hit. Upstream now writes release notes with git-cliff (.github/workflows/wheel.yml:321-328) and was at v1.5.12 (282f9901) at the last sync. Recovery: git show f7980a9e:RELEASE_v1.4.0.md
 
+## 逐行固定的差异（`[[exact_diff]]`）
+
+这些文件与上游的差异必须恰好是下列改动行（`git diff -U0`，按顺序），由 `check_divergence.py` 检查。
+
+| 文件 | topic | 改动行 |
+|---|---|---|
+| `csrc/CMakeLists.txt` | T5 | `+include(${CMAKE_CURRENT_SOURCE_DIR}/../fork/native/cmake/fork_native.cmake)`<br>`+surogate_fork_configure_common(surogate-common)` |
+
 ## 根目录笔记的归位规则（`[root_rehome]`）
 
-同步时，根目录新出现的、匹配 `TODO*.md`, `DESIGN-*.md`, `RELEASE_*.md`, `*PLAN*.md`, `REFACTOR*.md`, `NOTES*.md` 的 `.md` 文件移到 `docs/upstream-notes/`；匹配 `README*`, `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING*`, `SECURITY*`, `CODE_OF_CONDUCT*`, `SUPPORT*`, `CHANGELOG*`, `LICENSE*`, `NOTICE*`, `GOVERNANCE*` 的文件不移动；文件名出现在 `.github/**`, `Makefile`, `pyproject.toml`, `**/CMakeLists.txt`, `**/*.cmake`, `*.sh`, `Dockerfile*`, `.pre-commit-config.yaml`, `.gitignore`, `.dockerignore`, `jackalope/package.json` 中的文件只报告、不移动。
+同步时，根目录新出现的、匹配 `TODO*.md`, `DESIGN-*.md`, `RELEASE_*.md`, `*PLAN*.md`, `REFACTOR*.md`, `NOTES*.md` 的 `.md` 文件移到 `docs/upstream-notes/`；匹配 `README*`, `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING*`, `SECURITY*`, `CODE_OF_CONDUCT*`, `SUPPORT*`, `CHANGELOG*`, `LICENSE*`, `NOTICE*`, `GOVERNANCE*` 的文件不移动；文件名出现在 `.github/**`, `Makefile`, `pyproject.toml`, `**/CMakeLists.txt`, `**/*.cmake`, `*.sh`, `Dockerfile*`, `.pre-commit-config.yaml`, `.gitignore`, `.dockerignore`, `jackalope/package.json` 中的文件，以及有 markdown 文档链接指向的文件，只报告、不移动。

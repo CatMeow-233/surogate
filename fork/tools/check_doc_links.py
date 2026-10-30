@@ -14,7 +14,9 @@ checked: line numbers drift with every upstream edit, so fork docs name symbols 
 doc that keeps line numbers states the upstream commit they refer to.
 
 Upstream docs fail only on broken links that are not listed in fork/tools/doc_links_baseline.txt.
-A sync refresh commit runs --update-baseline after reviewing the new entries.
+A sync refresh commit runs --update-baseline and lists the new entries in its message; it refuses
+an entry whose target is an upstream path the fork moved or deleted (fork/tools/sync_upstream.py).
+local_links() and resolve() are the link syntax that sync_upstream.py also uses.
 
 Usage: python3 -I fork/tools/check_doc_links.py [--update-baseline]
 Exit status: 0 when nothing new is broken, 1 otherwise.
@@ -51,10 +53,40 @@ def git_lines(*args):
     return [line for line in out.split("\n") if line]
 
 
-TRACKED = set(git_lines("ls-files"))
-DIRS = {"/".join(p.split("/")[:i]) for p in TRACKED for i in range(1, p.count("/") + 1)}
-TOP = {p.split("/")[0] for p in TRACKED}
+# The tracked tree, filled in by load_tree() so that importing this module runs nothing.
+TRACKED, DIRS, TOP = set(), set(), set()
 _anchors = {}
+
+
+def load_tree():
+    TRACKED.update(git_lines("ls-files"))
+    DIRS.update("/".join(p.split("/")[:i]) for p in TRACKED for i in range(1, p.count("/") + 1))
+    TOP.update(p.split("/")[0] for p in TRACKED)
+
+
+def resolve(doc, target):
+    """The repository path a local link target in doc points at (the doc itself for `#anchor`)."""
+    path = target.partition("#")[0]
+    if not path:
+        return doc
+    base = "" if path.startswith("/") else os.path.dirname(doc)
+    return os.path.normpath(os.path.join(base, path.lstrip("/")))
+
+
+def local_links(text):
+    """Yield (line number, target) for each markdown, reference or HTML link outside fenced code
+    whose target has no URL scheme (http:, mailto:, ...)."""
+    fenced = False
+    for number, line in enumerate(text.split("\n"), 1):
+        if FENCE.match(line):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        for regex in (LINK, REF_LINK, HTML_LINK):
+            for m in regex.finditer(line):
+                if not re.match(r"^[a-z][a-z0-9+.-]*:", m.group(1), re.I):
+                    yield number, m.group(1)
 
 
 def exists(path):
@@ -84,12 +116,8 @@ def anchors(path):
 
 def check_link(doc, target):
     """Return a problem description for a local link target, or None."""
-    path, _, anchor = target.partition("#")
-    if path:
-        base = "" if path.startswith("/") else os.path.dirname(doc)
-        resolved = os.path.normpath(os.path.join(base, path.lstrip("/")))
-    else:
-        resolved = doc
+    anchor = target.partition("#")[2]
+    resolved = resolve(doc, target)
     if not exists(resolved):
         return "missing target"
     if (
@@ -140,8 +168,12 @@ def module_exists(name):
 def scan(doc):
     """Yield (line number, kind, text, problem or None) for each link and path checked in one doc."""
     strict = any(fnmatch.fnmatch(doc, pattern) for pattern in STRICT)
+    text = (ROOT / doc).read_text(encoding="utf-8", errors="replace")
+    links = {}
+    for number, target in local_links(text):
+        links.setdefault(number, []).append(target)
     fenced = False
-    for number, line in enumerate((ROOT / doc).read_text(encoding="utf-8", errors="replace").split("\n"), 1):
+    for number, line in enumerate(text.split("\n"), 1):
         if FENCE.match(line):
             fenced = not fenced
             continue
@@ -156,10 +188,8 @@ def scan(doc):
                     if not module_exists(m.group(1)):
                         yield number, "code module", m.group(1), "no such module"
             continue
-        targets = [m.group(1) for regex in (LINK, REF_LINK, HTML_LINK) for m in regex.finditer(line)]
-        for target in targets:
-            if not re.match(r"^[a-z][a-z0-9+.-]*:", target, re.I):  # skip http:, mailto:, ...
-                yield number, "link", target, check_link(doc, target)
+        for target in links.get(number, []):
+            yield number, "link", target, check_link(doc, target)
         if strict:
             for m in TICK.finditer(line):
                 token = m.group(1).strip()
@@ -172,6 +202,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--update-baseline", action="store_true", help="rewrite the baseline of upstream breakage")
     args = parser.parse_args()
+    load_tree()
 
     docs = sorted(p for p in TRACKED if p.endswith((".md", ".mdx")) and "third_party/" not in p)
     links = 0

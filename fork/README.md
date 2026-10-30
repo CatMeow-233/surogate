@@ -13,7 +13,7 @@
 | 查看全部命令和产物 | `fork/dev help` |
 | 提交前检查 | `fork/dev map`（重新生成地图和 ledger 表格），然后 `fork/dev check`（ledger、地图、文档链接和 make 目标） |
 | 构建训练扩展或服务引擎 | `fork/dev build train`、`fork/dev build serve` |
-| 测试 | `fork/dev test cpu`、`patches`、`experimental`、`tlc`、`openmp` 不需要 GPU；`native`、`gpu` 在 GPU 主机上运行。各自的内容和所需环境见 [测试命令](docs/build-and-release.md#测试命令) |
+| 测试 | `fork/dev test cpu`、`patches`、`experimental`、`tlc`、`tools`、`openmp` 不需要 GPU；`native`、`gpu` 在 GPU 主机上运行。各自的内容和所需环境见 [测试命令](docs/build-and-release.md#测试命令) |
 | 从检出目录运行实验训练器 | `fork/dev exp-train <配置>` |
 | 发布实验版本 | 按 [发布实验版本](docs/build-and-release.md#发布实验版本) 的清单操作 |
 | 发布原生 wheel（RTX 50 系列） | 在 GitHub 上手动运行：Actions → Native Wheel Release → Run workflow，选 `main` 并勾选 `publish`；推送不会发布。见 [发布原生版本](docs/build-and-release.md#发布原生版本) |
@@ -29,7 +29,7 @@
 |---|---|
 | `fork/.venv-experimental` | 实验训练器 `fork/experimental`（不含原生扩展），由 `fork/dev test experimental` 和 `fork/dev exp-train` 自己创建，只需要 uv；TLC 的纯 PyTorch 原型 `fork/tlc/prototypes`（不打包）也可以在这里运行 |
 | `fork/.venv-tlc` | GPU 主机上的 TLC 包 `fork/tlc`：以 editable 方式装入，需要原生训练器，见 [tlc/docs/runbook.md 的 G0](tlc/docs/runbook.md#g0-环境)；GPU 主机上的 TLC 原型（运行手册 G1 的 goldens）也在这里运行 |
-| 仓库根目录的 `.venv`（或 `FORK_PY`） | 其余 Python 命令：`fork/dev test cpu`、`fork/dev test patches`、`fork/dev test tlc`、同步的检查步骤。TLC 的 CPU 测试只从检出目录导入 `fork/tlc/src`，不在这里安装 TLC 包，也不需要原生扩展 |
+| 仓库根目录的 `.venv`（或 `FORK_PY`） | 其余 Python 命令：`fork/dev test cpu`、`fork/dev test patches`、`fork/dev test tlc`、`fork/dev test tools`、同步的检查步骤；都需要 `fork/tools/requirements-cpu-lane.txt` 中的 pytest 和 pytest-timeout。TLC 的 CPU 测试只从检出目录导入 `fork/tlc/src`，不在这里安装 TLC 包，也不需要原生扩展 |
 
 - GPU 主机：按上游 [README.md](../README.md) 中 “For development” 的步骤创建 `.venv`（`uv venv --python 3.12`，然后 `uv pip install -e .`，会完整构建原生扩展）。之后修改训练侧 C++ 时用 `fork/dev build train`，它只重建 `_surogate` 并把 `.so` 复制进 `.venv`。
 - 只用 CPU：与 fork CI 相同，不构建原生扩展。无法访问 download.pytorch.org 时改装 PyPI 的 `torch==2.11.0`，并在运行 `fork/dev test experimental` 时设置 `FORK_TORCH_INDEX=pypi`。

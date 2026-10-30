@@ -5,6 +5,8 @@ project(SurogateTrainingOpenMPContract LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+# The csrc/CMakeLists.txt hook itself must give surogate-common this wiring (configure-time check).
+include(${CMAKE_CURRENT_SOURCE_DIR}/hook_contract.cmake)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/training_openmp.cmake)
 find_package(Threads REQUIRED)

@@ -84,7 +84,8 @@ FORK_TEST_TREES = {
     "fork/experimental/tests/": "fork：实验训练器",
     "fork/tlc/tests/": "fork：TLC 包；`cpu/` 不需要原生扩展，`gpu/` 在 GPU 主机上运行",
     "fork/native/tests/": "fork：编译进上游测试可执行文件的 C++ 用例",
-    "fork/native/openmp-contract/": "fork：OpenMP 接线测试",
+    "fork/native/openmp-contract/": "fork：OpenMP 接线测试，以及 `csrc/CMakeLists.txt` 挂接点的 configure 期检查",
+    "fork/tools/tests/": "fork：维护工具（同步脚本、ledger 检查、`fork/dev`、原生挂接点检查）的测试",
 }
 
 # Markdown classes, first match wins. fnmatch semantics: `*` also matches `/`.
@@ -631,6 +632,14 @@ def ledger_readme():
     out += [table(["原路径", "新路径"], [[r["from"], tick(r["to"])] for r in ledger.get("relocation", [])]), "\n"]
     out += ["## 删除的上游文件（`[[deletion]]`）\n\n"]
     out += [f"- {d['path']}：{' '.join(d.get('evidence', '').split())}\n" for d in ledger.get("deletion", [])]
+    exact = ledger.get("exact_diff", [])
+    if exact:
+        out.append("\n## 逐行固定的差异（`[[exact_diff]]`）\n\n")
+        out.append(
+            "这些文件与上游的差异必须恰好是下列改动行（`git diff -U0`，按顺序），由 `check_divergence.py` 检查。\n\n"
+        )
+        rows = [[tick(e["path"]), e.get("topic", ""), "<br>".join(tick(line) for line in e["lines"])] for e in exact]
+        out += [table(["文件", "topic", "改动行"], rows)]
     rehome = ledger.get("root_rehome", {})
     if rehome:
         out.append("\n## 根目录笔记的归位规则（`[root_rehome]`）\n\n")
@@ -639,7 +648,8 @@ def ledger_readme():
         )
         out.append(f"匹配 {', '.join(tick(p) for p in rehome.get('never', []))} 的文件不移动；")
         out.append(
-            f"文件名出现在 {', '.join(tick(p) for p in rehome.get('tooling_refs', []))} 中的文件只报告、不移动。\n"
+            f"文件名出现在 {', '.join(tick(p) for p in rehome.get('tooling_refs', []))} 中的文件，"
+            "以及有 markdown 文档链接指向的文件，只报告、不移动。\n"
         )
     return "".join(out)
 

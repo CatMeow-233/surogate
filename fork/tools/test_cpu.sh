@@ -5,6 +5,8 @@
 #
 # Usage: FORK_PY=<python with requirements-cpu-lane.txt and torch> fork/tools/test_cpu.sh
 #   FORK_PY defaults to .venv/bin/python. JUnit reports go to build/fork-test-cpu/<n>.xml.
+#   A test that runs longer than FORK_TEST_TIMEOUT seconds (default 120; the slowest upstream CPU
+#   test took 17 s on 4 CPUs) fails by name (pytest-timeout) instead of hanging the job.
 #
 # Each partition is its own pytest process: tests/grpo/test_failure_exit_status.py leaves a
 # MagicMock in sys.modules["surogate._surogate"], which changes every module collected after
@@ -19,6 +21,11 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
 PY=${FORK_PY:-.venv/bin/python}
 OUT=build/fork-test-cpu
+TIMEOUT=${FORK_TEST_TIMEOUT:-120}
+if ! "$PY" -c 'import pytest, pytest_timeout' 2>/dev/null; then
+    echo "test_cpu: $PY cannot import pytest and pytest_timeout; install fork/tools/requirements-cpu-lane.txt" >&2
+    exit 1
+fi
 partitions=(
     "fork/patches/tests"
     "tests/serve tests/test_serve_contract.py csrc/src/testing/serve --no-gpu"
@@ -36,7 +43,7 @@ status=0
 for i in "${!partitions[@]}"; do
     n=$((i + 1))
     # xunit1 keeps the file attribute, which the comparison below needs to rebuild node ids.
-    cmd=("$PY" -m pytest -p no:cacheprovider -q --continue-on-collection-errors
+    cmd=("$PY" -m pytest -p no:cacheprovider -q --continue-on-collection-errors --timeout="$TIMEOUT"
         -o junit_family=xunit1 --junitxml="$OUT/$n.xml" ${partitions[$i]})
     echo "+ ${cmd[*]}" >&2
     "${cmd[@]}"

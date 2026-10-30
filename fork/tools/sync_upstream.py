@@ -11,16 +11,20 @@ A sync runs these steps and stops at the first one that needs the owner:
   4. branch sync/<yyyymmdd>-<sha> and merge with --no-ff (never rebase)
   5. resolve the one known conflict (upstream deleted a relocated note); stop on any other, and
      when an upstream directory rename would leave a fork-owned subdirectory behind
-  6. commit "sync: re-home upstream root notes" (see [root_rehome] in the ledger)
-  7. commit "sync: refresh ledger and maps" ([sync].last_synced, gen_maps, doc-link baseline)
-  8. fork/dev check, then the patch, experimental, TLC and CPU test suites
-  9. push the branch and open a PR (or update the open one); --finish fast-forwards main once the
-     PR's REQUIRED_CHECKS pass
+  6. commit "sync: re-home upstream root notes" (see [root_rehome] in the ledger); a note that a
+     markdown doc links to stays at the root
+  7. commit "sync: refresh ledger and maps" ([sync].last_synced, gen_maps, doc-link baseline); stop
+     when a new broken link points at an upstream path the fork moved or deleted
+  8. fork/dev check, then the patch, experimental, TLC, tooling and CPU test suites
+  9. push the branch and open a PR (or update the open one); --finish fast-forwards main to the
+     branch's commit once that commit is the PR head and its REQUIRED_CHECKS passed
 
 Usage: fork/dev sync [--dry-run | --continue | --finish] [--to REV] [--local] [--fast]
   --dry-run   steps 1-3 only; changes nothing (main and origin are not required)
-  --continue  after committing a conflict resolution or a fix on the sync branch: steps 6-9
-  --finish    on the sync branch, after the PR's required checks pass: fast-forward main, push it
+  --continue  after committing a conflict resolution or a fix on the sync branch: steps 6-9; the
+              sync merge is the merge of the upstream commit the branch is named after
+  --finish    on the sync branch, after the PR's required checks pass on its head: fast-forward
+              main to that commit and push it; refuses when HEAD is not the pushed PR head
   --to REV    merge REV, an ancestor of the fetched upstream/main, instead of fetching upstream main
   --local     no origin checks, no push, no PR (rehearsals)
   --fast      skip the test suites in step 8 (rehearsals)
@@ -37,6 +41,12 @@ import tomllib
 from fnmatch import fnmatchcase
 from pathlib import Path
 
+# The link syntax of check_doc_links.py, imported from this directory (-I leaves it off sys.path)
+# without writing bytecode into the checkout.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.dont_write_bytecode = True
+import check_doc_links  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[2]
 LEDGER = "fork/patches/ledger.toml"
 BASELINE = "fork/tools/doc_links_baseline.txt"
@@ -46,9 +56,11 @@ PUSH_DISABLED = "DISABLED-see-AGENTS.md"
 # Upstream workflows that publish releases or images (jackalope.yml on any push to main that
 # touches jackalope/**); the owner disables them on the fork.
 UPSTREAM_WORKFLOWS = (".github/workflows/wheel.yml", ".github/workflows/docker.yml", ".github/workflows/jackalope.yml")
-# fork-ci jobs that must pass on the sync PR before --finish; the same list as main's branch
-# protection in fork/docs/sync.md, checked here so that --finish also works without it.
+# fork-ci jobs that must pass on the sync branch's head commit before --finish; the same list as
+# main's branch protection in fork/docs/sync.md, checked here so that --finish also works without it.
 REQUIRED_CHECKS = ("check", "experimental", "fork-tests", "openmp-contract")
+# sync/<yyyymmdd>-<first 8 hex digits of the merged upstream commit>
+BRANCH = re.compile(r"sync/\d{8}-([0-9a-f]{8})")
 NOTES_PLAYBOOK = 'fork/docs/sync.md, section "移动过的上游笔记与删除的文件"'
 
 
@@ -125,9 +137,24 @@ def keep_reason(name, rev, book):
     refs = git("grep", "-l", "-F", "-e", name, rev, "--", *tooling, ok=(0, 1)).splitlines() if tooling else []
     if refs:
         return "named in " + ", ".join(r.removeprefix(f"{rev}:") for r in refs)
+    # Moving a note that a doc links to would break the link (upstream docs are not edited).
+    docs = linking_docs(name, rev)
+    if docs:
+        return "linked from " + ", ".join(docs)
     if rule["dest"] + name in files_at("HEAD"):
         return f"{rule['dest']}{name} already exists"
     return None
+
+
+def linking_docs(name, rev):
+    """Markdown files at rev with a local link to the path name, as check_doc_links reads links."""
+    found = []
+    for entry in git("grep", "-l", "-F", "-e", name, rev, "--", "*.md", "*.mdx", ok=(0, 1)).splitlines():
+        doc = entry.removeprefix(f"{rev}:")
+        text = git("show", f"{rev}:{doc}")
+        if any(check_doc_links.resolve(doc, target) == name for _, target in check_doc_links.local_links(text)):
+            found.append(doc)
+    return found
 
 
 def stranded(base, target, book):
@@ -200,7 +227,9 @@ def report(target, book):
     for path in workflows.splitlines():
         lines.append(f"new upstream workflow {path}: check its triggers; disable it on the fork if it publishes")
     if git("diff", "--name-only", base, target, "--", ".github/workflows/wheel.yml"):
-        lines.append("upstream changed .github/workflows/wheel.yml: port the change into fork/native/release/build-wheel.sh")
+        lines.append(
+            "upstream changed .github/workflows/wheel.yml: port the change into fork/native/release/build-wheel.sh"
+        )
     return lines, conflicts
 
 
@@ -294,7 +323,9 @@ def rehome(merge_commit, book):
             lines.append(f"  {name}: kept at the root, {reason}")
             continue
         dest = rule["dest"] + name
-        run("git", "mv", "--", name, dest)
+        (ROOT / rule["dest"]).mkdir(parents=True, exist_ok=True)
+        if run("git", "mv", "--", name, dest) != 0:
+            sys.exit(f"git mv {name} {dest} failed")
         edit_ledger(add_relocation, name, dest)
         moved.append(f"{name} -> {dest}")
     if moved:
@@ -305,6 +336,20 @@ def rehome(merge_commit, book):
     print("new root notes:\n" + "\n".join(lines) if lines else "new root notes: none")
 
 
+def broken_by_fork(entries, book):
+    """Baseline entries (doc<TAB>target) whose link points at an upstream path the fork moved or
+    deleted: the fork broke them, so they are not upstream breakage to accept."""
+    gone = {r["from"]: f"moved to {r['to']}" for r in book.get("relocation", [])}
+    gone.update((d["path"], "deleted by the fork") for d in book.get("deletion", []))
+    found = []
+    for entry in sorted(entries):
+        doc, _, target = entry.partition("\t")
+        path = check_doc_links.resolve(doc, target)
+        if path in gone:
+            found.append(f"{doc} -> {target} ({path} {gone[path]})")
+    return found
+
+
 def refresh(target):
     date = git("log", "-1", "--format=%cs", target)
     edit_ledger(set_last_synced, f'last_synced = "{target}"   # {date}')
@@ -312,6 +357,18 @@ def refresh(target):
     before = set((ROOT / BASELINE).read_text(encoding="utf-8").splitlines())
     run("python3", "-I", "fork/tools/check_doc_links.py", "--update-baseline")
     after = set((ROOT / BASELINE).read_text(encoding="utf-8").splitlines())
+    ours = broken_by_fork(after - before, ledger())  # the ledger as rehome() left it
+    if ours:
+        run("git", "checkout", "HEAD", "--", LEDGER, BASELINE, *GENERATED)
+        print("\nUpstream docs link to paths the fork moved or deleted; the refresh does not add such links")
+        print("to the doc-link baseline:")
+        print("".join(f"  {entry}\n" for entry in ours), end="")
+        print(
+            "Move the note back to the root (git mv, and delete its [[relocation]] from the ledger), or, to\n"
+            f"accept the broken link, add the line to {BASELINE} yourself. Commit, then run\n"
+            f"`fork/dev sync --continue`. See {NOTES_PLAYBOOK}."
+        )
+        sys.exit(4)
     run("git", "add", "--", LEDGER, BASELINE, *GENERATED)
     if git("diff", "--cached", "--name-only") == "":
         return
@@ -328,7 +385,7 @@ def refresh(target):
 def checks(fast):
     suites = [["fork/dev", "check"]]
     if not fast:
-        suites += [["fork/dev", "test", suite] for suite in ("patches", "experimental", "tlc", "cpu")]
+        suites += [["fork/dev", "test", suite] for suite in ("patches", "experimental", "tlc", "tools", "cpu")]
     failed = [" ".join(cmd) for cmd in suites if run(*cmd) != 0]
     if failed:
         print(f"\nFailed: {', '.join(failed)}.")
@@ -341,8 +398,33 @@ def report_file(name="fork-sync-report.md"):
     return ROOT / git("rev-parse", "--git-path", name)
 
 
-def after_merge(branch, target, args, book):
-    merge_commit = git("rev-list", "--first-parent", "--merges", "-n", "1", "HEAD")
+def sync_merge(branch):
+    """The sync merge on HEAD and the upstream commit it merged.
+
+    The branch name records the upstream commit (BRANCH). The sync merge is the newest first-parent
+    merge of HEAD whose second parent has that prefix and is an ancestor of upstream/main, so a
+    merge of main into the sync branch, or an earlier sync merge in main's history, is never taken
+    for it.
+    """
+    name = BRANCH.fullmatch(branch)
+    if not name:
+        sys.exit(f"{branch}: not a sync branch name (sync/<yyyymmdd>-<8 hex digits of the upstream commit>)")
+    for line in git("log", "--first-parent", "--merges", "--format=%H %P", "HEAD").splitlines():
+        commit, *parents = line.split()
+        if len(parents) == 2 and parents[1].startswith(name.group(1)):
+            if not is_ancestor(parents[1], "refs/remotes/upstream/main"):
+                sys.exit(
+                    f"{commit[:12]} merges {parents[1][:12]}, which is not an ancestor of upstream/main; "
+                    "fetch upstream (git fetch --no-tags upstream main:refs/remotes/upstream/main) and retry"
+                )
+            return commit, parents[1]
+    sys.exit(
+        f"no merge of upstream {name.group(1)} on {branch}: commit the merge (`git commit --no-edit` "
+        "after resolving), or start the sync again from main"
+    )
+
+
+def after_merge(branch, merge_commit, target, args, book):
     rehome(merge_commit, book)
     refresh(target)
     checks(args.fast)
@@ -406,30 +488,67 @@ def preflight(args):
         sys.exit(3)
 
 
-def checks_passed(branch):
-    """True when every job in REQUIRED_CHECKS passed on the PR; works without branch protection."""
-    result = run("gh", "pr", "checks", branch, "-R", REPO, "--json", "name,bucket", capture=True)
+def checks_passed(sha):
+    """True when every job in REQUIRED_CHECKS has a successful check run on commit sha; works
+    without branch protection. A re-run adds a check run, so the newest one of each name counts."""
+    result = run("gh", "api", f"repos/{REPO}/commits/{sha}/check-runs?per_page=100", capture=True)
     try:
-        buckets = {check["name"]: check["bucket"] for check in json.loads(result.stdout)}
-    except ValueError:
-        print((result.stderr or result.stdout).strip() or "gh pr checks returned no check list")
+        runs = json.loads(result.stdout)["check_runs"]
+        newest = {}
+        for check in sorted(runs, key=lambda check: check["id"]):
+            newest[check["name"]] = check["conclusion"] if check["status"] == "completed" else check["status"]
+    except (ValueError, KeyError, TypeError):
+        print((result.stderr or result.stdout).strip() or "gh api returned no check runs")
         return False
     pending = [
-        f"{name}: {buckets.get(name, 'not reported')}" for name in REQUIRED_CHECKS if buckets.get(name) != "pass"
+        f"{name}: {newest.get(name, 'not reported')}" for name in REQUIRED_CHECKS if newest.get(name) != "success"
     ]
     print("".join(f"  {line}\n" for line in pending), end="")
     return not pending
+
+
+def checked_head(branch, head):
+    """Problems that stop --finish from pushing head to main: head must be what CI checked and the
+    PR shows, that is origin/<branch> and the PR's head commit, and must contain origin/main."""
+    fetch = ["git", "fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"]
+    if run(*fetch, f"+refs/heads/{branch}:refs/remotes/origin/{branch}") != 0:
+        return [f"cannot fetch main and {branch} from origin; push the branch with `fork/dev sync --continue`"]
+    problems = []
+    remote = git("rev-parse", f"refs/remotes/origin/{branch}")
+    if remote != head:
+        problems.append(
+            f"HEAD {head[:12]} is not origin/{branch} {remote[:12]}: CI checks only pushed commits. Push "
+            "local commits with `fork/dev sync --continue`, or pull the remote ones, and wait for the checks"
+        )
+    pr = run("gh", "pr", "view", branch, "-R", REPO, "--json", "headRefOid", "--jq", ".headRefOid", capture=True)
+    if pr.returncode != 0:
+        problems.append(f"cannot read the PR for {branch}: {pr.stderr.strip()}")
+    elif pr.stdout.strip() != head:
+        problems.append(f"the PR's head is {pr.stdout.strip()[:12] or 'unknown'}, not HEAD {head[:12]}")
+    if not is_ancestor("refs/remotes/origin/main", head):
+        problems.append(
+            "origin/main has commits that are not on this branch: `git merge origin/main`, then "
+            "`fork/dev sync --continue`, and wait for the checks"
+        )
+    return problems
 
 
 def finish(local):
     branch = git("branch", "--show-current")
     if not branch.startswith("sync/") or git("status", "--porcelain"):
         sys.exit("--finish runs on a clean sync/* branch")
-    if not local and not checks_passed(branch):
-        print("The PR's checks have not all passed yet.")
-        return 4
-    for cmd in [["git", "switch", "main"], ["git", "merge", "--ff-only", branch]] + (
-        [] if local else [["git", "push", "origin", "main"]]
+    head = git("rev-parse", "HEAD")
+    if not local:
+        problems = checked_head(branch, head)
+        if problems:
+            print("--finish: main is not updated:\n" + "".join(f"  {p}\n" for p in problems), end="")
+            return 4
+        if not checks_passed(head):
+            print(f"The required checks have not all passed on {head[:12]}.")
+            return 4
+    # The commit named, not the branch: the branch may move after the checks above.
+    for cmd in [["git", "switch", "main"], ["git", "merge", "--ff-only", head]] + (
+        [] if local else [["git", "push", "origin", f"{head}:refs/heads/main"]]
     ):
         if run(*cmd) != 0:
             sys.exit(f"{' '.join(cmd)} failed")
@@ -454,8 +573,7 @@ def main():
         branch = git("branch", "--show-current")
         if not branch.startswith("sync/") or git("status", "--porcelain") or git("ls-files", "-u"):
             sys.exit("--continue runs on a sync/* branch with the merge committed and a clean tree")
-        merge_commit = git("rev-list", "--first-parent", "--merges", "-n", "1", "HEAD")
-        return after_merge(branch, git("rev-parse", f"{merge_commit}^2"), args, book)
+        return after_merge(branch, *sync_merge(branch), args, book)
 
     preflight(args)
     if args.to:
@@ -476,7 +594,7 @@ def main():
     if run("git", "switch", "-c", branch) != 0:
         sys.exit(f"cannot create {branch}")
     merge(target, book)
-    return after_merge(branch, target, args, book)
+    return after_merge(branch, *sync_merge(branch), args, book)
 
 
 if __name__ == "__main__":
