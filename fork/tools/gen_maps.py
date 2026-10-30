@@ -386,7 +386,7 @@ def native_map():
             tick("fork/native"),
             "fork",
             sum(f.startswith("fork/native/") for f in FILES),
-            "fork 的 CMake 挂接、头文件和 C++ 测试",
+            "fork 的 CMake 挂接、头文件、C++ 测试，以及编译进 `surogate-common` 的源文件（`fork/native/src`）",
         ]
     )
     out += ["## 目录与引擎\n\n", table(["目录", "引擎", "文件数", "内容"], rows), "\n"]
