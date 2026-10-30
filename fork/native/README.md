@@ -34,7 +34,7 @@ surogate_fork_configure_common(surogate-common)
 两处自动检查这个约定，丢掉任何一行或 `fork_native.cmake` 中的调用都会让 fork CI 失败：
 
 - `fork/dev check`：ledger 的 `[[exact_diff]]` 列出这两行，`check_divergence.py` 要求 `git diff -U0 <merge base> -- csrc/CMakeLists.txt` 改动的行恰好是它们（按文件检查时，只要还有一行改动，文件就仍是登记过的 M）。
-- `fork/dev test openmp`：configure 时 [openmp-contract/hook_contract.cmake](openmp-contract/hook_contract.cmake) 从 `csrc/CMakeLists.txt` 读出挂接行，确认它们位于 `add_library(surogate-common ...)` 之后，在一个不编译的替身 `surogate-common` 目标上按原样执行，再检查目标链接了 `OpenMP::OpenMP_CXX` 并有 `fork/native/include` 头文件目录。同一个项目的 ctest 再确认 `OpenMP::OpenMP_CXX` 确实以多线程运行。
+- `fork/dev test openmp`：configure 时 [openmp-contract/hook_contract.cmake](openmp-contract/hook_contract.cmake) 从 `csrc/CMakeLists.txt` 读出挂接行，从 `surogate_fork_configure_common(<target>)` 取得目标名，确认挂接行位于 `add_library(<target> ...)` 之后，在一个不编译的同名替身目标上按原样执行，再检查目标链接了 `OpenMP::OpenMP_CXX` 并有 `fork/native/include` 头文件目录。同一个项目的 ctest 再确认 `OpenMP::OpenMP_CXX` 确实以多线程运行。替身只执行挂接行：上游改名 `surogate-common` 时这个检查不需要修改，上游自己链接 OpenMP 时要删去其中的 OpenMP 检查（见 [sync.md](../docs/sync.md) 冲突处理手册中的 T5）。
 
 ## 新增 fork 原生代码的规则
 

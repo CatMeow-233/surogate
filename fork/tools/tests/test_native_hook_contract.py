@@ -58,7 +58,7 @@ def test_a_lost_hook_call_fails(tree):
     edit(tree / "csrc/CMakeLists.txt", CALL)
     rc, out = configure(tree)
     assert rc != 0
-    assert "surogate-common does not link OpenMP::OpenMP_CXX" in out
+    assert "has no surogate_fork_configure_common(<target>) call" in out
 
 
 def test_a_lost_openmp_call_in_fork_native_fails(tree):
@@ -66,6 +66,24 @@ def test_a_lost_openmp_call_in_fork_native_fails(tree):
     rc, out = configure(tree)
     assert rc != 0
     assert "surogate-common does not link OpenMP::OpenMP_CXX" in out
+    assert "If upstream now links OpenMP into surogate-common itself, remove this check" in out
+
+
+def test_the_target_comes_from_the_hook_call(tree):
+    """The T5 playbook's rename case: upstream renames surogate-common and the hook argument follows;
+    the contract needs no edit (review of the TOOL-2 fix)."""
+    path = tree / "csrc/CMakeLists.txt"
+    path.write_text(path.read_text(encoding="utf-8").replace("surogate-common", "surogate-core"), encoding="utf-8")
+    rc, out = configure(tree)
+    assert rc == 0, out
+    assert "fork hook contract: csrc/CMakeLists.txt gives surogate-core OpenMP::OpenMP_CXX" in out
+
+
+def test_a_hook_argument_that_names_no_earlier_target_fails(tree):
+    edit(tree / "csrc/CMakeLists.txt", CALL, "surogate_fork_configure_common(surogate-core)\n")
+    rc, out = configure(tree)
+    assert rc != 0
+    assert "must come after add_library(surogate-core ...)" in out
 
 
 def test_a_lost_include_root_fails(tree):

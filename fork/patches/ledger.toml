@@ -90,8 +90,11 @@ Recovery: git show f7980a9e:RELEASE_v1.4.0.md"""
 # order. Each path is also in the files of `topic`. When a sync moves or edits
 # these lines on purpose (for example upstream renames surogate-common), update
 # them here in the same commit. `fork/dev test openmp` additionally evaluates
-# the csrc/CMakeLists.txt hook on a stand-in target and checks that it links
-# OpenMP and adds the fork include root (fork/native/openmp-contract).
+# the csrc/CMakeLists.txt hook on a stand-in for the target named in the hook
+# call and checks that it links OpenMP and adds the fork include root
+# (fork/native/openmp-contract/hook_contract.cmake). A rename needs no change
+# there; when upstream links OpenMP itself, its OpenMP check goes with the
+# fork's call (T5 in fork/docs/sync.md).
 [[exact_diff]]
 path = "csrc/CMakeLists.txt"
 topic = "T5"

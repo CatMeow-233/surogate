@@ -1,13 +1,18 @@
 # Configure-time contract for the fork's hook in csrc/CMakeLists.txt (ledger T5).
 #
 # Reads the hook lines from csrc/CMakeLists.txt (the include of fork_native.cmake and the
-# surogate_fork_* calls), checks that they come after add_library(surogate-common), and evaluates
-# them as written on a stand-in surogate-common target that is never built. The configure fails
-# unless the stand-in then links OpenMP::OpenMP_CXX and has the fork include root. The ctest of
-# this project shows that OpenMP::OpenMP_CXX runs a multi-threaded team, so together they cover
+# surogate_fork_* calls), takes the target from the surogate_fork_configure_common(<target>) call
+# (surogate-common), checks that the hook comes after add_library(<target>), and evaluates the
+# lines as written on a stand-in <target> that is never built. The configure fails unless the
+# stand-in then links OpenMP::OpenMP_CXX and has the fork include root. The ctest of this project
+# shows that OpenMP::OpenMP_CXX runs a multi-threaded team, so together they cover
 # csrc hook -> surogate_fork_configure_common() -> surogate_enable_training_openmp().
 # Losing the call line, or the OpenMP or include call in fork_native.cmake, fails here;
 # fork/dev check (the [[exact_diff]] entry in the ledger) also fails on the first.
+# Because the target comes from the hook, an upstream rename of surogate-common needs only the
+# hook line and [[exact_diff]] updated. The stand-in sees only the hook lines, not upstream's own
+# links: when upstream links OpenMP into the target itself and the fork drops
+# surogate_enable_training_openmp(), the OpenMP check below goes too (T5 in fork/docs/sync.md).
 
 get_filename_component(_hook_root "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
 set(_hook_file "${_hook_root}/csrc/CMakeLists.txt")
@@ -22,13 +27,25 @@ if(_hook_count EQUAL 0)
                         "(include of fork_native.cmake, surogate_fork_configure_common); ${_hook_doc}")
 endif()
 
-string(REGEX MATCH "add_library\\([ \t\n]*surogate-common[ \t\n)]" _hook_target "${_hook_text}")
+# The target the hook configures, as written in the call (a plain CMake target name).
+set(_hook_lib "")
+foreach(_hook_line IN LISTS _hook_lines)
+    if(_hook_line MATCHES "surogate_fork_configure_common[ \t]*\\([ \t]*([A-Za-z0-9_-]+)[ \t]*\\)")
+        set(_hook_lib "${CMAKE_MATCH_1}")
+    endif()
+endforeach()
+if(NOT _hook_lib)
+    message(FATAL_ERROR "fork hook contract: ${_hook_file} has no surogate_fork_configure_common(<target>) "
+                        "call; ${_hook_doc}")
+endif()
+
+string(REGEX MATCH "add_library\\([ \t\n]*${_hook_lib}[ \t\n)]" _hook_target "${_hook_text}")
 string(FIND "${_hook_text}" "${_hook_target}" _hook_target_at)
 list(GET _hook_lines 0 _hook_first)
 string(FIND "${_hook_text}" "${_hook_first}" _hook_first_at)
 if(NOT _hook_target OR _hook_first_at LESS _hook_target_at)
     message(FATAL_ERROR "fork hook contract: the hook in ${_hook_file} must come after "
-                        "add_library(surogate-common ...); ${_hook_doc}")
+                        "add_library(${_hook_lib} ...); ${_hook_doc}")
 endif()
 
 # The hook as written, with the csrc directory for the variables csrc/CMakeLists.txt sees there.
@@ -37,21 +54,21 @@ foreach(_hook_var CMAKE_CURRENT_SOURCE_DIR CMAKE_CURRENT_LIST_DIR CMAKE_SOURCE_D
     string(REPLACE "\${${_hook_var}}" "${_hook_root}/csrc" _hook_code "${_hook_code}")
 endforeach()
 
-add_library(surogate-common STATIC EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/probe.cpp")
+add_library(${_hook_lib} STATIC EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/probe.cpp")
 cmake_language(EVAL CODE "${_hook_code}")
 
 string(JOIN "\n    " _hook_shown ${_hook_lines})
-get_target_property(_hook_libs surogate-common LINK_LIBRARIES)
+get_target_property(_hook_libs ${_hook_lib} LINK_LIBRARIES)
 if(NOT "OpenMP::OpenMP_CXX" IN_LIST _hook_libs)
     message(FATAL_ERROR "fork hook contract: after the hook lines of ${_hook_file}\n    ${_hook_shown}\n"
-                        "surogate-common does not link OpenMP::OpenMP_CXX. The "
-                        "surogate_fork_configure_common(surogate-common) call, or the "
-                        "surogate_enable_training_openmp() call in fork/native/cmake/fork_native.cmake, is missing; "
+                        "${_hook_lib} does not link OpenMP::OpenMP_CXX: the "
+                        "surogate_enable_training_openmp() call in fork/native/cmake/fork_native.cmake is missing. "
+                        "If upstream now links OpenMP into ${_hook_lib} itself, remove this check with that call; "
                         "${_hook_doc}")
 endif()
 
 file(REAL_PATH "${_hook_root}/fork/native/include" _hook_want)
-get_target_property(_hook_dirs surogate-common INCLUDE_DIRECTORIES)
+get_target_property(_hook_dirs ${_hook_lib} INCLUDE_DIRECTORIES)
 set(_hook_found FALSE)
 foreach(_hook_dir IN LISTS _hook_dirs)
     file(REAL_PATH "${_hook_dir}" _hook_real)
@@ -61,8 +78,8 @@ foreach(_hook_dir IN LISTS _hook_dirs)
 endforeach()
 if(NOT _hook_found)
     message(FATAL_ERROR "fork hook contract: after the hook lines of ${_hook_file}\n    ${_hook_shown}\n"
-                        "surogate-common does not have the include root ${_hook_want}. The "
+                        "${_hook_lib} does not have the include root ${_hook_want}. The "
                         "target_include_directories() call in surogate_fork_configure_common() is missing; ${_hook_doc}")
 endif()
-message(STATUS "fork hook contract: csrc/CMakeLists.txt gives surogate-common OpenMP::OpenMP_CXX and "
+message(STATUS "fork hook contract: csrc/CMakeLists.txt gives ${_hook_lib} OpenMP::OpenMP_CXX and "
                "fork/native/include")
