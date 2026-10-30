@@ -59,7 +59,7 @@
 
 ## 删除的上游文件（`[[deletion]]`）
 
-- RELEASE_v1.4.0.md：Dead v1.4.0 release handoff: one upstream commit, f7980a9e (2026-07-25), the commit the v1.4.0 tag points at, and never edited since. Nothing refers to it: `git grep RELEASE_v1.4.0 upstream/main` finds no hit. Upstream now writes release notes with git-cliff (.github/workflows/wheel.yml:321-328) and is at v1.5.9. Recovery: git show f7980a9e:RELEASE_v1.4.0.md
+- RELEASE_v1.4.0.md：Dead v1.4.0 release handoff: one upstream commit, f7980a9e (2026-07-25), the commit the v1.4.0 tag points at, and never edited since. Nothing refers to it: `git grep RELEASE_v1.4.0 upstream/main` finds no hit. Upstream now writes release notes with git-cliff (.github/workflows/wheel.yml:321-328) and was at v1.5.12 (282f9901) at the last sync. Recovery: git show f7980a9e:RELEASE_v1.4.0.md
 
 ## 根目录笔记的归位规则（`[root_rehome]`）
 

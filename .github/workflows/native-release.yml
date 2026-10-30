@@ -1,60 +1,69 @@
 name: Native Wheel Release
 
 # The fork's native wheel (trainer + serving engine) for the RTX 50 series, built on a free
-# GitHub runner. fork/native/release/build-wheel.sh does the work inside the CUDA build image;
-# this file only prepares the runner, caches ccache and publishes. Upstream's wheel.yml needs
-# Blacksmith runners the fork does not have, and its tags are v*.
+# GitHub runner. fork/native/release/build-wheel.sh does the work inside the CUDA build image and
+# fork/native/release/plan.sh decides whether a run may publish; this file prepares the runner,
+# caches ccache and publishes. Upstream's wheel.yml needs Blacksmith runners the fork does not
+# have, and its tags are v*.
 #
-# To release, change fork/native/release/VERSION and push: the run builds the wheel and then
-# creates the tag native-v<VERSION> at the pushed commit while publishing the prerelease. A
-# VERSION whose tag already exists is skipped, so merging that change into another branch does
-# not publish twice. A manual run only builds (it needs this file on the default branch).
+# Only a manual run starts this workflow: no push, to main or any other branch, builds or
+# publishes. To release, run it on the default branch with publish checked (Actions -> Native
+# Wheel Release -> Run workflow). The version comes from fork/native/release/VERSION, and the run
+# creates the tag native-v<VERSION> at the run's commit while publishing the prerelease. plan.sh
+# refuses to publish unless the run is on the default branch, the tag does not exist yet, the
+# commit is still on the default branch with the same .github/workflows, and VERSION is
+# <upstream release>.postN. The release job checks again right before publishing and never
+# replaces an existing release or asset, so re-running a run cannot publish twice. Without
+# publish, a run on any branch only builds the wheel (version 0.0.0.dev0) as an Actions artifact.
 on:
-  push:
-    branches: ['**']
-    paths: ['fork/native/release/VERSION']
   workflow_dispatch:
     inputs:
+      publish:
+        description: Publish native-v<VERSION> as a prerelease (default branch only; refused if the tag exists)
+        type: boolean
+        default: false
       archs:
         description: CUDA architectures, ';'-separated (120a = RTX 50 series)
+        type: string
         default: '120a'
 
 permissions:
   contents: read
 
+# Publish runs queue one behind another, so a second publish run starts after the first has
+# created its tag and then stops in plan instead of building again. Build-only runs never queue.
+concurrency:
+  group: native-wheel-run-${{ inputs.publish && 'publish' || github.run_id }}
+  cancel-in-progress: false
+
 jobs:
   plan:
     if: github.repository == 'CatMeow-233/surogate'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
+      version: ${{ steps.plan.outputs.version }}
       tag: ${{ steps.plan.outputs.tag }}
-      build: ${{ steps.plan.outputs.build }}
+      upstream_base: ${{ steps.plan.outputs.upstream_base }}
+      publish: ${{ steps.plan.outputs.publish }}
+      release_tag: ${{ steps.plan.outputs.release_tag }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
       - id: plan
-        run: |
-          if [ "$GITHUB_EVENT_NAME" != push ]; then
-            echo "build=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          tag="native-v$(tr -d '[:space:]' < fork/native/release/VERSION)"
-          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
-            echo "$tag already exists; nothing to release"
-            echo "build=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "releasing $tag"
-            echo "tag=$tag" >> "$GITHUB_OUTPUT"
-            echo "build=true" >> "$GITHUB_OUTPUT"
-          fi
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          MODE: ${{ inputs.publish && 'publish' || 'build' }}
+        run: fork/native/release/plan.sh "$MODE"
 
   wheel:
     needs: plan
-    if: needs.plan.outputs.build == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     env:
       ARCHS: ${{ inputs.archs || '120a' }}
-      RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+      RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
       IMAGE: nvidia/cuda:13.1.1-cudnn-devel-ubuntu24.04
       CCACHE_HOST_DIR: /mnt/ccache
     steps:
@@ -85,8 +94,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      # As in wheel.yml: restore and save are separate so a build that runs out of time still
-      # seeds the cache, and re-running the job continues where it stopped.
+      # As in wheel.yml, restore and save are separate steps, so a build that runs out of time
+      # still saves what it compiled. A new attempt of this run (Re-run all jobs or Re-run failed
+      # jobs) restores the newest entry for the same commit and compiles only what is missing.
       - name: Restore ccache
         uses: actions/cache/restore@v4
         with:
@@ -95,16 +105,52 @@ jobs:
           restore-keys: |
             native-ccache-${{ env.ARCHS }}-${{ github.sha }}-
             native-ccache-${{ env.ARCHS }}-
+      # Restored files keep their old modification times; files written by this run are newer.
+      - name: Mark the restored cache
+        run: touch "$RUNNER_TEMP/ccache-restored"
 
       - name: Build the wheel in the CUDA image
         timeout-minutes: 320
         run: |
-          docker run --rm -v "$GITHUB_WORKSPACE:/w" -v "$CCACHE_HOST_DIR:/ccache" -w /w \
+          docker run --rm --name native-build -v "$GITHUB_WORKSPACE:/w" -v "$CCACHE_HOST_DIR:/ccache" -w /w \
             -e RELEASE_TAG -e ARCHS -e HOST_UID="$(id -u)" \
             "$IMAGE" bash fork/native/release/build-wheel.sh
 
-      - name: Save ccache
+      # On a step timeout or a cancelled run the runner stops only the step's shell: the docker
+      # client is orphaned and the container keeps compiling into /mnt/ccache. tar fails on a
+      # directory that changes while it is archived ("file changed as we read it"), and
+      # actions/cache then saves nothing. So kill the container first and save only a cache that
+      # no process writes to. Results of finished compilations are complete files; a compilation
+      # that was killed leaves at most a ccache temporary file and runs again on the next attempt.
+      # A run in which ccache neither stored nor used an entry (for example one stopped before
+      # compiling) saves nothing, so it cannot become the newest, nearly empty entry that the next
+      # restore would pick.
+      - name: Stop the build container
+        id: stop
         if: always()
+        run: |
+          docker kill native-build >/dev/null 2>&1 || true
+          for _ in $(seq 30); do
+            [ -z "$(docker ps --quiet --filter 'name=^native-build$')" ] && break
+            sleep 2
+          done
+          if [ -n "$(docker ps --quiet --filter 'name=^native-build$')" ]; then
+            echo "::error::the build container is still running; not saving ccache"
+            exit 1
+          fi
+          # ccache 4 entries are <hash>R (result) and <hash>M (manifest) files two directory levels
+          # down; ccache also updates the modification time of an entry it uses. The stats files
+          # next to them do not count: ccache --zero-stats rewrites all of them in every build.
+          new=$(find "$CCACHE_HOST_DIR" -mindepth 3 -type f \( -name '*R' -o -name '*M' \) \
+            -newer "$RUNNER_TEMP/ccache-restored" -print -quit 2>/dev/null || true)
+          if [ -n "$new" ]; then
+            echo "save=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ccache stored or used no entry in this run; nothing to save"
+          fi
+
+      - name: Save ccache
+        if: always() && steps.stop.outputs.save == 'true'
         uses: actions/cache/save@v4
         with:
           path: /mnt/ccache
@@ -118,25 +164,46 @@ jobs:
 
   release:
     needs: [plan, wheel]
-    if: needs.plan.outputs.tag != ''
+    if: needs.plan.outputs.publish == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # One publisher per version. A second release job for the same version waits here, then
+    # finds the tag in the re-check below and refuses.
+    concurrency:
+      group: native-wheel-publish-${{ needs.plan.outputs.tag }}
+      cancel-in-progress: false
     permissions:
       contents: write
     env:
       RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+      UPSTREAM_BASE: ${{ needs.plan.outputs.upstream_base }}
     steps:
+      # The full history, for the re-check's ancestry test against the default branch.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: surogate-native-wheel
           path: wheelhouse
-      - name: Verify checksums and write the release notes
+      - name: Verify the wheel and write the release notes
         working-directory: wheelhouse
         run: |
           sha256sum --check SHA256SUMS
-          wheel=$(ls *.whl)
+          python3 - "$RELEASE_TAG" "$GITHUB_SHA" <<'PY'
+          import json
+          import sys
+
+          info = json.load(open("build-info.json"))
+          expected = (sys.argv[1], sys.argv[2])
+          if (info["release_tag"], info["source_commit"]) != expected:
+              sys.exit(f"build-info.json describes {info['release_tag']} at {info['source_commit']}, expected {expected}")
+          PY
+          wheel=$(ls ./*.whl)
+          wheel=${wheel#./}
           url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${wheel//+/%2B}"
           cat > ../notes.md <<EOF
-          Native Surogate wheel built from \`${GITHUB_SHA}\`: upstream invergent-ai/surogate plus this fork's changes (see \`fork/patches/ledger.toml\`).
+          Native Surogate wheel built from \`${GITHUB_SHA}\`: upstream invergent-ai/surogate v${UPSTREAM_BASE} plus this fork's changes (see \`fork/patches/ledger.toml\`).
 
           - CUDA 13.1, Python 3.12, x86_64; GPU code for: \`$(python3 -c 'import json;print(json.load(open("build-info.json"))["archs"])')\` (120a = RTX 50 series).
           - Built by \`.github/workflows/native-release.yml\` on a GitHub-hosted runner; not tested on a GPU before publishing.
@@ -148,6 +215,12 @@ jobs:
           uv pip install "${url}"
           \`\`\`
           EOF
+      # Right before publishing, with fresh data: a re-run of the failed jobs reuses the plan
+      # job's outputs, and another run may have published this version in the meantime.
+      - name: Re-check the publish conditions
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: fork/native/release/plan.sh recheck
       - name: Publish the prerelease
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
@@ -158,5 +231,6 @@ jobs:
           body_path: notes.md
           prerelease: true
           make_latest: false
+          overwrite_files: false
           fail_on_unmatched_files: true
           files: wheelhouse/*

@@ -16,7 +16,7 @@
 | 测试 | `fork/dev test cpu`、`patches`、`experimental`、`tlc`、`openmp` 不需要 GPU；`native`、`gpu` 在 GPU 主机上运行。各自的内容和所需环境见 [测试命令](docs/build-and-release.md#测试命令) |
 | 从检出目录运行实验训练器 | `fork/dev exp-train <配置>` |
 | 发布实验版本 | 按 [发布实验版本](docs/build-and-release.md#发布实验版本) 的清单操作 |
-| 发布原生 wheel（RTX 50 系列） | 修改 `fork/native/release/VERSION` 并推送，见 [发布原生版本](docs/build-and-release.md#发布原生版本) |
+| 发布原生 wheel（RTX 50 系列） | 在 GitHub 上手动运行：Actions → Native Wheel Release → Run workflow，选 `main` 并勾选 `publish`；推送不会发布。见 [发布原生版本](docs/build-and-release.md#发布原生版本) |
 | 同步上游（每周一次） | `fork/dev sync --dry-run` 查看报告，`fork/dev sync` 合并并开 PR，见 [docs/sync.md](docs/sync.md) |
 
 每条命令对应的产物、构建目录和发布方式见 [docs/build-and-release.md](docs/build-and-release.md)。fork CI（`.github/workflows/fork-ci.yml`）在每次推送时运行同样的 `fork/dev` 命令。

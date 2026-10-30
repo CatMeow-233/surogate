@@ -9,10 +9,11 @@
 # the change here.
 #
 # Run from the repository root inside nvidia/cuda:13.1.1-cudnn-devel-ubuntu24.04 (as root):
-#   RELEASE_TAG=native-v1.5.9.post1 bash fork/native/release/build-wheel.sh
+#   RELEASE_TAG=native-v1.5.12.post1 bash fork/native/release/build-wheel.sh
 # Environment:
-#   RELEASE_TAG   native-v<PEP 440 version> (the workflow derives it from fork/native/release/VERSION);
-#                 without it the wheel is versioned 0.0.0.dev0
+#   RELEASE_TAG   native-v<PEP 440 version> (a publish run of the workflow derives it from
+#                 fork/native/release/VERSION); without it, as in build-only runs, the wheel is
+#                 versioned 0.0.0.dev0
 #   ARCHS         CUDA architectures for trainer and engine, ';'-separated (default 120a)
 #   CCACHE_DIR    compiler cache (default /ccache)
 #   HOST_UID      if set, the checkout is chowned back to it at the end (the build runs as root)

@@ -11,7 +11,7 @@
 | [include/surogate_fork/](include/surogate_fork/) | fork 头文件，源码中写作 `#include "surogate_fork/<文件名>"` | T3 |
 | [openmp-contract/](openmp-contract/) | 独立的 OpenMP 接线回归测试，只需主机 C++ 编译器和 OpenMP | T5 |
 | [tests/](tests/) | fork 的 C++ 测试用例，编译进上游的 `dsl-run-state-tests`（T1、T10）和 `integration-tests`（T2–T4） | T1–T4、T10 |
-| [release/](release/) | `build-wheel.sh` 在 CUDA 构建镜像中构建 fork 的原生 wheel；`VERSION` 是发布版本号，推送对它的修改即发布。由 `.github/workflows/native-release.yml` 使用，见 [发布原生版本](../docs/build-and-release.md#发布原生版本) | — |
+| [release/](release/) | `build-wheel.sh` 在 CUDA 构建镜像中构建 fork 的原生 wheel；`VERSION` 是发布版本号；`plan.sh` 判断一次运行能否发布，并在发布前再检查一次。由 `.github/workflows/native-release.yml` 使用，只有在 `main` 上手动运行并勾选 `publish` 才发布，推送不会发布。见 [发布原生版本](../docs/build-and-release.md#发布原生版本) | — |
 
 各 topic 的提交、开关和冲突历史见 [ledger](../patches/ledger.toml)。
 

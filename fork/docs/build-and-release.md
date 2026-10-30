@@ -18,7 +18,7 @@
 | Docker 镜像（训练加服务、语音） | 无 | `docker build -f Dockerfile.cu130` / `Dockerfile-speech.cu130`（从已发布的 wheel 安装，不复制仓库文件） | — | 镜像 | `docker.yml` | “Build Wheels” 在 `v*` tag 上成功后（`workflow_run`） | `ghcr.io/invergent-ai/surogate` | 禁用 |
 | jackalope 终端界面二进制 | 无 | 在 `jackalope/` 下用 bun 构建（见 `.github/workflows/jackalope.yml`） | `jackalope/dist` | 5 个平台的二进制 | `jackalope.yml` | 推送到 `main` 且改动 `jackalope/**`，或 `jackalope-v*` tag | invergent-ai 的 GitHub Release（`jackalope-latest` 或 `jackalope-v*`） | 禁用 |
 | `surogate-experimental`（纯 Python wheel、sdist、示例 zip） | `fork/dev release experimental [--tag experimental-vX]` | `python3 fork/experimental/build_release.py` | 临时目录 | `build/experimental-release/artifacts`：wheel、sdist、`experimental-examples.zip`、`README.md`、`build-info.json`、`SHA256SUMS` | `.github/workflows/experimental-release.yml` | `experimental-v*` tag（手动触发时只构建和检查，不发布） | `CatMeow-233/surogate` 的预发布 Release | **启用** |
-| fork 原生 wheel `surogate-<版本>+cu130-cp312-abi3-manylinux_2_39_x86_64`（训练加服务，GPU 代码只含 sm_120a） | 无（修改 `fork/native/release/VERSION` 并推送） | `fork/native/release/build-wheel.sh`，在 `nvidia/cuda:13.1.1-cudnn-devel-ubuntu24.04` 容器中运行 | `build/cu130` | `wheelhouse/`：wheel、`build-info.json`、`SHA256SUMS` | `.github/workflows/native-release.yml` | 推送改动 `fork/native/release/VERSION` 的提交（手动触发只构建） | `CatMeow-233/surogate` 的预发布 Release | **启用** |
+| fork 原生 wheel `surogate-<版本>+cu130-cp312-abi3-manylinux_2_39_x86_64`（训练加服务，GPU 代码只含 sm_120a） | 无（在 GitHub 上手动运行 Native Wheel Release） | `fork/native/release/build-wheel.sh`，在 `nvidia/cuda:13.1.1-cudnn-devel-ubuntu24.04` 容器中运行 | `build/cu130` | `wheelhouse/`：wheel、`build-info.json`、`SHA256SUMS` | `.github/workflows/native-release.yml` | 只能手动运行（`workflow_dispatch`）：在 `main` 上勾选 `publish` 才发布，否则只构建 | `CatMeow-233/surogate` 的预发布 Release | **启用** |
 
 “fork 上”一列是目标状态：上游的三个发布工作流 “Build Wheels”、“Build Docker Images” 和 “jackalope” 应在 GitHub 设置中禁用，因为它们使用 fork 没有的 Blacksmith runner，并把镜像推到写死的 `ghcr.io/invergent-ai/surogate`。禁用是仓库所有者在 GitHub 上的操作，`fork/dev setup` 会打印检查清单，`fork/dev sync` 在推送前检查它们确实已禁用；在完成之前，这些工作流在 fork 上仍然是启用的。fork 不修改上游工作流文件，所以同步不会带来冲突。
 
@@ -64,12 +64,25 @@
 
 fork 的原生 wheel 由 `.github/workflows/native-release.yml` 在 GitHub 免费 runner（4 核、16 GB）上构建：工作流腾出磁盘、加 swap，然后在 CUDA 13.1 构建镜像中运行 `fork/native/release/build-wheel.sh`。脚本照搬上游 `wheel.yml` 的 `wheel` job（系统包、Rust、`set_cuda_version_tag.py`、构建目标、auditwheel 排除项和产物检查），区别是训练和服务端的 GPU 代码只编译所选架构（默认 `120a`，即 RTX 50 系列），版本号取自 `fork/native/release/VERSION`，并且不发布 `install.sh`。同步报告在上游修改 `wheel.yml` 时会提示把改动移植到这个脚本。
 
-1. 修改 `fork/native/release/VERSION`：内容是不带本地部分的 PEP 440 版本，wheel 的版本为 `<版本>+cu130`，tag 为 `native-v<版本>`。基于上游某个发布之后的提交时用 `.postN`，例如上游 1.5.9 之后的第一个 fork 版本是 `1.5.9.post1`。
-2. 提交并推送（通常推送到 `main`）。只要推送改动了这个文件，工作流就会构建，成功后在被推送的提交上创建 tag `native-v<版本>` 并发布预发布 Release。这个 tag 已经存在时工作流什么都不做，所以把该提交合并到别的分支不会重复发布。不需要也不要手动推送 `native-v*` tag：工作流不由 tag 触发。
-3. 冷构建需要数小时。ccache 存在 Actions 缓存中，超时或失败后在 GitHub 上重新运行失败的 job 会从缓存继续编译。需要改代码才能修复时，修复后再推送一次改动 `VERSION` 的提交（例如改成 `.post2`）。
-4. 构建在没有 GPU 的 runner 上完成，发布前没有在 GPU 上运行过。安装后在 GPU 主机上运行 `fork/dev test gpu`。
+工作流只能手动运行：推送（包括合并到 `main`）既不构建也不发布。手动运行要求工作流文件已经在默认分支 `main` 上。一次运行能否发布由 `fork/native/release/plan.sh` 判断，条件是：
 
-在默认分支上手动触发工作流（Actions → Native Wheel Release → Run workflow）只构建、上传 Actions 产物，不发布；`archs` 输入可以改架构，例如 `89;120a`，每多一个架构，构建时间大致按比例增加。
+1. 运行在 `main` 上，并勾选了 `publish`。
+2. `VERSION` 是不带本地部分的 PEP 440 版本，并且形如 `<上游版本>.postN`。上游版本是被构建的提交历史中最新的上游发布 tag `vX.Y.Z`。
+3. tag `native-v<版本>` 还不存在。已发布的版本不会被重新构建或替换。
+4. 被构建的提交仍在 `main` 的历史中，并且 `.github/workflows` 与 `main` 的当前提交相同：GitHub 不允许 `GITHUB_TOKEN` 在工作流文件与默认分支不同的提交上创建 tag。
+
+plan job 在构建之前检查全部条件，不满足时运行失败，不会开始数小时的构建。release job 在发布前一刻按远端的最新状态再检查条件 1、3、4 和版本格式，并且不替换已有的 Release 文件（`overwrite_files: false`）。同一版本的 release job 依次执行，后一个会看到前一个创建的 tag 并拒绝发布；勾选 `publish` 的运行也会排队，后一个运行在前一个结束后开始，然后在 plan 中停止；GitHub 只保留一个排队中的运行，再运行一次会取消之前排队的那个。
+
+发布步骤（要发布的代码已经合并进 `main`，并且 fork CI 已经通过）：
+
+1. 确认 `fork/native/release/VERSION`。wheel 的版本为 `<版本>+cu130`，tag 为 `native-v<版本>`。基于上游 `vX.Y.Z` 的第一个 fork 版本是 `X.Y.Z.post1`，之后每次发布把 N 加一，例如基于上游 v1.5.12 时第一个版本是 `1.5.12.post1`；同步到新的上游发布后，下一个版本从新的 `.post1` 开始。需要修改时，像其他改动一样把修改合并进 `main`。在本地运行 `fork/native/release/plan.sh build` 会打印版本、上游基线以及发布运行会拒绝的原因（只读取远端，不需要 GitHub 权限）。
+2. 在 GitHub 上打开 Actions → Native Wheel Release → Run workflow，“Use workflow from” 选 `main`，勾选 `publish`，然后运行。不需要也不要手动推送 `native-v*` tag。
+3. 构建期间不要把修改 `.github/workflows` 的提交（例如上游同步）合并进 `main`，否则 release job 按条件 4 拒绝发布，需要在新的 `main` 上重新运行。
+4. 冷构建需要数小时。构建步骤超时或运行被取消时，工作流先停止构建容器，再把已经编译完成的结果存进 Actions 缓存；这次运行中 ccache 没有写入或使用任何条目（例如在编译之前就被停止）时不保存，以免这个几乎为空的条目在下次恢复时被选中。在 GitHub 上对这次运行选择 “Re-run all jobs”（推荐，plan 会在重新构建之前检查条件）或 “Re-run failed jobs”：新的尝试恢复同一提交最新的缓存，只编译缺少的部分，被停止时正在编译的单元重新编译。两种重新运行都会在发布前重新检查，tag 已经存在时拒绝发布。需要改代码才能修复时，把修复合并进 `main` 后重新运行工作流；这个版本还没有发布时不用改 `VERSION`。
+5. release job 在创建 Release 之后失败（例如上传中断）时，tag 已经存在，重新运行会被拒绝。此时在 GitHub 上删除这个 Release 和 tag，再对原运行选择 “Re-run failed jobs”（重用 90 天内的 wheel 产物）；或者把 `VERSION` 改成下一个版本后重新运行。
+6. 构建在没有 GPU 的 runner 上完成，发布前没有在 GPU 上运行过。安装后在 GPU 主机上运行 `fork/dev test gpu`。
+
+不勾选 `publish` 时，工作流可以在任意分支上运行，只构建 wheel（版本 `0.0.0.dev0`）并上传为 Actions 产物，不创建 tag；plan job 以 notice 列出发布运行会拒绝的原因。`archs` 输入可以改架构，例如 `89;120a`，每多一个架构，构建时间大致按比例增加。
 
 ## 版本固定在哪里
 
@@ -95,7 +108,7 @@ fork 的原生 wheel 由 `.github/workflows/native-release.yml` 在 GitHub 免�
 3. `.github/workflows/docker.yml` 的 “Determine version” 步骤根据触发它的 tag 自行计算镜像版本。
 4. `install.sh` 的 `VERSION_OVERRIDE` 由 `.github/workflows/wheel.yml` 的 “Pin version in install.sh” 步骤用 sed 填入。
 
-fork 上没有 `v*` tag（`git ls-remote --tags origin` 只有 `experimental-v*` 和 `native-v*`），所以用 `make` 在 fork 上构建的原生包版本号是回退值 `0.0.1` 或上游最近一次发布的版本号。`native-release.yml` 则把 `fork/native/release/VERSION` 中的版本写入 `pyproject.toml`（见“发布原生版本”）。
+fork 上没有 `v*` tag（`git ls-remote --tags origin` 只有 `experimental-v*` 和 `native-v*`），所以用 `make` 在 fork 上构建的原生包版本号是回退值 `0.0.1` 或上游最近一次发布的版本号。`native-release.yml` 的发布运行则把 `fork/native/release/VERSION` 中的版本写入 `pyproject.toml`，只构建的运行用 `0.0.0.dev0`（见“发布原生版本”）。
 
 规则：
 
