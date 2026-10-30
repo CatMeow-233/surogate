@@ -52,8 +52,8 @@ Commands
                                     source pins under fork/patches/tests (FORK_PY, default .venv/bin/python)
   test tlc [pytest args]            CPU tests of the TLC package fork/tlc (FORK_PY, default .venv/bin/python;
                                     no native extension needed)
-  test tools [pytest args]          tests of the maintenance tools under fork/tools/tests (FORK_PY; the
-                                    hook-contract cases need cmake and a C++ compiler)
+  test tools [pytest args]          tests of the maintenance tools under fork/tools/tests, release_guard.py
+                                    included (FORK_PY; the hook-contract cases need cmake and a C++ compiler)
                                     cpu, patches, tlc, tools: a test fails after FORK_TEST_TIMEOUT
                                     seconds (default 120); FORK_PY needs pytest-timeout
   test openmp                       OpenMP contract test and csrc hook check in build/fork-openmp

@@ -13,7 +13,7 @@
 | [openmp-contract/](openmp-contract/) | 独立的 OpenMP 回归测试，只需主机 C++ 编译器和 OpenMP：接线（`check.cpp`）与线程数契约（`team_check.cpp`） | T5 |
 | [bench/cpu-optimizer/](bench/cpu-optimizer/) | `run.sh` 用训练库的编译命令编译 `cpu_adamw.cpp`（带与不带 OpenMP），按 NVML 的方式绑定 rank 线程，测 `cpu_training` 的优化器步耗时；结果记在 [performance.md](../docs/performance.md#cpu-优化器并行) | T5 |
 | [tests/](tests/) | fork 的 C++ 测试用例，编译进上游的 `dsl-run-state-tests`（T1、T10）和 `integration-tests`（T2–T4） | T1–T4、T10 |
-| [release/](release/) | `build-wheel.sh` 在 CUDA 构建镜像中构建 fork 的原生 wheel；`VERSION` 是发布版本号；`plan.sh` 判断一次运行能否发布，并在发布前再检查一次，`test_plan.sh` 是它的测试（`fork/dev test release`）。由 `.github/workflows/native-release.yml` 使用，只有在 `main` 上手动运行并勾选 `publish` 才发布，推送不会发布。见 [发布原生版本](../docs/build-and-release.md#发布原生版本) | — |
+| [release/](release/) | `build-wheel.sh` 在 CUDA 构建镜像中构建 fork 的原生 wheel；`VERSION` 是发布版本号；`plan.sh` 判断一次运行能否发布，并在发布前再检查一次，`test_plan.sh` 是它的测试（`fork/dev test release`）。由 `.github/workflows/native-release.yml` 使用，只有在 `main` 上手动运行并勾选 `publish` 才发布，推送不会发布；文件先传到草稿，由 `fork/tools/release_guard.py` 校验后才发布。见 [发布原生版本](../docs/build-and-release.md#发布原生版本) | — |
 
 各 topic 的提交、开关和冲突历史见 [ledger](../patches/ledger.toml)。
 

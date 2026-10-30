@@ -15,7 +15,7 @@
 | `fork/tlc/tests/` | fork：TLC 包；`cpu/` 不需要原生扩展，`gpu/` 在 GPU 主机上运行 |
 | `fork/native/tests/` | fork：编译进上游测试可执行文件的 C++ 用例 |
 | `fork/native/openmp-contract/` | fork：OpenMP 接线测试，以及 `csrc/CMakeLists.txt` 挂接点的 configure 期检查 |
-| `fork/tools/tests/` | fork：维护工具（同步脚本、ledger 检查、`fork/dev`、原生挂接点检查）的测试 |
+| `fork/tools/tests/` | fork：维护工具（同步脚本、ledger 检查、`fork/dev`、原生挂接点检查、发布检查 `release_guard.py`）的测试 |
 
 运行它们的命令见 [build-and-release.md 的“测试命令”](../build-and-release.md#测试命令)。
 

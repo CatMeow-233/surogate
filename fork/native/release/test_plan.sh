@@ -7,8 +7,8 @@
 # the outputs it writes to GITHUB_OUTPUT. The synthetic upstream (vX.Y.Z tags) and fork (origin,
 # with main) live in a temporary directory, with their own git configuration; the script needs only
 # git and bash, no network, and changes nothing outside that directory. Section V runs the version
-# check of build-wheel.sh. The last section checks that native-release.yml still calls plan.sh where
-# publishing depends on it.
+# check of build-wheel.sh. The last section checks that native-release.yml still calls plan.sh and
+# fork/tools/release_guard.py where publishing depends on them.
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PLAN=$HERE/plan.sh
@@ -273,23 +273,28 @@ done
 o=$(env PATH="$T/bin:$PATH" RELEASE_TAG=native-v1.5.12.post1 bash "$HERE/build-wheel.sh" 2>&1)
 check "V build-wheel.sh accepts native-v1.5.12.post1" 97 $? "$o" "^::group::System packages"
 
-# W. native-release.yml runs plan.sh before the build and again right before publishing, and never
-# replaces a published file
+# W. native-release.yml runs plan.sh before the build and again right before publishing; the release
+# job refuses an existing release (drafts included), uploads to a draft, never replaces a file, and
+# publishes the draft only after fork/tools/release_guard.py has compared its files with the build
 line_of() { grep -nF -- "$1" "$WORKFLOW" | head -1 | cut -d: -f1; }
 # shellcheck disable=SC2016 # the workflow's literal text
 plan_at=$(line_of 'run: fork/native/release/plan.sh "$MODE"')
 mode_at=$(line_of "MODE: \${{ inputs.publish && 'publish' || 'build' }}")
 release_at=$(line_of "if: needs.plan.outputs.publish == 'true'")
 recheck_at=$(line_of 'run: fork/native/release/plan.sh recheck')
-publish_at=$(line_of 'uses: softprops/action-gh-release@')
+absent_at=$(line_of 'fork/tools/release_guard.py absent')
+upload_at=$(line_of 'uses: softprops/action-gh-release@')
+publish_at=$(line_of 'fork/tools/release_guard.py publish')
 if [ -n "$plan_at" ] && [ -n "$mode_at" ]; then ok "W plan job runs plan.sh in the mode the publish input picks"
 else not_ok "W plan job: no 'plan.sh \"\$MODE\"' step with MODE from inputs.publish in $WORKFLOW"; fi
-if [ -n "$release_at" ] && [ -n "$recheck_at" ] && [ -n "$publish_at" ] &&
-    [ "$release_at" -lt "$recheck_at" ] && [ "$recheck_at" -lt "$publish_at" ]; then
-    ok "W the release job re-checks right before softprops"
-else not_ok "W release job: no 'plan.sh recheck' step between its publish condition and softprops"; fi
-if grep -qE '^ +overwrite_files: false$' "$WORKFLOW"; then ok "W softprops never replaces an asset"
-else not_ok "W softprops: overwrite_files is not false"; fi
+if [ -n "$release_at" ] && [ -n "$recheck_at" ] && [ -n "$absent_at" ] && [ -n "$upload_at" ] &&
+    [ -n "$publish_at" ] && [ "$release_at" -lt "$recheck_at" ] && [ "$recheck_at" -lt "$upload_at" ] &&
+    [ "$absent_at" -lt "$upload_at" ] && [ "$upload_at" -lt "$publish_at" ]; then
+    ok "W the release job re-checks and refuses an existing release before softprops, publishes after it"
+else not_ok "W release job: expected plan.sh recheck and release_guard.py absent, softprops, release_guard.py publish"; fi
+if [ "$(grep -cE '^ +overwrite_files: false$' "$WORKFLOW")" = 1 ] && [ "$(grep -cE '^ +draft: true$' "$WORKFLOW")" = 1 ]
+then ok "W softprops uploads to a draft and never replaces an asset"
+else not_ok "W softprops: expected draft: true and overwrite_files: false"; fi
 
 echo "plan.sh tests: $pass passed, $fail failed"
 [ "$fail" = 0 ]

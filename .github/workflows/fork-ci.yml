@@ -71,7 +71,7 @@ jobs:
       - name: TLC CPU tests
         timeout-minutes: 15
         run: FORK_PY=python fork/dev test tlc
-      - name: Maintenance tool tests (sync, ledger checks, fork/dev, native hook contract)
+      - name: Maintenance tool tests (sync, ledger checks, fork/dev, native hook contract, release guard)
         timeout-minutes: 10
         run: FORK_PY=python fork/dev test tools
 

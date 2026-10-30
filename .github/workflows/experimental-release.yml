@@ -94,25 +94,33 @@ jobs:
       - name: Verify downloaded artifacts
         working-directory: experimental-artifacts
         run: sha256sum --check SHA256SUMS
-      # A published release is never replaced. Existing assets must equal this
-      # run's bytes (a re-run of this job completing a partial upload); anything
-      # else fails here, before the release or its notes are touched.
-      - name: Refuse to replace published assets
+      # A version is published once: a release for the tag, published or a draft a
+      # failed run left behind, fails the job before anything is uploaded.
+      - name: Refuse a tag that already has a release or a draft
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          python3 fork/experimental/release_guard.py --repository "$GITHUB_REPOSITORY"
-          --tag "$GITHUB_REF_NAME" --artifacts experimental-artifacts
-      - name: Publish the fork's experimental prerelease
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        run: python3 fork/tools/release_guard.py absent --repository "$GITHUB_REPOSITORY" --tag "$GITHUB_REF_NAME"
+      # softprops publishes a new prerelease before uploading unless draft is true;
+      # the draft is visible only to collaborators until the next step publishes it.
+      - name: Upload to a draft prerelease
+        id: draft
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           repository: CatMeow-233/surogate
           tag_name: ${{ github.ref_name }}
           target_commitish: ${{ github.sha }}
           name: Surogate experimental trainer ${{ github.ref_name }}
           body_path: fork/experimental/RELEASE_NOTES.md
+          draft: true
           prerelease: true
           make_latest: false
           fail_on_unmatched_files: true
           overwrite_files: false
           files: experimental-artifacts/*
+      - name: Verify the uploaded files and publish the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.draft.outputs.id }}
+        run: >-
+          python3 fork/tools/release_guard.py publish --repository "$GITHUB_REPOSITORY" --tag "$GITHUB_REF_NAME"
+          --release-id "$RELEASE_ID" --artifacts experimental-artifacts

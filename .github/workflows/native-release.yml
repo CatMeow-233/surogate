@@ -12,9 +12,11 @@ name: Native Wheel Release
 # creates the tag native-v<VERSION> at the run's commit while publishing the prerelease. plan.sh
 # refuses to publish unless the run is on the default branch, the tag does not exist yet, the
 # commit is still on the default branch with the same .github/workflows, and VERSION is
-# <upstream release>.postN. The release job checks again right before publishing and never
-# replaces an existing release or asset, so re-running a run cannot publish twice. Without
-# publish, a run on any branch only builds the wheel (version 0.0.0.dev0) as an Actions artifact.
+# <upstream release>.postN. The release job checks again right before publishing, refuses a tag
+# that already has a release (drafts included), uploads to a draft and publishes it only after
+# fork/tools/release_guard.py has compared every file on it with the build, so a failed upload is
+# never public and re-running a run cannot publish twice. Without publish, a run on any branch
+# only builds the wheel (version 0.0.0.dev0) as an Actions artifact.
 on:
   workflow_dispatch:
     inputs:
@@ -223,16 +225,33 @@ jobs:
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: fork/native/release/plan.sh recheck
-      - name: Publish the prerelease
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+      # A draft does not create the tag, so plan.sh cannot see one a failed run left behind.
+      - name: Refuse a tag that already has a release or a draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 fork/tools/release_guard.py absent --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG"
+      # softprops publishes a new prerelease before uploading unless draft is true; the draft is
+      # visible only to the repository's collaborators until the next step publishes it.
+      - name: Upload to a draft prerelease
+        id: draft
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           repository: CatMeow-233/surogate
           tag_name: ${{ env.RELEASE_TAG }}
           target_commitish: ${{ github.sha }}
           name: Surogate native ${{ env.RELEASE_TAG }}
           body_path: notes.md
+          draft: true
           prerelease: true
           make_latest: false
           overwrite_files: false
           fail_on_unmatched_files: true
           files: wheelhouse/*
+      # Publishing creates the tag native-v<VERSION> at the run's commit.
+      - name: Verify the uploaded files and publish the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.draft.outputs.id }}
+        run: >-
+          python3 fork/tools/release_guard.py publish --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG"
+          --release-id "$RELEASE_ID" --artifacts wheelhouse

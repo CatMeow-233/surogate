@@ -33,7 +33,7 @@
 | `fork/dev test cpu` | `fork/tools/test_cpu.sh`：fork 的补丁测试（`fork/patches/tests`），以及上游 `tests/` 与 `csrc/src/testing/serve` 的 pytest，分 7 个进程运行，结果与 [known_failures.txt](../tools/known_failures.txt) 比较 | `FORK_PY` 指向装有 torch 和 [requirements-cpu-lane.txt](../tools/requirements-cpu-lane.txt) 的解释器（默认 `.venv/bin/python`） |
 | `fork/dev test experimental` | 在 `fork/` 下的 `.venv-experimental` 中运行 `fork/experimental/tests` | uv；无法访问 download.pytorch.org 时设 `FORK_TORCH_INDEX=pypi` |
 | `fork/dev test patches` | `fork/patches/tests` | `FORK_PY`（默认 `.venv/bin/python`），需要 [requirements-cpu-lane.txt](../tools/requirements-cpu-lane.txt)（其中有 pytest-timeout） |
-| `fork/dev test tools` | `fork/tools/tests`：同步脚本、`check_divergence.py`、`fork/dev` 的超时与参数传递、`csrc/CMakeLists.txt` 挂接点的 configure 检查，都在临时 git 仓库中运行 | `FORK_PY`，需要 pytest 和 pytest-timeout；git；挂接点用例需要 CMake 和主机 C++ 编译器，缺少时跳过 |
+| `fork/dev test tools` | `fork/tools/tests`：同步脚本、`check_divergence.py`、`fork/dev` 的超时与参数传递、`csrc/CMakeLists.txt` 挂接点的 configure 检查，都在临时 git 仓库中运行；以及发布检查 `fork/tools/release_guard.py`，对着一个假的 GitHub CLI 运行 | `FORK_PY`，需要 pytest 和 pytest-timeout；git；挂接点用例需要 CMake 和主机 C++ 编译器，缺少时跳过 |
 | `fork/dev test tlc` | `fork/tlc/tests/cpu`：TLC 包的 CPU 测试，不需要原生扩展。GPU 测试 `fork/tlc/tests/gpu` 按 [TLC 运行手册](../tlc/docs/runbook.md) 在 GPU 主机上运行 | `FORK_PY`（默认 `.venv/bin/python`），需要 CPU torch 和 [requirements-cpu-lane.txt](../tools/requirements-cpu-lane.txt) |
 | `fork/dev test openmp` | OpenMP 接线测试和 CPU 优化器的线程数契约（`fork/native/include/surogate_fork/omp_team.h`），构建目录 `build/fork-openmp` | 主机 C++ 编译器、OpenMP、CMake；不需要 GPU 或 CUDA |
 | `fork/dev test release` | `fork/native/release/test_plan.sh`：在临时目录中建立合成的上游仓库和 fork 仓库，检查 `plan.sh` 的每个发布条件、`build-wheel.sh` 的版本检查和两者共用的 `fork/tools/release_gate.sh`，以及 `native-release.yml` 在构建之前和发布之前调用 `plan.sh` | git、bash；不访问网络 |
@@ -48,7 +48,7 @@
 
 ## 发布实验版本
 
-`surogate-experimental` 的版本号写死在 `fork/experimental/pyproject.toml` 中，按 PEP 440 的规范写法书写（例如 `0.1.0a4`，不能写成 `0.1.0.a4` 或 `0.1.0a04`，`build_release.py` 拒绝其他写法），tag 必须是 `experimental-v<版本>`。推送这个 tag 会运行 `.github/workflows/experimental-release.yml`，它重新测试、构建并发布预发布 Release。手动触发（包括在 `experimental-v*` tag 上手动运行）只构建和检查，不发布。已发布的 Release 不会被替换：发布前 `fork/experimental/release_guard.py` 检查这个 tag 是否已有 Release，已有资产必须与本次构建逐字节相同，此时只补传缺失的资产（重新运行同一次运行中失败的 release job 可以补完中途中断的上传），否则 job 失败。构建产物带时间戳，重新构建同一提交也会得到不同的 SHA-256，所以要修正已发布的版本只能发布新版本号。在 `main` 上按顺序操作：
+`surogate-experimental` 的版本号写死在 `fork/experimental/pyproject.toml` 中，按 PEP 440 的规范写法书写（例如 `0.1.0a4`，不能写成 `0.1.0.a4` 或 `0.1.0a04`，`build_release.py` 拒绝其他写法），tag 必须是 `experimental-v<版本>`。推送这个 tag 会运行 `.github/workflows/experimental-release.yml`，它重新测试、构建并发布预发布 Release。手动触发（包括在 `experimental-v*` tag 上手动运行）只构建和检查，不发布。上传与发布按 [一个版本只发布一次](#一个版本只发布一次) 的步骤进行：这个 tag 已有 Release（包括草稿）时不上传，文件先传到草稿，逐个校验后才发布；要修正已发布的版本只能发布新版本号。在 `main` 上按顺序操作：
 
 1. 更新版本号：两次发布之间，`fork/experimental/pyproject.toml` 中是下一个版本加 `.dev0`（例如 `0.1.0a4.dev0`），这样从检出目录构建的 wheel 不会与已发布的 wheel 同名。把它改为新版本（去掉 `.dev0`；忘记去掉时，第 4 步的 `--tag` 检查因版本不符而失败），再用 `git grep -n '<上一个发布版本>' -- fork/experimental` 列出其余写有版本号的地方（`fork/experimental/README.md` 与 `fork/experimental/docs/training.md` 中的下载文件名，以及 `fork/experimental/RELEASE_NOTES.md`），全部改为新版本。`training.md` 的“Differences from <上一个发布版本>”一节写的是检出目录与上一个发布版本的差异，发布时删除它，需要保留的内容并入发布说明。
 2. 改写 `fork/experimental/RELEASE_NOTES.md`：它就是 Release 的正文。
@@ -76,18 +76,45 @@ fork 的原生 wheel 由 `.github/workflows/native-release.yml` 在 GitHub 免�
 3. tag `native-v<版本>` 还不存在。已发布的版本不会被重新构建或替换。
 4. 被构建的提交仍在 `main` 的历史中，并且 `.github/workflows` 与 `main` 的当前提交相同：GitHub 不允许 `GITHUB_TOKEN` 在工作流文件与默认分支不同的提交上创建 tag。
 
-plan job 在构建之前检查全部条件，不满足时运行失败，不会开始数小时的构建。release job 在发布前一刻按远端的最新状态再检查条件 1、3、4 和版本格式，并且不替换已有的 Release 文件（`overwrite_files: false`）。同一版本的 release job 依次执行，后一个会看到前一个创建的 tag 并拒绝发布；勾选 `publish` 的运行也会排队，后一个运行在前一个结束后开始，然后在 plan 中停止；GitHub 只保留一个排队中的运行，再运行一次会取消之前排队的那个。
+plan job 在构建之前检查全部条件，不满足时运行失败，不会开始数小时的构建。release job 在发布前一刻按远端的最新状态再检查条件 1、3、4 和版本格式，然后按 [一个版本只发布一次](#一个版本只发布一次) 的步骤上传到草稿、校验文件后发布，tag 在发布时创建。草稿不创建 tag，所以 plan 看不到失败的运行留下的草稿，release job 在上传之前拒绝它。同一版本的 release job 依次执行，后一个会看到前一个创建的 tag 或 Release 并拒绝发布；勾选 `publish` 的运行也会排队，后一个运行在前一个结束后开始，然后在 plan 中停止；GitHub 只保留一个排队中的运行，再运行一次会取消之前排队的那个。
 
 发布步骤（要发布的代码已经合并进 `main`，并且 fork CI 已经通过）：
 
 1. 确认 `fork/native/release/VERSION`。wheel 的版本为 `<版本>+cu130`，tag 为 `native-v<版本>`。基于上游 `vX.Y.Z` 的第一个 fork 版本是 `X.Y.Z.post1`，之后每次发布把 N 加一，例如基于上游 v1.5.12 时第一个版本是 `1.5.12.post1`；同步到新的上游发布后，下一个版本从新的 `.post1` 开始。需要修改时，像其他改动一样把修改合并进 `main`。在本地运行 `fork/native/release/plan.sh build` 会打印版本、上游发布与合并的上游提交，以及发布运行会拒绝的原因（只读取远端，不需要 GitHub 权限；本地只写入 `FETCH_HEAD` 和取回的对象，不移动任何分支或远程跟踪分支）。
 2. 在 GitHub 上打开 Actions → Native Wheel Release → Run workflow，“Use workflow from” 选 `main`，勾选 `publish`，然后运行。不需要也不要手动推送 `native-v*` tag。
 3. 构建期间不要把修改 `.github/workflows` 的提交（例如上游同步）合并进 `main`，否则 release job 按条件 4 拒绝发布，需要在新的 `main` 上重新运行。
-4. 冷构建需要数小时。构建步骤超时或运行被取消时，工作流先停止构建容器，再把已经编译完成的结果存进 Actions 缓存；这次运行中 ccache 没有写入或使用任何条目（例如在编译之前就被停止）时不保存，以免这个几乎为空的条目在下次恢复时被选中。在 GitHub 上对这次运行选择 “Re-run all jobs”（推荐，plan 会在重新构建之前检查条件）或 “Re-run failed jobs”：新的尝试恢复同一提交最新的缓存，只编译缺少的部分，被停止时正在编译的单元重新编译。两种重新运行都会在发布前重新检查，tag 已经存在时拒绝发布。需要改代码才能修复时，把修复合并进 `main` 后重新运行工作流；这个版本还没有发布时不用改 `VERSION`。
-5. release job 在创建 Release 之后失败（例如上传中断）时，tag 已经存在，重新运行会被拒绝。此时在 GitHub 上删除这个 Release 和 tag，然后：在原运行开始后 30 天内，对它选择 “Re-run failed jobs”，重用它的 wheel 产物，不重新构建；超过 30 天后 GitHub 不再允许重新运行这次运行（Actions 产物的保留期更长，但工作流只在原运行的新尝试中使用它），这时在 `main` 上重新运行工作流并勾选 `publish`，它会重新构建，`VERSION` 不用改（plan 仍按条件 2 检查它）。也可以把 `VERSION` 改成下一个版本后重新运行。
+4. 冷构建需要数小时。构建步骤超时或运行被取消时，工作流先停止构建容器，再把已经编译完成的结果存进 Actions 缓存；这次运行中 ccache 没有写入或使用任何条目（例如在编译之前就被停止）时不保存，以免这个几乎为空的条目在下次恢复时被选中。在 GitHub 上对这次运行选择 “Re-run all jobs”（推荐，plan 会在重新构建之前检查条件）或 “Re-run failed jobs”：新的尝试恢复同一提交最新的缓存，只编译缺少的部分，被停止时正在编译的单元重新编译。两种重新运行都会在发布前重新检查，tag 或 Release（包括草稿）已经存在时拒绝发布。需要改代码才能修复时，把修复合并进 `main` 后重新运行工作流；这个版本还没有发布时不用改 `VERSION`。
+5. release job 在发布之前失败（上传中断、文件校验失败，或发布请求被拒绝）时，Release 还是草稿，tag 还不存在，这个版本没有公开过。按 [一个版本只发布一次](#一个版本只发布一次) 删除草稿，然后：在原运行开始后 30 天内，对它选择 “Re-run failed jobs”，重用它的 wheel 产物，不重新构建；超过 30 天后 GitHub 不再允许重新运行这次运行（Actions 产物的保留期更长，但工作流只在原运行的新尝试中使用它），或者发布因条件 4 被拒绝时，在 `main` 上重新运行工作流并勾选 `publish`，它会重新构建。草稿从未公开，所以 `VERSION` 可以不改（plan 仍按条件 2 检查它）。Release 一旦发布，它的文件在发布前已经全部校验过；之后发现问题时不删除重发，把 `VERSION` 改成下一个版本再发布。
 6. 构建在没有 GPU 的 runner 上完成，发布前没有在 GPU 上运行过。安装后在 GPU 主机上运行 `fork/dev test gpu`。
 
 不勾选 `publish` 时，工作流可以在任意分支上运行，只构建 wheel（版本 `0.0.0.dev0`）并上传为 Actions 产物，不创建 tag；plan job 以 notice 列出发布运行会拒绝的原因。`archs` 输入可以改架构，例如 `89;120a`，每多一个架构，构建时间大致按比例增加。
+
+GitHub 重新运行一次运行时，使用的是原运行提交上的工作流定义，不是当前 `main` 上的。在改为只能手动发布的提交 `042a070b` 之前创建的运行（由推送触发，没有 `publish` 输入、发布前的再检查和 `overwrite_files: false`）不得重新运行，无论 “Re-run all jobs” 还是 “Re-run failed jobs”。已知还在可重新运行期限内的是已取消的运行 40634738095（推送到功能分支的 `8e91b723` 触发，2026-10-28 创建，plan 已经选定 `native-v1.5.9.post1`，GitHub 允许重新运行到 2026-11-27 前后）：重新运行会在数小时的构建之后，按旧定义尝试在未合并的提交上发布这个版本号错误的 Release，挡住它的只剩 GitHub 不允许 `GITHUB_TOKEN` 在工作流文件不同的提交上创建 tag 这一条服务端限制，而这一条没有实际验证过。仓库所有者应删除这次运行（fork 的工具不改 GitHub 上的东西）：
+
+```bash
+gh run delete 40634738095 -R CatMeow-233/surogate
+```
+
+## 一个版本只发布一次
+
+两个发布工作流（`native-release.yml` 与 `experimental-release.yml`）用同样的三步发布，由 `fork/tools/release_guard.py` 把关：
+
+1. 上传之前，`release_guard.py absent` 要求这个 tag 还没有任何 Release，已发布的和草稿都算。只有能推送的 token 才看得到草稿，release job 的 `GITHUB_TOKEN` 有 `contents: write`。
+2. softprops/action-gh-release 以 `draft: true` 创建草稿并上传全部文件，不替换已有文件（`overwrite_files: false`）。不设 `draft` 时，它先发布预发布 Release 再逐个上传，上传中断时已经公开的文件就成了一个不完整的 Release。草稿只有仓库协作者看得到。
+3. `release_guard.py publish` 下载草稿上的每个文件，要求文件集合与本次运行的产物完全相同、每个文件都已上传完毕并且 SHA-256 一致，然后才把草稿改为已发布（仍是预发布，不标记为 latest）。原生版本的 tag 在这一步创建；实验版本的 tag 是推送的，保持不动。任何一项不满足时 job 失败，草稿保持未发布。
+
+规则：同一个版本号不会以不同的字节发布两次。构建产物带时间戳，重新构建同一提交也会得到不同的 SHA-256，因此：
+
+- 已发布的 Release 不替换、不补传，也不删除后用同一版本号重发。已发布的版本有问题时，用新版本号发布。
+- release job 在发布之前失败时，留下的只是一个从未公开的草稿。删除它之后再重新发布（草稿存在时 `absent` 拒绝任何新的上传）；因为这个版本号没有公开过，重新构建后仍可以用它：
+
+  ```bash
+  gh release delete <tag> -R CatMeow-233/surogate --yes   # 不加 --cleanup-tag：实验版本的 tag 要保留
+  ```
+
+- 不经草稿发布、上传中途失败的 Release（例如在网页上手动创建，或由使用草稿之前的工作流定义创建）已经公开了一部分文件。只能用原运行的产物补完它：从原运行的 Artifacts 下载，按其中的 `SHA256SUMS` 校验，再用 `gh release upload` 上传缺少的文件；原运行的产物已过期或不完整时，保留这个 Release，把版本号改成下一个再发布。
+
+`fork/dev test tools` 中的 `fork/tools/tests/test_release_guard.py` 对着一个假的 GitHub CLI 检查这些规则；`fork/dev test release` 与 `fork/experimental/tests/test_release_workflow.py` 检查两个工作流按这个顺序调用它。
 
 ## 版本固定在哪里
 
