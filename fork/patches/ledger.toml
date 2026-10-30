@@ -245,7 +245,7 @@ conflict_history = [
 [[topic]]
 id = "T10"
 title = "tied lm_head shares the embedding in full training"
-commits = ["5722fc7f"]
+commits = ["5722fc7f", "213f2997"]   # 213f2997: Gemma 3 declaration, CPU-norm pin
 switch = "always on for tie_word_embeddings models, Gemma 3 configs without the key included; LoRA/QLoRA unchanged, except that Gemma 3 LoRA now aliases the frozen head to the embedding as the other tied models do"
 # Defect (upstream 282f9901, unchanged since 2580d6cc / 4ac6a3d8): in full training the IR's lm_head is a
 # trainable parameter of its own, while its gradient is the embedding's buffer (dsl_grad_store.cpp:104-113)
