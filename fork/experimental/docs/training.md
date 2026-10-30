@@ -57,11 +57,35 @@ is vendored.
 
 For each matrix gradient `G`, including each matrix in a batched MoE parameter:
 
-1. Form a small random Gaussian sketch, `R = G P` or `P^T G`.
+1. Form a small random Gaussian sketch, `R = G P` or `P^T G`, with basis
+   entries drawn from `N(0, 1/r)` for rank `r`.
 2. Maintain FP32 Adam moments in the sketch coordinates and obtain a
    bias-corrected sketch update `U`.
 3. Update using the **original full gradient** multiplied by
-   `projection_scale * norm(U) / (norm(R) + eps)` per matrix.
+   `projection_scale * d * norm(U) / (norm(R) + eps)` per matrix.
+
+`d` keeps matrix updates on AdamW's per-element scale. The basis preserves
+`norm(G)` in expectation, so the update's norm is about `learning_rate *
+projection_scale * d * norm(U)`, spread over the `nnz(G)` nonzero entries of the
+gradient, while the sketch update spreads `norm(U)` over its `nnz(U)` entries.
+The default `projection_scale_rule: rms` uses `d = sqrt(nnz(G) / nnz(U))` per
+matrix. Each updated element then moves about `learning_rate * projection_scale
+* rms(U)`, the counterpart of AdamW's `learning_rate * rms(Adam direction)`: one
+learning rate suits matrices and vectors, and `projection_scale: 1` matches
+AdamW's step size. For a dense gradient `d = sqrt(n / r)`, where `n` is the
+projected dimension of that matrix (the larger one). Counting nonzeros also
+covers row-sparse gradients: an untied embedding's gradient is nonzero only in
+the rows of the batch's tokens, and a dense `sqrt(n / r)` would move those rows
+`sqrt(n / touched rows)` times too far.
+
+`projection_scale_rule: constant` uses `d = 1`, the rule of releases
+0.1.0a1–a3, for comparisons with those runs. Matrix updates are then about
+`sqrt(r / n)` times AdamW's: at Qwen3-4B shapes and rank one, 50–100 times
+smaller for the attention and MLP matrices and about 390 times smaller for the
+151,936-row embedding, while vectors and norms, which use plain AdamW, take full
+steps at the same learning rate. CPU tests compare the per-step update RMS with
+AdamW's for several dense shapes and ranks, with consistent and with noisy
+gradients, and on the touched rows of a row-sparse gradient.
 
 The projection side minimizes the projector plus two moment tensors. With rank
 one, a 4096-by-4096 matrix stores 12,288 FP32 projector/moment elements instead
@@ -75,9 +99,10 @@ per-matrix scale differ from coordinate-wise AdamW. Vectors/scalars and matrices
 whose smaller dimension is no larger than the requested rank use ordinary AdamW
 with FP32 moments. `projection_scale` applies to the projected path only.
 
-The defaults are `projection_rank: 1`, `projection_interval: 200`, and
-`projection_scale: 1`. There is no persistent FP32 master copy. With BF16
-parameters, `stochastic_rounding: true` applies experimental stochastic rounding
+The defaults are `projection_rank: 1`, `projection_interval: 200`,
+`projection_scale: 1`, and `projection_scale_rule: rms`. There is no
+persistent FP32 master copy. With BF16 parameters, `stochastic_rounding: true`
+applies experimental stochastic rounding
 to avoid systematically losing sub-ULP updates. Its noise is seeded per parameter
 and per update from the parameter's step counter, which only increases, so no
 update reuses another's noise. FP32 update temporaries are bounded in chunks;
@@ -238,8 +263,8 @@ You may increase `max_steps` or change `save_every` and `output_dir` on resume;
 numerical/model configuration changes and different dataset contents are rejected.
 The checkpoint format is version 3. The trainer refuses version-2 checkpoints,
 written by 0.1.0a1–a3: their dropped LISA layers lost the step counters that
-seed rounding noise and bases. Finish such a run with the release that started
-it, or start a new one.
+seed rounding noise and bases, and they predate `projection_scale_rule`. Finish
+such a run with the release that started it, or start a new one.
 Use a new output directory if its recorded metrics extend beyond the requested
 checkpoint. The runner does not overwrite an existing unrelated training run.
 

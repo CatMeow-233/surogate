@@ -48,6 +48,7 @@ def test_paths_and_lists_round_trip_relative_to_configuration(tmp_path):
         {"batch_size": True},
         {"seed": 2**63},
         {"projection_interval": 0},
+        {"projection_scale_rule": "sqrt"},
         {"max_sequence_length": 1},
         {"learning_rate": float("nan")},
         {"eps": 0},
@@ -74,6 +75,9 @@ def test_independent_modes_and_resume_contract():
     lisa = TrainConfig(**_values(lisa_layers=2, lisa_state_policy="cpu"))
     backward = TrainConfig(**_values(optimizer_in_backward=True, gradient_checkpointing=False))
     assert ordinary.optimizer == "adamw" and lisa.lisa_layers == 2 and backward.optimizer_in_backward
+    assert ordinary.projection_scale_rule == "rms"
+    constant = TrainConfig(**_values(projection_scale_rule="constant"))
+    assert constant.resume_contract() != TrainConfig(**_values()).resume_contract()
     resumed = TrainConfig(**{**lisa.to_dict(), "max_steps": 500, "save_every": 0, "output_dir": "new"})
     assert resumed.resume_contract() == lisa.resume_contract()
 

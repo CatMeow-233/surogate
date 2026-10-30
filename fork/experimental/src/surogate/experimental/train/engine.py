@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 CHECKPOINT_KIND = "surogate.experimental.train"
 # Version 3: rank-scaled optimizer state keeps per-parameter clocks across LISA
-# drops; version-2 checkpoints are refused, not migrated.
+# drops and records scale_rule; version-2 checkpoints are refused, not migrated.
 CHECKPOINT_VERSION = 3
 
 
@@ -289,6 +289,7 @@ def run_training(config: TrainConfig, *, resume_from: str | None = None) -> dict
             rank=config.projection_rank,
             update_interval=config.projection_interval,
             scale=config.projection_scale,
+            scale_rule=config.projection_scale_rule,
             seed=config.seed,
             stochastic_rounding=config.stochastic_rounding,
         )

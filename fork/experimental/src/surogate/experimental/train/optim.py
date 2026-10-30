@@ -32,6 +32,7 @@ _PARAMETER_SEED_STRIDE = 0x9E3779B97F4A7C15
 _REFRESH_SEED_STRIDE = 0xD1B54A32D192ED03
 _ROUNDING_SEED_STRIDE = 0x94D049BB133111EB
 _FLOAT_STATE_KEYS = ("exp_avg", "exp_avg_sq", "projector")
+_SCALE_RULES = ("rms", "constant")
 _BF16_UPDATE_CHUNK_SIZE = 1 << 20
 
 
@@ -93,6 +94,17 @@ def _project_bfloat16_chunked(gradient: Tensor, basis: Tensor, side: str) -> Ten
         return sketch
 
 
+def _nonzeros_per_matrix(gradient: Tensor) -> Tensor:
+    """Count each matrix's nonzero entries, reading at most one update chunk at a time."""
+    flat = gradient.reshape(-1, gradient.shape[-2] * gradient.shape[-1])
+    matrices, elements = flat.shape
+    width = max(1, _BF16_UPDATE_CHUNK_SIZE // matrices)
+    counts = torch.zeros(matrices, dtype=torch.int64, device=gradient.device)
+    for start in range(0, elements, width):
+        counts += torch.count_nonzero(flat[:, start : start + width], dim=-1)
+    return counts.view(gradient.shape[:-2])
+
+
 def _apply_bfloat16_chunk(param: Tensor, direction: Tensor, group: dict[str, Any], generator: torch.Generator) -> None:
     # Combine decay and update before the one BF16 rounding. No persistent master
     # or full-size FP32 parameter/update buffer is constructed.
@@ -127,6 +139,8 @@ def _validate_group(group: dict[str, Any]) -> None:
         raise ValueError(f"seed must be an integer in [0, {_MAX_SEED}]")
     if not isinstance(group.get("stochastic_rounding", False), bool):
         raise ValueError("stochastic_rounding must be a boolean")
+    if group.get("scale_rule") not in _SCALE_RULES:
+        raise ValueError(f"scale_rule must be one of {', '.join(_SCALE_RULES)}")
 
 
 class RankScaledAdamW(Optimizer):
@@ -141,10 +155,23 @@ class RankScaledAdamW(Optimizer):
 
     FP32 Adam moments of the sketch produce a bias-corrected update ``U``.
     The parameter update uses the *original full gradient*, multiplied by the
-    per-matrix scalar ``scale * ||U||_F / (||sketch||_F + eps)``. It does not lift
-    the sketch back into parameter space. Vectors/scalars and ranks at least
-    ``min(M, N)`` use ordinary AdamW with FP32 moments; ``scale`` applies only
-    to the projected variant. Weight decay is decoupled in both paths.
+    per-matrix scalar ``scale * d * ||U||_F / (||sketch||_F + eps)``. It does not
+    lift the sketch back into parameter space. Vectors/scalars and ranks at least
+    ``min(M, N)`` use ordinary AdamW with FP32 moments; ``scale`` and ``d``
+    apply only to the projected variant. Weight decay is decoupled in both paths.
+
+    ``d`` puts matrix updates on AdamW's per-element scale. The basis preserves
+    ``||G||_F`` in expectation, so the update's norm is about ``lr * scale * d *
+    ||U||_F``, spread over the ``nnz(G)`` nonzero gradient entries, while the
+    sketch's Adam update spreads ``||U||_F`` over its ``nnz(U)`` entries.
+    ``scale_rule="rms"`` (default) uses ``d = sqrt(nnz(G) / nnz(U))``, so each
+    updated element moves about ``lr * scale * rms(U)``, as AdamW moves it by
+    ``lr * rms(Adam direction)``. For a dense gradient ``d = sqrt(n / r)``, with
+    ``n`` the projected (larger) dimension; counting nonzeros also covers
+    row-sparse gradients such as an untied embedding's. ``scale_rule="constant"``
+    uses ``d = 1``, the rule of releases 0.1.0a1-a3: matrix updates are then about
+    ``sqrt(r / n)`` times AdamW's, tens to hundreds of times smaller at LLM
+    shapes, while vectors take full AdamW steps at the same ``lr``.
 
     Refreshes occur on gradient-bearing parameter steps 1, 1+update_interval,
     etc., and on the first step after ``reset_parameter_state``. They reset
@@ -174,6 +201,7 @@ class RankScaledAdamW(Optimizer):
         scale: float = 1.0,
         seed: int = 42,
         stochastic_rounding: bool = False,
+        scale_rule: str = "rms",
     ) -> None:
         defaults = dict(
             lr=lr,
@@ -185,11 +213,18 @@ class RankScaledAdamW(Optimizer):
             scale=scale,
             seed=seed,
             stochastic_rounding=stochastic_rounding,
+            scale_rule=scale_rule,
         )
         _validate_group(defaults)
         self._parameter_indices: dict[Tensor, int] = {}
         self._parameter_groups: dict[Tensor, dict[str, Any]] = {}
         super().__init__(params, defaults)
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        super().__setstate__(state)
+        # Optimizer states saved before scale_rule existed were trained with d = 1.
+        for group in self.param_groups:
+            group.setdefault("scale_rule", "constant")
 
     def add_param_group(self, param_group: dict[str, Any]) -> None:
         options = {**self.defaults, **param_group}
@@ -323,9 +358,13 @@ class RankScaledAdamW(Optimizer):
         if state["projected"]:
             update_norm = torch.linalg.vector_norm(adam_update, dim=(-2, -1), keepdim=True)
             sketch_norm = torch.linalg.vector_norm(sketch, dim=(-2, -1), keepdim=True)
-            factor = update_norm / (sketch_norm + group["eps"])
+            multiplier = update_norm / (sketch_norm + group["eps"]) * group["scale"]
+            if group["scale_rule"] == "rms":
+                gradient_nonzeros = _nonzeros_per_matrix(gradient)
+                update_nonzeros = torch.count_nonzero(adam_update, dim=(-2, -1)).clamp_(min=1)
+                multiplier = multiplier * (gradient_nonzeros / update_nonzeros).sqrt_()[..., None, None]
             if stochastic:
-                factors = (factor * group["scale"]).view(-1)
+                factors = multiplier.view(-1)
                 matrix_elements = math.prod(param.shape[-2:])
                 param_flat, gradient_flat = param.view(-1), gradient.view(-1)
                 for matrix in range(factors.numel()):
@@ -340,7 +379,7 @@ class RankScaledAdamW(Optimizer):
                 return
             # Out-of-place multiplication preserves the caller's .grad even
             # when it already has FP32 dtype and grad shares its storage.
-            update = grad * (factor * group["scale"])
+            update = grad * multiplier
         else:
             update = adam_update
         if group["weight_decay"]:

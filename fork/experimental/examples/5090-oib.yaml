@@ -17,6 +17,8 @@ warmup_steps: 25
 optimizer: rank_scaled
 projection_rank: 1
 projection_interval: 200
+projection_scale: 1.0
+projection_scale_rule: rms
 gradient_checkpointing: false
 optimizer_in_backward: true
 max_grad_norm: 0

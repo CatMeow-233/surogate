@@ -37,6 +37,7 @@ class TrainConfig:
     projection_rank: int = 1
     projection_interval: int = 200
     projection_scale: float = 1.0
+    projection_scale_rule: str = "rms"
     stochastic_rounding: bool = True
     seed: int = 42
     lisa_layers: int = 0
@@ -87,6 +88,8 @@ class TrainConfig:
             raise ValueError("truncation must be error or right")
         if self.lisa_state_policy not in {"drop", "cpu"}:
             raise ValueError("lisa_state_policy must be drop or cpu")
+        if self.projection_scale_rule not in {"rms", "constant"}:
+            raise ValueError("projection_scale_rule must be rms or constant")
         for name in (
             "max_sequence_length",
             "batch_size",

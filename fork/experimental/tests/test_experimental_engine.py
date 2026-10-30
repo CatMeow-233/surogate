@@ -247,7 +247,7 @@ def test_resume_rejects_changed_math_data_and_foreign_checkpoint(tmp_path):
     torch.save({"model": {}}, foreign)
     with pytest.raises(ValueError, match="experimental PyTorch checkpoint"):
         run_training(config, resume_from=str(foreign))
-    # Version 2 (0.1.0a1-a3) optimizer state predates the LISA clocks kept across drops.
+    # Version 2 (0.1.0a1-a3) optimizer state predates the LISA clocks kept across drops and scale_rule.
     older = checkpoint(result)
     older["checkpoint_version"] = 2
     older_path = tmp_path / "version-2.pt"

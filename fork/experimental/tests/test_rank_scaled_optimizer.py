@@ -23,11 +23,21 @@ def _numpy_sketch(gradient, basis, side):
     return np.matmul(np.swapaxes(basis, -2, -1), gradient)
 
 
+def _rms_factor(gradient, adam_update, scale_rule):
+    """Per matrix sqrt(nnz(G) / nnz(U)) for the "rms" rule, 1 for "constant"."""
+    if scale_rule == "constant":
+        return 1.0
+    gradient_nonzeros = np.count_nonzero(gradient, axis=(-2, -1))
+    update_nonzeros = np.maximum(np.count_nonzero(adam_update, axis=(-2, -1)), 1)
+    return np.sqrt(gradient_nonzeros / update_nonzeros)[..., None, None]
+
+
+@pytest.mark.parametrize("scale_rule", ["rms", "constant"])
 @pytest.mark.parametrize("shape", [(3, 7), (7, 3), (2, 3, 7), (2, 7, 3)])
-def test_projected_statistics_scale_the_original_full_gradient(shape):
+def test_projected_statistics_scale_the_original_full_gradient(shape, scale_rule):
     parameter = torch.nn.Parameter(_values(shape, offset=0.3))
     options = dict(lr=0.03, betas=(0.7, 0.8), eps=1e-5, weight_decay=0.2, rank=2, scale=0.6)
-    optimizer = RankScaledAdamW([parameter], update_interval=10, **options)
+    optimizer = RankScaledAdamW([parameter], update_interval=10, scale_rule=scale_rule, **options)
     expected = parameter.detach().double().numpy().copy()
     first = second = None
     for step in range(1, 4):
@@ -49,6 +59,7 @@ def test_projected_statistics_scale_the_original_full_gradient(shape):
         factor = np.linalg.norm(adam_update, axis=(-2, -1), keepdims=True) / (
             np.linalg.norm(sketch, axis=(-2, -1), keepdims=True) + options["eps"]
         )
+        factor = factor * _rms_factor(grad_np, adam_update, scale_rule)
         expected = expected * (1 - options["lr"] * options["weight_decay"])
         expected -= options["lr"] * options["scale"] * grad_np * factor
         np.testing.assert_allclose(parameter.detach().numpy(), expected, rtol=2e-6, atol=2e-7)
@@ -74,6 +85,102 @@ def test_state_counts_include_basis_and_two_moments_for_every_expert(shape, side
     expected = matrices * 2 * (max(rows, columns) + 2 * min(rows, columns))
     assert sum(value.numel() for value in float_state) == expected
     assert expected < 2 * parameter.numel()
+
+
+@pytest.mark.parametrize("rank", [1, 4])
+@pytest.mark.parametrize("shape", [(64, 1024), (1024, 64), (256, 256), (4, 64, 512), (128, 2048)])
+def test_default_rms_rule_puts_matrix_updates_on_the_adamw_scale(shape, rank):
+    """Per-step update RMS of a projected matrix against AdamW on the same gradients.
+
+    For these dense gradients the rms rule's factor is sqrt(n / r). Without it
+    (the constant rule) the ratio is sqrt(r / n), n the projected (larger)
+    dimension: 1/32 for a rank-1 1024-wide matrix, while vectors and norms take
+    full AdamW steps at the same learning rate.
+    """
+
+    def update_rms(make_optimizer, consistent):
+        generator = torch.Generator(device="cpu").manual_seed(0)
+        parameter = torch.nn.Parameter(torch.zeros(shape))
+        optimizer = make_optimizer(parameter)
+        signal = torch.randn(shape, generator=generator)
+        sizes = []
+        for _ in range(12):
+            before = parameter.detach().clone()
+            noise = 0 if consistent else torch.randn(shape, generator=generator)
+            parameter.grad = signal * (1 if consistent else 0.3) + noise
+            optimizer.step()
+            sizes.append((parameter.detach() - before).square().mean().sqrt().item())
+        return sum(sizes[2:]) / len(sizes[2:])
+
+    projected = math.sqrt(rank / max(shape[-2:]))
+    for consistent in (True, False):
+        adamw = update_rms(lambda parameter: torch.optim.AdamW([parameter], lr=1e-3, weight_decay=0), consistent)
+        ratios = {
+            rule: update_rms(
+                lambda parameter, rule=rule: RankScaledAdamW(
+                    [parameter], lr=1e-3, rank=rank, update_interval=1000, scale_rule=rule
+                ),
+                consistent,
+            )
+            / adamw
+            for rule in ("rms", "constant")
+        }
+        assert 0.8 < ratios["rms"] < 1.25, ratios
+        assert 0.8 < ratios["constant"] / projected < 1.25, ratios
+
+
+@pytest.mark.parametrize("stochastic_rounding", [False, True])
+def test_rms_rule_matches_adamw_on_the_rows_a_row_sparse_gradient_touches(stochastic_rounding, monkeypatch):
+    """An untied embedding's gradient is nonzero only in the rows of the batch's tokens.
+
+    Counting nonzeros moves the touched rows at AdamW's per-element scale. A dense
+    sqrt(n / r) factor would move them about sqrt(n / k) = 16 times too far.
+    """
+    monkeypatch.setattr(optim_module, "_BF16_UPDATE_CHUNK_SIZE", 4096)  # count nonzeros chunk by chunk
+    shape, touched = (8192, 64), 32
+
+    def touched_rms(make_optimizer, dtype):
+        generator = torch.Generator(device="cpu").manual_seed(0)
+        parameter = torch.nn.Parameter(torch.zeros(shape, dtype=dtype))
+        optimizer = make_optimizer(parameter)
+        sizes = []
+        for _ in range(6):
+            rows = torch.randperm(shape[0], generator=generator)[:touched]
+            gradient = torch.zeros(shape)
+            gradient[rows] = torch.randn(touched, shape[1], generator=generator)
+            before = parameter.detach().float().clone()
+            parameter.grad = gradient.to(dtype)
+            optimizer.step()
+            sizes.append((parameter.detach().float() - before)[rows].square().mean().sqrt().item())
+        return sum(sizes) / len(sizes)
+
+    adamw = touched_rms(lambda parameter: torch.optim.AdamW([parameter], lr=1e-3, weight_decay=0), torch.float32)
+    rank_scaled = touched_rms(
+        lambda parameter: RankScaledAdamW(
+            [parameter], lr=1e-3, update_interval=1000, stochastic_rounding=stochastic_rounding
+        ),
+        torch.bfloat16 if stochastic_rounding else torch.float32,
+    )
+    assert 0.75 < rank_scaled / adamw < 1.33, (rank_scaled, adamw)
+
+
+def test_states_saved_before_scale_rule_load_with_the_constant_rule():
+    parameter = torch.nn.Parameter(_values((4, 9)))
+    optimizer = RankScaledAdamW([parameter], scale_rule="constant")
+    parameter.grad = _values((4, 9), offset=0.2)
+    optimizer.step()
+    saved = optimizer.state_dict()
+    del saved["param_groups"][0]["scale_rule"]  # the 0.1.0a1-a3 layout
+    resumed_parameter = torch.nn.Parameter(parameter.detach().clone())
+    resumed = RankScaledAdamW([resumed_parameter])  # default: rms
+    resumed.load_state_dict(saved)
+    assert resumed.param_groups[0]["scale_rule"] == "constant"
+    for step in range(2, 4):
+        gradient = _values((4, 9), offset=0.2 * step)
+        parameter.grad, resumed_parameter.grad = gradient.clone(), gradient.clone()
+        optimizer.step()
+        resumed.step()
+        torch.testing.assert_close(resumed_parameter, parameter, rtol=0, atol=0)
 
 
 def test_square_projection_tie_chooses_right_and_rank_one_is_default():
@@ -595,6 +702,7 @@ def test_stochastic_update_combines_decay_and_hand_computed_direction_before_rou
         factor = np.linalg.norm(update, axis=(-2, -1), keepdims=True) / (
             np.linalg.norm(sketch, axis=(-2, -1), keepdims=True) + options["eps"]
         )
+        factor = factor * _rms_factor(original_gradient, update, "rms")  # the default rule
         direction = original_gradient * options["scale"] * factor
     else:
         direction = original_gradient / (np.abs(original_gradient) + options["eps"])
@@ -762,6 +870,8 @@ def test_cuda_stochastic_rounding_resume_preserves_global_rng_and_fp32_state(sha
         {"seed": -1},
         {"seed": 1.5},
         {"stochastic_rounding": "yes"},
+        {"scale_rule": "typo"},
+        {"scale_rule": None},
     ],
 )
 def test_invalid_options_are_rejected(option):
