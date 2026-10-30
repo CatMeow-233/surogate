@@ -59,10 +59,15 @@ def test_each_element_wise_kernel_has_one_region():
 
 
 def test_the_norm_sums_in_a_fixed_order():
-    """An OpenMP reduction would make the clipping norm depend on the team size, which now differs per rank."""
+    """An OpenMP reduction would make the clipping norm depend on the team size, which now differs per rank.
+
+    The norm also keeps upstream's pointer dedupe: T10 shares one host gradient between a tied embedding and
+    lm_head, and only this line keeps cpu_training from counting it twice (fork/docs/sync.md, T5).
+    """
     norm = body(CPU_ADAMW, r"double cpu_gradient_norm_squared\(")
     assert norm.count("surogate_fork::ordered_block_sum(info.nelem, [d](std::size_t i) {") == 2
     assert norm.count("std::isfinite(") == 2
+    assert "if (seen.count(it->second.Data)) continue; seen.insert(it->second.Data);" in norm
     assert "#pragma omp" not in norm
     assert "reduction(" not in CPU_ADAMW.read_text(encoding="utf-8")
 
