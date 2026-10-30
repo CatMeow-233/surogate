@@ -57,7 +57,9 @@
 3. 远端的这个 tag 仍然指向本次运行的提交（推送后被移动或删除的 tag 不再描述这次构建）。
 4. 被 tag 的提交在刚从远端取回的默认分支 `main` 的历史中；克隆必须是完整历史，浅克隆一律拒绝。功能分支上的提交永远不会发布。
 
-检查与原生的 `plan.sh` 共用 `fork/tools/release_gate.sh`（版本写法、远端 tag、默认分支祖先关系）。这些检查写在被 tag 的提交上的工作流中，所以只对包含它们的提交生效：只给当前 `main` 上、在加入这些检查之后的提交打 tag。上传与发布按 [一个版本只发布一次](#一个版本只发布一次) 的步骤进行：这个 tag 已有 Release（包括草稿）时不上传，文件先传到草稿，逐个校验后才发布；要修正已发布的版本只能发布新版本号。在 `main` 上按顺序操作：
+检查与原生的 `plan.sh` 共用 `fork/tools/release_gate.sh`（版本写法、远端 tag、默认分支祖先关系）。这些检查写在被 tag 的提交上的工作流中，所以只对包含它们的提交生效：只给当前 `main` 上、在加入这些检查之后的提交打 tag。上传与发布按 [一个版本只发布一次](#一个版本只发布一次) 的步骤进行：这个 tag 已有 Release（包括草稿）时不上传，文件先传到草稿，逐个校验后才发布；要修正已发布的版本只能发布新版本号。release job 在发布之前失败时，删除它留下的草稿，再对这次运行选择 “Re-run failed jobs”，重用它的产物；超过 30 天、GitHub 不再允许重新运行时，删除远端的 tag（`git push origin :refs/tags/experimental-v<版本>`）后在同一提交上重新推送。
+
+在 `main` 上按顺序操作：
 
 1. 更新版本号：两次发布之间，`fork/experimental/pyproject.toml` 中是下一个版本加 `.dev0`（例如 `0.1.0a4.dev0`），这样从检出目录构建的 wheel 不会与已发布的 wheel 同名。把它改为新版本（去掉 `.dev0`；忘记去掉时，第 4 步的 `--tag` 检查因版本不符而失败），再用 `git grep -n '<上一个发布版本>' -- fork/experimental` 列出其余写有版本号的地方（`fork/experimental/README.md` 与 `fork/experimental/docs/training.md` 中的下载文件名，以及 `fork/experimental/RELEASE_NOTES.md`），全部改为新版本。`training.md` 的“Differences from <上一个发布版本>”一节写的是检出目录与上一个发布版本的差异，发布时删除它，需要保留的内容并入发布说明。
 2. 改写 `fork/experimental/RELEASE_NOTES.md`：它就是 Release 的正文。
@@ -116,7 +118,7 @@ gh run delete 40634738095 -R CatMeow-233/surogate
 
 规则：同一个版本号不会以不同的字节发布两次。构建产物带时间戳，重新构建同一提交也会得到不同的 SHA-256，因此：
 
-- 已发布的 Release 不替换、不补传，也不删除后用同一版本号重发。已发布的版本有问题时，用新版本号发布。
+- 已发布的 Release 不替换任何文件，也不删除后用同一版本号重发。已发布的版本有问题时，用新版本号发布。
 - release job 在发布之前失败时，留下的只是一个从未公开的草稿。删除它之后再重新发布（草稿存在时 `absent` 拒绝任何新的上传）；因为这个版本号没有公开过，重新构建后仍可以用它：
 
   ```bash
