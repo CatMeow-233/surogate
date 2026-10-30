@@ -212,6 +212,16 @@ git checkout -q main && git reset -q --hard origin/main
 o=$(env DEFAULT_BRANCH=main UPSTREAM_URL="$T/up.git" bash fork/native/release/plan.sh publish 2>&1)
 check "M local defaults on main" 0 $? "$o" "commit $(git rev-parse HEAD)"
 
+# N. a local preflight moves no ref: origin's main moves behind the clone's back, and plan.sh
+# fetches it without updating refs/remotes/origin/main
+refs_before=$(git for-each-ref)
+git -C "$T/origin.git" update-ref refs/heads/main "$F1"
+o=$(run build GITHUB_SHA="$WTIP" GITHUB_REF=refs/heads/main)
+check "N build after origin's main moved" 0 $? "$o" "is not in the history of main \(now $F1\)"
+if [ "$(git for-each-ref)" = "$refs_before" ]; then ok "N plan.sh moved no ref"; else
+    not_ok "N plan.sh moved a ref" && diff <(echo "$refs_before") <(git for-each-ref); fi
+git -C "$T/origin.git" update-ref refs/heads/main "$WTIP"
+
 # W. native-release.yml runs plan.sh before the build and again right before publishing, and never
 # replaces a published file
 line_of() { grep -nF -- "$1" "$WORKFLOW" | head -1 | cut -d: -f1; }

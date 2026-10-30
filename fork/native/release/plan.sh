@@ -29,7 +29,9 @@
 #   REMOTE                  the fork's remote (default: origin)
 #   UPSTREAM_URL            the upstream repository (default: https://github.com/invergent-ai/surogate.git)
 #   GITHUB_OUTPUT           build, publish: receives version, tag, upstream_base, publish, release_tag
-# Needs the full history (actions/checkout with fetch-depth: 0). Writes nothing except FETCH_HEAD.
+# Needs the full history (actions/checkout with fetch-depth: 0). Moves no ref, so it can run as a
+# local preflight: the fetch writes only FETCH_HEAD and the fetched objects, and its empty --refmap
+# keeps git from updating the remote-tracking branch (refs/remotes/<REMOTE>/<DEFAULT_BRANCH>).
 set -euo pipefail
 
 mode=${1:-}
@@ -106,7 +108,7 @@ esac
 # 4. The commit is on the default branch, with the default branch's workflow files
 if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
     problem "the clone is shallow; plan.sh needs the full history (actions/checkout fetch-depth: 0)"
-elif ! git fetch --quiet --no-tags "$REMOTE" "refs/heads/$DEFAULT_BRANCH"; then
+elif ! git fetch --quiet --no-tags --refmap= "$REMOTE" "refs/heads/$DEFAULT_BRANCH"; then
     problem "cannot fetch $DEFAULT_BRANCH from $REMOTE"
 else
     tip=$(git rev-parse FETCH_HEAD)
