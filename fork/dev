@@ -42,7 +42,8 @@ Artefacts (details: fork/docs/build-and-release.md)
 Upstream's release workflows publish upstream's artefacts and stay active on CatMeow-233/surogate until
 the owner disables them (fork/dev setup prints the checklist and the current state): wheel.yml ("Build
 Wheels") runs on v* tags, docker.yml ("Build Docker Images") after it, and jackalope.yml on every push
-to main that touches jackalope/** (a merged upstream sync can do that) and on jackalope-v* tags. Disable:
+to main that touches jackalope/** or .github/workflows/jackalope.yml (a merged upstream sync can do that),
+on jackalope-v* tags and on manual runs. Disable:
   for w in wheel.yml docker.yml jackalope.yml; do gh workflow disable "$w" -R CatMeow-233/surogate; done
 
 Commands
@@ -94,7 +95,8 @@ setup() {
 GitHub settings for CatMeow-233/surogate (owner actions, see fork/docs/sync.md; fork/dev does not change them):
   1. Upstream's release workflows wheel.yml ("Build Wheels"), docker.yml ("Build Docker Images") and
      jackalope.yml ("jackalope") must be disabled: they stay active until you disable them, and
-     jackalope.yml publishes on every push to main that touches jackalope/**. "Experimental Trainer
+     jackalope.yml publishes on every push to main that touches jackalope/** or
+     .github/workflows/jackalope.yml, on jackalope-v* tags and on manual runs. "Experimental Trainer
      Release", "Native Wheel Release" and "Fork CI" stay active.
        for w in wheel.yml docker.yml jackalope.yml; do gh workflow disable "$w" -R CatMeow-233/surogate; done
   2. Squash and rebase merging are off, merge commits on:

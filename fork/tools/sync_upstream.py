@@ -56,7 +56,7 @@ GENERATED = ["fork/patches/README.md", "fork/docs/maps"]
 REPO = "CatMeow-233/surogate"
 PUSH_DISABLED = "DISABLED-see-AGENTS.md"
 # Upstream workflows that publish releases or images (jackalope.yml on any push to main that
-# touches jackalope/**); the owner disables them on the fork.
+# touches jackalope/** or the workflow file itself); the owner disables them on the fork.
 UPSTREAM_WORKFLOWS = (".github/workflows/wheel.yml", ".github/workflows/docker.yml", ".github/workflows/jackalope.yml")
 # fork-ci jobs that must pass on the sync branch's head commit before --finish; the same list as
 # main's branch protection in fork/docs/sync.md, checked here so that --finish also works without it.
