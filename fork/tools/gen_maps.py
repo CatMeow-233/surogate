@@ -4,12 +4,14 @@
 Writes fork/docs/maps/{python,native,tests,docs}.md and fork/patches/README.md. The input is
 the tracked tree only (`git ls-files` and the files' contents) and every list is sorted, so
 the output is deterministic. The maps record what exists and where (files, imports, CMake
-targets, classifications), never line numbers or line counts, so editing the body of a file
-does not make them stale. --check regenerates everything in memory and fails when a file on
-disk differs, when a top-level directory under surogate/ or csrc/src, or a markdown file,
-matches no rule in the classification tables below (add a rule when upstream adds one), when a
-fork test_*.py lies outside FORK_TEST_TREES, or when a file this script parses by a fixed path is
-gone (update the path below).
+targets, classifications), never line numbers or line counts, so most edits to a function body
+or a comment leave them current. Adding, removing or moving a file, or changing an import, a
+`__main__` entry, a CLI subcommand, a `__file__`-relative path, a pytest marker, a CMake target
+or the ledger can make them stale; run `fork/dev map` before committing. --check regenerates
+everything in memory and fails when a file on disk differs, when a top-level directory under
+surogate/ or csrc/src, or a markdown file, matches no rule in the classification tables below
+(add a rule when upstream adds one), when a fork test_*.py lies outside FORK_TEST_TREES, or when
+a file this script parses by a fixed path is gone (update the path below).
 
 Usage: python3 -I fork/tools/gen_maps.py --write | --check
 """

@@ -60,7 +60,7 @@ python3.12 -m venv .venv
 - [maps/tests.md](docs/maps/tests.md)：三棵测试树、pytest 标记、`tests/` 各目录的测试文件数与 GPU/slow 标记、`csrc/src/testing/serve` 中的 Python 文件。
 - [maps/docs.md](docs/maps/docs.md)：每个 markdown 文件的分类。
 
-地图只记录有什么、在哪里（文件、导入、CMake 目标、分类），不含行号和行数，所以只改文件内容不会让它们过期；新增、删除或移动文件，或修改 ledger 之后运行 `fork/dev map`。同步时刷新提交会自动重新生成它们。
+地图记录有什么、在哪里（文件、导入、入口、标记、CMake 目标、分类），不含行号和行数，所以大多数只改函数体或注释的编辑不会让它们过期；新增、删除或移动文件，增删导入、`__main__` 入口、命令行子命令、按 `__file__` 定位目录的代码、pytest 标记或 CMake 目标，以及修改 ledger，都可能让它们过期，因此提交前照常运行 `fork/dev map`，过期的地图文件会让 `fork/dev check` 失败。同步时刷新提交会自动重新生成它们。
 
 上游新增 `surogate/` 或 `csrc/src` 下的顶层目录、或新增无法归类的 markdown 文件时，`fork/dev check` 会失败，提示在 `fork/tools/gen_maps.py` 的分类表中补一条规则；脚本按固定路径读取的上游文件（例如 `surogate/cli/main.py`、`csrc/CMakeLists.txt`）被移动或删除时，它同样失败并提示修改脚本中的路径。
 
