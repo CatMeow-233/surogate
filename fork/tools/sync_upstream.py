@@ -12,9 +12,11 @@ A sync runs these steps and stops at the first one that needs the owner:
   5. resolve the one known conflict (upstream deleted a relocated note); stop on any other, and
      when an upstream directory rename would leave a fork-owned subdirectory behind
   6. commit "sync: re-home upstream root notes" (see [root_rehome] in the ledger); a note that a
-     markdown doc links to stays at the root
+     markdown doc links to, or whose own relative links would reach other paths once moved, stays
+     at the root
   7. commit "sync: refresh ledger and maps" ([sync].last_synced, gen_maps, doc-link baseline); stop
-     when a new broken link points at an upstream path the fork moved or deleted
+     when the fork broke a new broken link: it points at a path the fork moved or deleted, or sits
+     in a note the fork moved (broken_by_fork)
   8. fork/dev check, then the patch, experimental, TLC, tooling and CPU test suites
   9. push the branch and open a PR (or update the open one); --finish fast-forwards main to the
      branch's commit once that commit is the PR head and its REQUIRED_CHECKS passed
@@ -91,6 +93,11 @@ def files_at(rev):
     return set(git("ls-tree", "-r", "--name-only", "-z", rev).split("\0")) - {""}
 
 
+def paths_at(rev):
+    """Files and directories at rev: the paths a link can reach."""
+    return set(git("ls-tree", "-r", "-t", "--name-only", "-z", rev).split("\0")) - {""}
+
+
 def label(path, book):
     """The ledger entries a path belongs to, for conflict reports."""
     ids = [t["id"] for t in book.get("topic", []) if path in t.get("files", []) + t.get("fork_files", [])]
@@ -141,19 +148,44 @@ def keep_reason(name, rev, book):
     docs = linking_docs(name, rev)
     if docs:
         return "linked from " + ", ".join(docs)
+    # So would moving a note whose own relative links then resolve from dest.
+    links = retargeted_links(name, rule["dest"] + name, rev, book)
+    if links:
+        more = f" and {len(links) - 3} more" if len(links) > 3 else ""
+        return f"its links would reach other paths from {rule['dest']}: " + ", ".join(links[:3]) + more
     if rule["dest"] + name in files_at("HEAD"):
         return f"{rule['dest']}{name} already exists"
     return None
 
 
 def linking_docs(name, rev):
-    """Markdown files at rev with a local link to the path name, as check_doc_links reads links."""
+    """Markdown files at rev, other than name itself, with a local link to the path name, as
+    check_doc_links reads links. A note's links into itself (#anchors) move with it."""
     found = []
     for entry in git("grep", "-l", "-F", "-e", name, rev, "--", "*.md", "*.mdx", ok=(0, 1)).splitlines():
         doc = entry.removeprefix(f"{rev}:")
+        if doc == name:
+            continue
         text = git("show", f"{rev}:{doc}")
         if any(check_doc_links.resolve(doc, target) == name for _, target in check_doc_links.local_links(text)):
             found.append(doc)
+    return found
+
+
+def retargeted_links(name, dest, rev, book):
+    """Link targets in the note name at rev that would reach a different path from dest.
+
+    Paths are compared in the fork's layout, with name already at dest: a link to a note the fork
+    moved, or into the note itself, reaches the same file from either place. Any other relative
+    link would break, or reach another file (README.md would reach the fork's index of the notes),
+    and the fork does not edit upstream notes to repair it.
+    """
+    moved = {r["from"]: r["to"] for r in book.get("relocation", [])} | {name: dest}
+    found = []
+    for _, target in check_doc_links.local_links(git("show", f"{rev}:{name}")):
+        meant = check_doc_links.resolve(name, target)
+        if moved.get(meant, meant) != check_doc_links.resolve(dest, target) and target not in found:
+            found.append(target)
     return found
 
 
@@ -336,17 +368,27 @@ def rehome(merge_commit, book):
     print("new root notes:\n" + "\n".join(lines) if lines else "new root notes: none")
 
 
-def broken_by_fork(entries, book):
-    """Baseline entries (doc<TAB>target) whose link points at an upstream path the fork moved or
-    deleted: the fork broke them, so they are not upstream breakage to accept."""
-    gone = {r["from"]: f"moved to {r['to']}" for r in book.get("relocation", [])}
-    gone.update((d["path"], "deleted by the fork") for d in book.get("deletion", []))
+def broken_by_fork(entries, book, tree):
+    """Baseline entries (doc<TAB>target) that the fork broke, so they are not upstream breakage to
+    accept. In upstream's layout (a moved doc at its `from` path) the link reaches an upstream path
+    that the fork deleted, or one the fork has (at its new path, if it moved it) and the link no
+    longer reaches: a link to a moved note, or a relative link in a moved note. tree is the set of
+    files and directories in the fork (paths_at)."""
+    moved = {r["from"]: r["to"] for r in book.get("relocation", [])}
+    origin = {to: old for old, to in moved.items()}
+    deleted = {d["path"] for d in book.get("deletion", [])}
     found = []
     for entry in sorted(entries):
         doc, _, target = entry.partition("\t")
-        path = check_doc_links.resolve(doc, target)
-        if path in gone:
-            found.append(f"{doc} -> {target} ({path} {gone[path]})")
+        reached = check_doc_links.resolve(doc, target)
+        meant = check_doc_links.resolve(origin.get(doc, doc), target)
+        if meant in deleted:
+            found.append(f"{doc} -> {target} ({meant} deleted by the fork)")
+        elif moved.get(meant, meant) != reached and moved.get(meant, meant) in tree:
+            if doc in origin:
+                found.append(f"{doc} -> {target} (moved from {origin[doc]}, where it reaches {meant})")
+            else:
+                found.append(f"{doc} -> {target} ({meant} moved to {moved[meant]})")
     return found
 
 
@@ -357,11 +399,11 @@ def refresh(target):
     before = set((ROOT / BASELINE).read_text(encoding="utf-8").splitlines())
     run("python3", "-I", "fork/tools/check_doc_links.py", "--update-baseline")
     after = set((ROOT / BASELINE).read_text(encoding="utf-8").splitlines())
-    ours = broken_by_fork(after - before, ledger())  # the ledger as rehome() left it
+    ours = broken_by_fork(after - before, ledger(), paths_at("HEAD"))  # as rehome() left them
     if ours:
         run("git", "checkout", "HEAD", "--", LEDGER, BASELINE, *GENERATED)
-        print("\nUpstream docs link to paths the fork moved or deleted; the refresh does not add such links")
-        print("to the doc-link baseline:")
+        print("\nThe fork's moves or deletions broke these new broken links in upstream docs; the refresh does")
+        print("not add them to the doc-link baseline:")
         print("".join(f"  {entry}\n" for entry in ours), end="")
         print(
             "Move the note back to the root (git mv, and delete its [[relocation]] from the ledger), or, to\n"

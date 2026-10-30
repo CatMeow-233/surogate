@@ -15,7 +15,7 @@ doc that keeps line numbers states the upstream commit they refer to.
 
 Upstream docs fail only on broken links that are not listed in fork/tools/doc_links_baseline.txt.
 A sync refresh commit runs --update-baseline and lists the new entries in its message; it refuses
-an entry whose target is an upstream path the fork moved or deleted (fork/tools/sync_upstream.py).
+an entry that the fork's moves or deletions broke (broken_by_fork in fork/tools/sync_upstream.py).
 local_links() and resolve() are the link syntax that sync_upstream.py also uses.
 
 Usage: python3 -I fork/tools/check_doc_links.py [--update-baseline]
