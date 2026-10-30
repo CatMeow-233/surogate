@@ -35,6 +35,7 @@
 | `fork/dev test patches` | `fork/patches/tests` | `FORK_PY`（默认 `.venv/bin/python`） |
 | `fork/dev test tlc` | `fork/tlc/tests/cpu`：TLC 包的 CPU 测试，不需要原生扩展。GPU 测试 `fork/tlc/tests/gpu` 按 [TLC 运行手册](../tlc/docs/runbook.md) 在 GPU 主机上运行 | `FORK_PY`（默认 `.venv/bin/python`），需要 CPU torch 和 [requirements-cpu-lane.txt](../tools/requirements-cpu-lane.txt) |
 | `fork/dev test openmp` | OpenMP 接线测试，构建目录 `build/fork-openmp` | 主机 C++ 编译器、OpenMP、CMake；不需要 GPU 或 CUDA |
+| `fork/dev test release` | `fork/native/release/test_plan.sh`：在临时目录中建立合成的上游仓库和 fork 仓库，检查 `plan.sh` 的每个发布条件，以及 `native-release.yml` 在构建之前和发布之前调用它 | git、bash；不访问网络 |
 | `fork/dev test native` | 先 `make configure`，再加 `-DBUILD_TESTS=ON` 重新配置 `csrc/build`，构建并用 ctest 运行 `dsl-weight-loader-tests`、`dsl-run-state-tests`、`integration-tests`（fork 的 C++ 用例编译在后两个里，见 [native/README.md](../native/README.md)） | CUDA 构建环境；GPU 用例无 GPU 时跳过 |
 | `fork/dev test gpu` | `test native`，再 `make test-py`、`make serve-check`、`make grpo-test` | GPU 主机；`make grpo-test` 需要 `SUROGATE_TEST_MODEL` |
 

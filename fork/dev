@@ -50,6 +50,8 @@ Commands
   test tlc                          CPU tests of the TLC package fork/tlc (FORK_PY, default .venv/bin/python;
                                     no native extension needed)
   test openmp                       OpenMP contract test in build/fork-openmp
+  test release                      fork/native/release/plan.sh, the native release gate, against synthetic
+                                    git repositories in a temporary directory (git and bash only)
   test native                       fork and upstream C++ test executables (GPU host)
   test gpu                          test native, then make test-py, serve-check and grpo-test (GPU host)
   release experimental [--tag experimental-vX] [--output-dir DIR]
@@ -148,6 +150,7 @@ test_suite() {
             run cmake --build build/fork-openmp
             run ctest --test-dir build/fork-openmp --output-on-failure
             ;;
+        release) run fork/native/release/test_plan.sh ;;
         native) native_tests ;;
         gpu)
             native_tests
@@ -155,7 +158,7 @@ test_suite() {
             run make serve-check
             run make grpo-test
             ;;
-        *) die "usage: fork/dev test cpu|experimental|patches|tlc|openmp|native|gpu" ;;
+        *) die "usage: fork/dev test cpu|experimental|patches|tlc|openmp|release|native|gpu" ;;
     esac
 }
 
