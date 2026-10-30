@@ -6,7 +6,7 @@ import json
 import pytest
 import torch
 import torch.nn.functional as F
-from surogate.experimental.train.data import BatchStream, JSONLDataset, collate_batch
+from surogate.experimental.train.data import RECORD_KEYS, BatchStream, JSONLDataset, collate_batch
 
 
 def _file(tmp_path, rows, name="data.jsonl"):
@@ -55,9 +55,21 @@ def test_labels_masks_default_and_causal_padding(tmp_path):
         ({"input_ids": [1, 2], "loss_mask": [1]}, "same length"),
         ({"input_ids": [1, 2], "loss_mask": [True, False]}, "no supervised targets"),
         ({"input_ids": [1, 2], "labels": [1, 2], "loss_mask": [1, 1]}, "mutually exclusive"),
-        ({"input_ids": [1, 2], "position_ids": [0, 1]}, "unsupported"),
-        ({"input_ids": [1, 2], "packed": False}, "unsupported"),
-        ({"input_ids": [1, 2], "segments": [2]}, "unsupported"),
+        ({"input_ids": [1, 2], "position_ids": [0, 1]}, "unsupported record keys 'position_ids';"),
+        ({"input_ids": [1, 2], "packed": False}, "unsupported record keys 'packed';"),
+        ({"input_ids": [1, 2], "segments": [2]}, "unsupported record keys 'segments';"),
+        # Common packing/segment metadata that a deny-list would have trained across.
+        ({"input_ids": [1, 2], "segment_ids": [0, 0]}, "unsupported record keys 'segment_ids';"),
+        ({"input_ids": [1, 2], "seq_lengths": [2]}, "unsupported record keys 'seq_lengths';"),
+        ({"input_ids": [1, 2], "cu_seqlens": [0, 2]}, "unsupported record keys 'cu_seqlens';"),
+        ({"input_ids": [1, 2], "document_ids": [0, 0]}, "unsupported record keys 'document_ids';"),
+        # Misspelled supervision would otherwise fall back to supervising every token.
+        ({"input_ids": [1, 2], "label": [-100, 2]}, "'label' \\(did you mean 'labels'\\?\\)"),
+        ({"input_ids": [1, 2], "loss-mask": [0, 1]}, "'loss-mask' \\(did you mean 'loss_mask'\\?\\)"),
+        ({"input_ids": [1, 2], "text": "a b", "source": "x"}, "unsupported record keys 'source', 'text';"),
+        ({"input_ids": [1, 2], "attention_mask": [1, 0]}, "attention_mask must be all ones"),
+        ({"input_ids": [1, 2], "attention_mask": [1]}, "attention_mask must be all ones"),
+        ({"input_ids": [1, 2], "attention_mask": [1, 1.0]}, "attention_mask must be all ones"),
     ],
 )
 def test_invalid_records_have_line_context(tmp_path, row, message):
@@ -65,6 +77,20 @@ def test_invalid_records_have_line_context(tmp_path, row, message):
     with pytest.raises(ValueError, match=message) as failure:
         JSONLDataset(path, 8, vocab_size=10)
     assert ":2:" in str(failure.value)
+
+
+def test_allow_listed_metadata_and_an_all_ones_attention_mask_do_not_change_the_record(tmp_path):
+    plain = {"input_ids": [1, 2, 3], "labels": [-100, 2, 3]}
+    path = _file(
+        tmp_path,
+        [
+            plain,
+            {**plain, "attention_mask": [1, True, 1], "id": "doc-7", "metadata": {"source": "x", "tokens": 3}},
+        ],
+    )
+    dataset = JSONLDataset(path, 8, vocab_size=10)
+    assert dataset[0] == dataset[1] == plain
+    assert set(RECORD_KEYS) == {"input_ids", "labels", "loss_mask", "attention_mask", "id", "metadata"}
 
 
 def test_truncation_is_explicit_and_must_keep_supervision(tmp_path):

@@ -170,7 +170,15 @@ Use local JSONL, one independent sequence per row. Valid forms include:
 {"input_ids":[1,7,8,9,2],"labels":[-100,-100,8,9,2]}
 {"input_ids":[1,7,8,9,2],"loss_mask":[false,false,true,true,true]}
 {"input_ids":[1,7,8,9,2]}
+{"input_ids":[1,7,8,9,2],"attention_mask":[1,1,1,1,1],"id":"doc-7","metadata":{"source":"x"}}
 ```
+
+A record may contain only these keys: `input_ids`, `labels` or `loss_mask`,
+`attention_mask`, `id`, and `metadata`. `id` and `metadata` are free-form and
+never read. `attention_mask`, which tokenizers often emit, must be all ones. Any
+other key is an error that names the line and suggests the intended key for a
+near miss (`label`, `loss-mask`), because a misspelled `labels` would otherwise
+supervise every token.
 
 IDs must come from the selected model's tokenizer. Without `labels` or
 `loss_mask`, all causal targets are supervised. `loss_mask[t]` says whether
@@ -180,10 +188,12 @@ IDs, incompatible lengths, and sequences with no supervised target after the
 causal shift. Attention masks always come from real lengths and padding, not
 from supervision masks: prompts remain visible to attention.
 
-No sample packing is implemented. Packed/segment/position-reset metadata is
-rejected rather than silently permitting cross-document attention. Long examples
-fail by default; `truncation: right` enables an explicit right cut. Check that the
-remaining sequence still contains a supervised target.
+No sample packing is implemented. Packed/segment/position-reset metadata
+(`segment_ids`, `position_ids`, `cu_seqlens`, `seq_lengths`, `document_ids`, and
+any other key) is rejected rather than silently permitting cross-document
+attention. Long examples fail by default; `truncation: right` enables an
+explicit right cut. Check that the remaining sequence still contains a
+supervised target.
 
 Across gradient accumulation, loss is `sum(causal CE) / total supervised shifted
 targets` for the whole update. Averaging per-microbatch means would change the

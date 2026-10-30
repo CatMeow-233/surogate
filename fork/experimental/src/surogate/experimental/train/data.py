@@ -2,13 +2,31 @@
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 from pathlib import Path
 
+# The complete record contract. Any other key is rejected: an allow-list cannot
+# silently accept packing/segment metadata or a misspelled supervision field.
+# ``id`` and ``metadata`` are free-form and never read by the trainer.
+RECORD_KEYS = ("input_ids", "labels", "loss_mask", "attention_mask", "id", "metadata")
+
 
 def _integer(value):
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _unknown_keys_message(keys):
+    described = []
+    for key in sorted(keys):
+        match = difflib.get_close_matches(key, RECORD_KEYS, n=1, cutoff=0.8)
+        described.append(f"{key!r} (did you mean {match[0]!r}?)" if match else repr(key))
+    return (
+        f"unsupported record keys {', '.join(described)}; a record is one document with input_ids, "
+        "optional labels or loss_mask, an optional all-ones attention_mask, and free-form id/metadata. "
+        "Packed, segment and position metadata is not supported"
+    )
 
 
 class JSONLDataset:
@@ -16,7 +34,10 @@ class JSONLDataset:
 
     ``loss_mask[t]`` supervises token t, rather than the prediction made at t.
     Labels use the same convention and may contain -100. Causal shifting is
-    the runner's responsibility. No packing metadata is accepted.
+    the runner's responsibility. Keys outside ``RECORD_KEYS`` are rejected, so
+    packing metadata and misspelled fields fail with their line number. A
+    supplied ``attention_mask`` must be all ones: attention always follows the
+    record's length.
     """
 
     def __init__(self, path, max_sequence_length, vocab_size=None, truncation="error"):
@@ -63,8 +84,9 @@ class JSONLDataset:
             raise ValueError(f"{location}: invalid JSON: {error}") from error
         if not isinstance(row, dict):
             raise ValueError(f"{location}: a record must be a JSON object")
-        if {"packed", "segments", "position_ids"}.intersection(row):
-            raise ValueError(f"{location}: packed documents/position_ids are unsupported")
+        unknown = set(row).difference(RECORD_KEYS)
+        if unknown:
+            raise ValueError(f"{location}: {_unknown_keys_message(unknown)}")
         ids = row.get("input_ids")
         if not isinstance(ids, list) or not ids:
             raise ValueError(f"{location}: input_ids must be a nonempty list")
@@ -73,6 +95,17 @@ class JSONLDataset:
             for token in ids
         ):
             raise ValueError(f"{location}: input_ids must contain nonnegative integer token IDs within the vocabulary")
+        if "attention_mask" in row:
+            attention = row["attention_mask"]
+            if (
+                not isinstance(attention, list)
+                or len(attention) != len(ids)
+                or any(value is not True and not (_integer(value) and value == 1) for value in attention)
+            ):
+                raise ValueError(
+                    f"{location}: attention_mask must be all ones with the length of input_ids; "
+                    "masking inside a record is not supported, attention follows the record length"
+                )
         if "labels" in row and "loss_mask" in row:
             raise ValueError(f"{location}: labels and loss_mask are mutually exclusive")
         if "labels" in row:
