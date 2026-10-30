@@ -33,7 +33,8 @@ EOF
 # shellcheck disable=SC2046
 unset $(git rev-parse --local-env-vars)
 export GIT_CONFIG_GLOBAL=$T/gitconfig GIT_CONFIG_NOSYSTEM=1
-unset GITHUB_ACTIONS GITHUB_OUTPUT GITHUB_SHA GITHUB_REF RELEASE_TAG REMOTE UPSTREAM_URL DEFAULT_BRANCH
+unset GITHUB_ACTIONS GITHUB_OUTPUT GITHUB_SHA GITHUB_REF RELEASE_TAG REMOTE UPSTREAM_URL UPSTREAM_BRANCH \
+    DEFAULT_BRANCH
 
 pass=0 fail=0
 ok() { pass=$((pass + 1)) && echo "PASS $1"; }
@@ -48,13 +49,15 @@ check() { # name expected_rc actual_rc output pattern...
 }
 
 # Upstream: v1.5.9 (lightweight), v1.5.11 (lightweight), v1.5.12 (annotated), then v1.5.13
-# (annotated) and v1.6.0rc1 that the fork has not merged.
+# (annotated) and v1.6.0rc1, and two untagged commits U4 and U5 on main, that the fork has not merged.
 git init -q "$T/up" && cd "$T/up" || exit 1
 c() { echo "$1" >"$2" && git add "$2" && git commit -qm "$1"; }
 c u0 up.txt && git tag v1.5.9
 c u1 up.txt && git tag v1.5.11 && git tag jackalope-v9
 c u2 up.txt && git tag -a v1.5.12 -m v1.5.12
 c u3 up.txt && git tag -a v1.5.13 -m v1.5.13 && git tag v1.6.0rc1
+c u4 up.txt && U4=$(git rev-parse HEAD)
+c u5 up.txt && U5=$(git rev-parse HEAD)
 git clone -q --bare "$T/up" "$T/up.git"
 U2=$(git -C "$T/up" rev-parse 'v1.5.12^{commit}')
 
@@ -83,9 +86,10 @@ out_of() { grep -E "^$1=" "$T/out" | tail -1 | cut -d= -f2-; }
 # A. publish on the main tip: allowed
 : >"$T/out"
 o=$(run publish GITHUB_SHA="$F1" GITHUB_REF=refs/heads/main)
-check "A publish on the main tip" 0 $? "$o" "upstream base 1.5.12, publish true"
+check "A publish on the main tip" 0 $? "$o" "upstream v1\.5\.12 at $U2, publish true"
 if [ "$(out_of publish)" = true ] && [ "$(out_of release_tag)" = native-v1.5.12.post1 ] &&
-    [ "$(out_of upstream_base)" = 1.5.12 ] && [ "$(out_of version)" = 1.5.12.post1 ]; then
+    [ "$(out_of upstream_base)" = 1.5.12 ] && [ "$(out_of version)" = 1.5.12.post1 ] &&
+    [ "$(out_of upstream_commit)" = "$U2" ] && [ "$(out_of upstream_describe)" = v1.5.12 ]; then
     ok "A outputs: $(tr '\n' ' ' <"$T/out")"
 else not_ok "A outputs" && cat "$T/out"; fi
 
@@ -150,6 +154,23 @@ for v in 1.5.12.post2 1.5.12.post3.dev1; do
 done
 git push -q -f origin "$WTIP:main" && git checkout -q main
 
+# O. fork/dev sync merges upstream's main, not a tag: the outputs for the release notes name the
+# upstream commit the fork merged and how many commits it is past the newest release
+for merged in "$U4" "$U5"; do
+    git checkout -q -B synced "$WTIP" && git fetch -q "$T/up.git" refs/heads/main &&
+        git merge -q --no-ff -m "sync: merge upstream/main" "$merged" &&
+        echo 1.5.13.post1 >fork/native/release/VERSION && git commit -qam "v 1.5.13.post1" &&
+        git push -q -f origin synced:main
+    if [ "$merged" = "$U4" ]; then describe="v1.5.13 + 1 commit"; else describe="v1.5.13 + 2 commits"; fi
+    : >"$T/out"
+    o=$(run publish GITHUB_SHA="$(git rev-parse HEAD)" GITHUB_REF=refs/heads/main)
+    check "O merged upstream $describe" 0 $? "$o" "upstream ${describe//+/\\+} at $merged, publish true"
+    if [ "$(out_of upstream_commit)" = "$merged" ] && [ "$(out_of upstream_describe)" = "$describe" ] &&
+        [ "$(out_of upstream_base)" = 1.5.13 ]; then ok "O outputs: $(tr '\n' ' ' <"$T/out")"
+    else not_ok "O outputs" && cat "$T/out"; fi
+done
+git push -q -f origin "$WTIP:main" && git checkout -q main
+
 # H. NR-2 / R2-NR-5: two runs planned before either published. The first publishes (creates the
 # tag); the second release job's re-check refuses. A re-run of failed jobs reuses plan's outputs
 # (RELEASE_TAG) and is refused the same way.
@@ -193,6 +214,8 @@ o=$(run build GITHUB_SHA="$WTIP" GITHUB_REF=refs/heads/main UPSTREAM_URL="$T/mis
 check "J upstream unreachable (build)" 0 $? "$o" "would refuse: cannot list the tags"
 o=$(run publish GITHUB_SHA="$WTIP" GITHUB_REF=refs/heads/main REMOTE=nowhere)
 check "J origin unreachable (publish)" 1 $? "$o" "cannot list the tags of nowhere" "cannot fetch main from nowhere"
+o=$(run publish GITHUB_SHA="$WTIP" GITHUB_REF=refs/heads/main UPSTREAM_BRANCH=gone)
+check "J upstream branch missing (publish)" 1 $? "$o" "cannot fetch gone from $T/up.git"
 
 # K. a shallow clone cannot prove ancestry
 git clone -q --depth 1 "file://$T/origin.git" "$T/shallow"

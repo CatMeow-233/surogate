@@ -44,7 +44,8 @@ jobs:
     outputs:
       version: ${{ steps.plan.outputs.version }}
       tag: ${{ steps.plan.outputs.tag }}
-      upstream_base: ${{ steps.plan.outputs.upstream_base }}
+      upstream_commit: ${{ steps.plan.outputs.upstream_commit }}
+      upstream_describe: ${{ steps.plan.outputs.upstream_describe }}
       publish: ${{ steps.plan.outputs.publish }}
       release_tag: ${{ steps.plan.outputs.release_tag }}
     steps:
@@ -176,7 +177,8 @@ jobs:
       contents: write
     env:
       RELEASE_TAG: ${{ needs.plan.outputs.tag }}
-      UPSTREAM_BASE: ${{ needs.plan.outputs.upstream_base }}
+      UPSTREAM_COMMIT: ${{ needs.plan.outputs.upstream_commit }}
+      UPSTREAM_DESCRIBE: ${{ needs.plan.outputs.upstream_describe }}
     steps:
       # The full history, for the re-check's ancestry test against the default branch.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -203,7 +205,7 @@ jobs:
           wheel=${wheel#./}
           url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${wheel//+/%2B}"
           cat > ../notes.md <<EOF
-          Native Surogate wheel built from \`${GITHUB_SHA}\`: upstream invergent-ai/surogate v${UPSTREAM_BASE} plus this fork's changes (see \`fork/patches/ledger.toml\`).
+          Native Surogate wheel built from \`${GITHUB_SHA}\`: upstream invergent-ai/surogate at \`${UPSTREAM_COMMIT}\` (${UPSTREAM_DESCRIBE}) plus this fork's changes (see \`fork/patches/ledger.toml\`).
 
           - CUDA 13.1, Python 3.12, x86_64; GPU code for: \`$(python3 -c 'import json;print(json.load(open("build-info.json"))["archs"])')\` (120a = RTX 50 series).
           - Built by \`.github/workflows/native-release.yml\` on a GitHub-hosted runner; not tested on a GPU before publishing.

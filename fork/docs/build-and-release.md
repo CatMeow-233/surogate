@@ -68,7 +68,7 @@ fork 的原生 wheel 由 `.github/workflows/native-release.yml` 在 GitHub 免�
 工作流只能手动运行：推送（包括合并到 `main`）既不构建也不发布。手动运行要求工作流文件已经在默认分支 `main` 上。一次运行能否发布由 `fork/native/release/plan.sh` 判断，条件是：
 
 1. 运行在 `main` 上，并勾选了 `publish`。
-2. `VERSION` 是不带本地部分的 PEP 440 版本，并且形如 `<上游版本>.postN`。上游版本是被构建的提交历史中最新的上游发布 tag `vX.Y.Z`。
+2. `VERSION` 是不带本地部分的 PEP 440 版本，并且形如 `<上游版本>.postN`。上游版本是被构建的提交历史中最新的上游发布 tag `vX.Y.Z`。`fork/dev sync` 合并的是上游 `main`，不一定正好是这个 tag，所以 Release 说明另外写明 fork 合并的上游提交（被构建的提交与上游 `main` 的 merge base，与 `check_divergence.py` 的定义相同）以及它比该发布多出的提交数，例如 “at `<sha>` (v1.5.12 + 3 commits)”。
 3. tag `native-v<版本>` 还不存在。已发布的版本不会被重新构建或替换。
 4. 被构建的提交仍在 `main` 的历史中，并且 `.github/workflows` 与 `main` 的当前提交相同：GitHub 不允许 `GITHUB_TOKEN` 在工作流文件与默认分支不同的提交上创建 tag。
 
@@ -76,7 +76,7 @@ plan job 在构建之前检查全部条件，不满足时运行失败，不会�
 
 发布步骤（要发布的代码已经合并进 `main`，并且 fork CI 已经通过）：
 
-1. 确认 `fork/native/release/VERSION`。wheel 的版本为 `<版本>+cu130`，tag 为 `native-v<版本>`。基于上游 `vX.Y.Z` 的第一个 fork 版本是 `X.Y.Z.post1`，之后每次发布把 N 加一，例如基于上游 v1.5.12 时第一个版本是 `1.5.12.post1`；同步到新的上游发布后，下一个版本从新的 `.post1` 开始。需要修改时，像其他改动一样把修改合并进 `main`。在本地运行 `fork/native/release/plan.sh build` 会打印版本、上游基线以及发布运行会拒绝的原因（只读取远端，不需要 GitHub 权限；本地只写入 `FETCH_HEAD` 和取回的对象，不移动任何分支或远程跟踪分支）。
+1. 确认 `fork/native/release/VERSION`。wheel 的版本为 `<版本>+cu130`，tag 为 `native-v<版本>`。基于上游 `vX.Y.Z` 的第一个 fork 版本是 `X.Y.Z.post1`，之后每次发布把 N 加一，例如基于上游 v1.5.12 时第一个版本是 `1.5.12.post1`；同步到新的上游发布后，下一个版本从新的 `.post1` 开始。需要修改时，像其他改动一样把修改合并进 `main`。在本地运行 `fork/native/release/plan.sh build` 会打印版本、上游发布与合并的上游提交，以及发布运行会拒绝的原因（只读取远端，不需要 GitHub 权限；本地只写入 `FETCH_HEAD` 和取回的对象，不移动任何分支或远程跟踪分支）。
 2. 在 GitHub 上打开 Actions → Native Wheel Release → Run workflow，“Use workflow from” 选 `main`，勾选 `publish`，然后运行。不需要也不要手动推送 `native-v*` tag。
 3. 构建期间不要把修改 `.github/workflows` 的提交（例如上游同步）合并进 `main`，否则 release job 按条件 4 拒绝发布，需要在新的 `main` 上重新运行。
 4. 冷构建需要数小时。构建步骤超时或运行被取消时，工作流先停止构建容器，再把已经编译完成的结果存进 Actions 缓存；这次运行中 ccache 没有写入或使用任何条目（例如在编译之前就被停止）时不保存，以免这个几乎为空的条目在下次恢复时被选中。在 GitHub 上对这次运行选择 “Re-run all jobs”（推荐，plan 会在重新构建之前检查条件）或 “Re-run failed jobs”：新的尝试恢复同一提交最新的缓存，只编译缺少的部分，被停止时正在编译的单元重新编译。两种重新运行都会在发布前重新检查，tag 已经存在时拒绝发布。需要改代码才能修复时，把修复合并进 `main` 后重新运行工作流；这个版本还没有发布时不用改 `VERSION`。
