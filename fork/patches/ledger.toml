@@ -246,7 +246,7 @@ conflict_history = [
 id = "T10"
 title = "tied lm_head shares the embedding in full training"
 commits = ["5722fc7f"]
-switch = "always on for tie_word_embeddings models; LoRA/QLoRA unchanged"
+switch = "always on for tie_word_embeddings models, Gemma 3 configs without the key included; LoRA/QLoRA unchanged, except that Gemma 3 LoRA now aliases the frozen head to the embedding as the other tied models do"
 # Defect (upstream 282f9901, unchanged since 2580d6cc / 4ac6a3d8): in full training the IR's lm_head is a
 # trainable parameter of its own, while its gradient is the embedding's buffer (dsl_grad_store.cpp:104-113)
 # and the GPU optimizers skip a gradient pointer they have seen (adamw_8bit_optimizer.cpp:237-241,
@@ -260,6 +260,25 @@ switch = "always on for tie_word_embeddings models; LoRA/QLoRA unchanged"
 # dsl_model_weights.cpp:345/567/576); under cpu_training the shared master takes one CPU step
 # (adamw_8bit_optimizer.cpp:722-786) and the tied gradient has one host copy, so the CPU norm counts it
 # once (dsl_grad_store.cpp:797-806). Built for sm_120a without a GPU; behaviour is GPU-unverified.
+# Gemma 3 text models (Gemma3ForCausalLM, Gemma3TextModel): the official config.json files have no
+# tie_word_embeddings key (HF's Gemma3TextConfig defaults it to True), and upstream's declaration carried
+# none, so apply_declared_config_defaults (dsl_model.cpp:512-524) left TiedWordEmbeddings false and none of
+# the above applied: lm_head, mapped to model.embed_tokens.weight, trained as a second matrix and the
+# export wrote that tensor twice and threw. gemma3.py now declares tie_word_embeddings = True; an explicit
+# key in config.json still wins. Gemma3ForConditionalGeneration has no DSL model (not trainable natively).
+# Relies on, unedited (the pins check each): the lm_head gradient being the embedding's buffer
+# (dsl_grad_store.cpp DslGradStore ctor); the pointer dedupe in adamw_8bit_optimizer.cpp init_state,
+# adamw_optimizer.cpp and normuon_optimizer.cpp step/step_graph, dsl_model.cpp calculate_gradient_norm and
+# cpu_adamw.cpp cpu_gradient_norm_squared (the cpu_training norm over the shared host copy); the tie
+# resolution in pretrained_config.cpp load_pretrained_config, ir.cpp and dsl_model.cpp. These are not in
+# `files`, so the sync report does not group upstream commits to them under T10: a failing pin does.
+# Not fixed (pre-existing upstream, CPU replay only): dispatch-PP full training reads the `embedding`
+# gradient from stage 0's GPU and the `lm_head` gradient from the loss stage's GPU (py_train.cpp, stage s
+# on GPU s % ngpu) and memcpys both into GPU 0's one aliased buffer (dispatch_pp_write_grads,
+# dsl_model_execution.cpp:2431-2443), the later write winning. When (num_stages-1) % ngpu != 0 the tied
+# matrix gets only the head gradient and silently loses the embedding-lookup gradient (e.g. 28 layers on
+# 2 GPUs with SUROGATE_DISPATCH_STAGE_BLOCKS=14, or on 4/8 GPUs by default). Upstream never updated the
+# head in any configuration; T10's setup refusal does not fire (every GPU holds a full replica).
 files = [
     "csrc/src/runtime/dsl/dsl_param_store.h",
     "csrc/src/runtime/dsl/dsl_param_store.cpp",
@@ -268,6 +287,7 @@ files = [
     "csrc/src/runtime/dsl/dsl_model_weights.cpp",
     "csrc/src/runtime/dsl/dsl_grad_store.cpp",
     "csrc/src/runtime/optimizers/adamw_8bit_optimizer.cpp",
+    "surogate/dsl/models/gemma3.py",   # declares the tie the official Gemma 3 configs leave to HF's default
 ]
 fork_files = [
     "fork/native/cmake/fork_native.cmake",   # attaches the C++ test to dsl-run-state-tests (shared with T5)

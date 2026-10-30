@@ -1,12 +1,15 @@
 """Source pins of ledger topic T10 (tied lm_head in full training), runnable without CUDA.
 
-The fix edits upstream C++; the native suite (fork/native/tests/test-fork-tied-lm-head.cpp) and the TLC gate G2 check
-the behaviour on a GPU. These pins fail on a CPU-only machine when a sync drops or reshapes a hunk, or when upstream
-changes the code the fix relies on: the optimizers updating a shared gradient once, and the lm_head gradient being
-the embedding's. Each pin reads one function body, so moved lines do not matter.
+The fix edits upstream C++ and the Gemma 3 declaration; the native suite (fork/native/tests/test-fork-tied-lm-head.cpp)
+and the TLC gate G2 check the behaviour on a GPU. These pins fail on a CPU-only machine when a sync drops or reshapes a
+hunk, or when upstream changes the code the fix relies on: the optimizers and both gradient norms handling a shared
+gradient once, the lm_head gradient being the embedding's, and a missing tie_word_embeddings key resolving to the
+declaration. Each pin reads one function body, so moved lines do not matter.
 """
 
+import json
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -14,6 +17,58 @@ import pytest
 REPO = Path(__file__).resolve().parents[4]
 DSL = REPO / "csrc/src/runtime/dsl"
 OPTIMIZERS = REPO / "csrc/src/runtime/optimizers"
+
+#: google/gemma-3-270m-it's published config.json, as upstream's tests/serve/test_gemma3_convert.py records it
+#: (tests/test_gemma3_dsl.py checks that record against the published file). Like the other official Gemma 3 text
+#: checkpoints it writes no tie_word_embeddings key: HF's Gemma3TextConfig defaults the key to True.
+GEMMA3_270M_IT = {
+    "architectures": ["Gemma3ForCausalLM"],
+    "model_type": "gemma3_text",
+    "hidden_activation": "gelu_pytorch_tanh",
+    "attention_bias": False,
+    "attention_dropout": 0.0,
+    "attn_logit_softcapping": None,
+    "final_logit_softcapping": None,
+    "use_bidirectional_attention": False,
+    "rms_norm_eps": 1e-6,
+    "rope_scaling": None,
+    "rope_theta": 1000000.0,
+    "rope_local_base_freq": 10000.0,
+    "query_pre_attn_scalar": 256,
+    "max_position_embeddings": 32768,
+    "sliding_window": 512,
+    "_sliding_window_pattern": 6,
+    "layer_types": ["full_attention" if layer in (5, 11, 17) else "sliding_attention" for layer in range(18)],
+    "num_hidden_layers": 18,
+    "hidden_size": 640,
+    "intermediate_size": 2048,
+    "vocab_size": 262144,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 1,
+    "head_dim": 256,
+}
+
+#: google/embeddinggemma-300m's published config.json (Gemma3TextModel), as tests/test_gemma3_dsl.py records it.
+EMBEDDINGGEMMA_300M = {
+    "architectures": ["Gemma3TextModel"],
+    "model_type": "gemma3_text",
+    "_sliding_window_pattern": 6,
+    "head_dim": 256,
+    "hidden_activation": "gelu_pytorch_tanh",
+    "hidden_size": 768,
+    "intermediate_size": 1152,
+    "max_position_embeddings": 2048,
+    "num_attention_heads": 3,
+    "num_hidden_layers": 24,
+    "num_key_value_heads": 1,
+    "query_pre_attn_scalar": 256,
+    "rms_norm_eps": 1e-06,
+    "rope_local_base_freq": 10000.0,
+    "rope_theta": 1000000.0,
+    "sliding_window": 512,
+    "use_bidirectional_attention": True,
+    "vocab_size": 262144,
+}
 
 
 def body(path: Path, signature: str) -> str:
@@ -119,11 +174,15 @@ def test_cpu_training_steps_a_shared_master_once_and_counts_its_gradient_once():
     host = body(DSL / "dsl_grad_store.cpp", r"void DslGradStore::allocate_streaming_buffers\(")
     assert "mCpuGrads.emplace(name, shared->second);" in host
     assert "if (gpu_grad.Data) host_of_device.emplace(gpu_grad.Data, host);" in host
+    # The norm is taken over those host copies, so the shared one is counted once by cpu_adamw.cpp's pointer
+    # dedupe (pinned in test_upstream_still_sums_the_tied_gradient_and_updates_it_once).
+    assert "cpu_gradient_norm_squared(model.mGrads->get_cpu_grads_map(), model.mGrads->param_names())" in streaming
 
 
 def test_upstream_still_sums_the_tied_gradient_and_updates_it_once():
-    """What T10 relies on: the lm_head gradient is the embedding's buffer, and each GPU optimizer, and the device
-    gradient norm, visit a gradient pointer once. Without the skip, the shared matrix would take two steps."""
+    """What T10 relies on: the lm_head gradient is the embedding's buffer, and each GPU optimizer, the device
+    gradient norm and the cpu_training gradient norm visit a gradient pointer once. Without the skip, the shared
+    matrix would take two steps, or its gradient would count twice in the norm that clipping uses."""
     grads = body(DSL / "dsl_grad_store.cpp", r"DslGradStore::DslGradStore\(")
     assert "mGrads.emplace(name, emb_it->second);" in grads
     adamw8 = body(OPTIMIZERS / "adamw_8bit_optimizer.cpp", r"void AdamW8BitOptimizer::init_state\(")
@@ -134,3 +193,53 @@ def test_upstream_still_sums_the_tied_gradient_and_updates_it_once():
             assert "if (seen_grad_ptrs.count(grad->Data) > 0)" in update, (name, step)
     norm = body(DSL / "dsl_model.cpp", r"void DslModel::calculate_gradient_norm\(")
     assert "if (!seen_ptrs.insert(grad.Data).second) continue;" in norm
+    # cpu_training: T10 gives lm_head the embedding's host gradient copy (allocate_streaming_buffers); upstream's
+    # CPU norm skips a host pointer it has seen, which upstream itself never exercised (its host copies were distinct).
+    cpu_norm = body(OPTIMIZERS / "cpu_adamw.cpp", r"double cpu_gradient_norm_squared\(")
+    assert "if (seen.count(it->second.Data)) continue; seen.insert(it->second.Data);" in cpu_norm
+    assert cpu_norm.count("for (const auto& name : param_names)") == 1
+
+
+@pytest.mark.parametrize(
+    "config", [GEMMA3_270M_IT, EMBEDDINGGEMMA_300M], ids=["gemma-3-270m-it", "embeddinggemma-300m"]
+)
+def test_official_gemma3_configs_resolve_as_tied(config):
+    """T10 is gated on PretrainedConfig.TiedWordEmbeddings. The official Gemma 3 configs omit the key, so the native
+    trainer takes the value the DSL declaration carries (test below). Without tie_word_embeddings in
+    surogate/dsl/models/gemma3.py they resolved as untied: lm_head, mapped to the embedding tensor, was trained as a
+    second matrix, and the export wrote model.embed_tokens.weight twice and threw."""
+    sys.path.insert(0, str(REPO))
+    from surogate.dsl.ir_builder import build_dsl_ir_from_python, resolve_architecture
+
+    assert "tie_word_embeddings" not in config and "tie_embeddings" not in config
+    module = json.loads(build_dsl_ir_from_python(resolve_architecture(config), config))["modules"][0]
+    assert module["config"].get("tie_word_embeddings") is True
+    assert module["hf_mapping"]["lm_head"] == module["hf_mapping"]["embedding"]
+
+
+def test_a_missing_tie_resolves_to_the_declaration():
+    """What the Gemma 3 declaration relies on: load_pretrained_config marks the tie as specified only when
+    config.json has the key, the IR's module config is the declaration's, and DslModel takes the declared value for
+    an unspecified tie before it builds the stores that read the flag."""
+    loader = body(REPO / "csrc/src/config/pretrained_config.cpp", r"PretrainedConfig> load_pretrained_config\(")
+    assert (
+        'if (auto v = get_opt<bool>(config_json, "tie_word_embeddings")) { cfg->TiedWordEmbeddings = *v; '
+        "cfg->TiedWordEmbeddingsSpecified = true; }" in loader
+    )
+    assert loader.count("TiedWordEmbeddingsSpecified") == 1
+    ir = body(DSL / "ir.cpp", r"IRFile load_ir_from_json\(")
+    assert 'mod.config = parse_attr_map(mod_json["config"]);' in ir
+    declared = body(DSL / "dsl_model.cpp", r"void apply_declared_config_defaults\(")
+    assert (
+        "if (!cfg.TiedWordEmbeddingsSpecified) { if (const auto* value = internal::find_key(&module.config, "
+        '"tie_word_embeddings")) { if (auto tied = internal::as_bool(*value)) { cfg.TiedWordEmbeddings = *tied;'
+        in declared
+    )
+    model = body(DSL / "dsl_model.cpp", r"DslModel::DslModel\(")
+    resolved = model.index("apply_declared_config_defaults(*mConfig, *mModule);")
+    for built in (
+        "std::make_unique<DslParamStore>(",
+        "std::make_unique<DslGradStore>(",
+        "std::make_unique<DslWeightManager>(",
+    ):
+        assert resolved < model.index(built), built

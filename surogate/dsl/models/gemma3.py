@@ -281,6 +281,10 @@ def _build_gemma3_model(
     cls.sliding_window = sliding_window
     cls.query_pre_attn_scalar = query_pre_attn_scalar or head_size
     cls.causal = causal
+    # The mappings always tie lm_head, and the official config.json files omit the key
+    # (HF's class default is True). Declared so the native trainer resolves it as HF does
+    # (apply_declared_config_defaults in dsl_model.cpp) instead of as untied.
+    cls.tie_word_embeddings = True
     # Read back per layer type by dsl_model.cpp; Gemma 3's local layers use a
     # 100x smaller rope base than its global ones.
     cls.sliding_rope_theta = sliding_rope_theta
