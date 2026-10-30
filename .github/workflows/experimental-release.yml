@@ -1,5 +1,8 @@
 name: Experimental Trainer Release
 
+# A tag push builds, checks and publishes. A manual run (workflow_dispatch), on any
+# ref including an experimental-v* tag, only builds and checks: the release job
+# requires a push event.
 on:
   push:
     tags:
@@ -8,6 +11,11 @@ on:
 
 permissions:
   contents: read
+
+# Runs for one ref queue instead of racing each other to the same release.
+concurrency:
+  group: experimental-release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -71,7 +79,9 @@ jobs:
 
   release:
     needs: build
-    if: github.repository == 'CatMeow-233/surogate' && startsWith(github.ref, 'refs/tags/experimental-v')
+    if: >-
+      github.repository == 'CatMeow-233/surogate' && github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/tags/experimental-v')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -84,6 +94,15 @@ jobs:
       - name: Verify downloaded artifacts
         working-directory: experimental-artifacts
         run: sha256sum --check SHA256SUMS
+      # A published release is never replaced. Existing assets must equal this
+      # run's bytes (a re-run of this job completing a partial upload); anything
+      # else fails here, before the release or its notes are touched.
+      - name: Refuse to replace published assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 fork/experimental/release_guard.py --repository "$GITHUB_REPOSITORY"
+          --tag "$GITHUB_REF_NAME" --artifacts experimental-artifacts
       - name: Publish the fork's experimental prerelease
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
@@ -95,4 +114,5 @@ jobs:
           prerelease: true
           make_latest: false
           fail_on_unmatched_files: true
+          overwrite_files: false
           files: experimental-artifacts/*

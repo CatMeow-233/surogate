@@ -45,7 +45,7 @@
 
 ## 发布实验版本
 
-`surogate-experimental` 的版本号写死在 `fork/experimental/pyproject.toml` 中，tag 必须是 `experimental-v<版本>`。推送这个 tag 会运行 `.github/workflows/experimental-release.yml`，它重新测试、构建并发布预发布 Release。在 `main` 上按顺序操作：
+`surogate-experimental` 的版本号写死在 `fork/experimental/pyproject.toml` 中，tag 必须是 `experimental-v<版本>`。推送这个 tag 会运行 `.github/workflows/experimental-release.yml`，它重新测试、构建并发布预发布 Release。手动触发（包括在 `experimental-v*` tag 上手动运行）只构建和检查，不发布。已发布的 Release 不会被替换：发布前 `fork/experimental/release_guard.py` 检查这个 tag 是否已有 Release，已有资产必须与本次构建逐字节相同，此时只补传缺失的资产（重新运行同一次运行中失败的 release job 可以补完中途中断的上传），否则 job 失败。构建产物带时间戳，重新构建同一提交也会得到不同的 SHA-256，所以要修正已发布的版本只能发布新版本号。在 `main` 上按顺序操作：
 
 1. 更新版本号：`git grep -n '<旧版本>' -- fork/experimental` 列出所有写有版本号的地方（`fork/experimental/pyproject.toml`，`fork/experimental/README.md` 与 `fork/experimental/docs/training.md` 中的下载文件名，以及 `fork/experimental/RELEASE_NOTES.md`），全部改为新版本。
 2. 改写 `fork/experimental/RELEASE_NOTES.md`：它就是 Release 的正文。
