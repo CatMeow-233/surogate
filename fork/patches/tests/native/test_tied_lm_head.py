@@ -9,6 +9,7 @@ reads one function body, so moved lines do not matter.
 """
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -19,9 +20,13 @@ REPO = Path(__file__).resolve().parents[4]
 DSL = REPO / "csrc/src/runtime/dsl"
 OPTIMIZERS = REPO / "csrc/src/runtime/optimizers"
 
-#: google/gemma-3-270m-it's published config.json, as upstream's tests/serve/test_gemma3_convert.py records it
-#: (tests/test_gemma3_dsl.py checks that record against the published file). Like the other official Gemma 3 text
-#: checkpoints it writes no tie_word_embeddings key: HF's Gemma3TextConfig defaults the key to True.
+#: google/gemma-3-270m-it's published config.json, copied from the record in upstream's
+#: tests/serve/test_gemma3_convert.py. No test checks that record against the published file:
+#: tests/test_gemma3_dsl.py compares its own 17-key subset (GEMMA3_270M_CONFIG) key by key, and only when the gated
+#: checkpoint is cached, and no upstream test checks that the tie key is absent. That absence (HF's
+#: Gemma3TextConfig defaults tie_word_embeddings to True, so the official files omit it) is what the Gemma 3
+#: declaration exists for; test_the_published_gemma3_configs_still_omit_the_tie checks it when the checkpoints are
+#: cached, and is skipped otherwise (always in fork CI, which runs offline).
 GEMMA3_270M_IT = {
     "architectures": ["Gemma3ForCausalLM"],
     "model_type": "gemma3_text",
@@ -49,7 +54,9 @@ GEMMA3_270M_IT = {
     "head_dim": 256,
 }
 
-#: google/embeddinggemma-300m's published config.json (Gemma3TextModel), as tests/test_gemma3_dsl.py records it.
+#: google/embeddinggemma-300m's published config.json (Gemma3TextModel), copied from tests/test_gemma3_dsl.py's
+#: EMBEDDINGGEMMA_CONFIG. That test compares its record with the published file key by key (all keys but
+#: architectures) when the checkpoint is cached; it does not check that the tie key is absent.
 EMBEDDINGGEMMA_300M = {
     "architectures": ["Gemma3TextModel"],
     "model_type": "gemma3_text",
@@ -228,6 +235,26 @@ def test_official_gemma3_configs_resolve_as_tied(config):
     module = json.loads(build_dsl_ir_from_python(resolve_architecture(config), config))["modules"][0]
     assert module["config"].get("tie_word_embeddings") is True
     assert module["hf_mapping"]["lm_head"] == module["hf_mapping"]["embedding"]
+
+
+def hub_cache() -> Path:
+    """The Hugging Face hub cache, as huggingface_hub locates it."""
+    if os.environ.get("HF_HUB_CACHE"):
+        return Path(os.environ["HF_HUB_CACHE"])
+    return Path(os.environ.get("HF_HOME", "~/.cache/huggingface")).expanduser() / "hub"
+
+
+@pytest.mark.parametrize("repo", ["gemma-3-270m-it", "embeddinggemma-300m"])
+def test_the_published_gemma3_configs_still_omit_the_tie(repo):
+    """The premise of the Gemma 3 declaration, checked against the published file when it is cached (the repos are
+    gated). If Google starts writing the key, the native trainer reads it from config.json and the declaration only
+    matters for older snapshots: update the errata and the ledger T10 notes, which say the official files omit it."""
+    published = sorted((hub_cache() / f"models--google--{repo}" / "snapshots").glob("*/config.json"))
+    if not published:
+        pytest.skip(f"google/{repo} not cached (gated repo)")
+    for path in published:
+        config = json.loads(path.read_text(encoding="utf-8"))
+        assert "tie_word_embeddings" not in config and "tie_embeddings" not in config, path
 
 
 def test_a_missing_tie_resolves_to_the_declaration():
