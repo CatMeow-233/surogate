@@ -6,13 +6,20 @@ softprops/action-gh-release and ``draft: true``, between two calls of this scrip
 
   release_guard.py absent --repository R --tag T
       Before the upload: exit 0 only when no release exists for T, published or draft. A published
-      version is never replaced, completed or rebuilt (a rebuild has new SHA-256 values: the builds
-      carry timestamps), and a draft left by a failed run is deleted by hand first: it was never
-      public, so a new run may publish the same version.
+      release's files are never replaced, and it is never deleted and published again under the same
+      version (a rebuild has new SHA-256 values: the builds carry timestamps): publish a new version.
+      The one exception is a public release that is missing files (made by hand, or by a workflow from
+      before drafts); the owner may complete it by hand with the original run's artefact, checked
+      against its SHA256SUMS (fork/docs/build-and-release.md, section 一个版本只发布一次). A draft
+      left by a failed run is deleted by hand first: it was never public, so a new run may publish
+      the same version.
   release_guard.py publish --repository R --tag T --release-id ID --artifacts DIR
       After the upload: release ID must be a draft for T whose assets are exactly the files in DIR,
       uploaded completely and byte-identical (SHA-256) to them. Then publish it (draft false; it stays
       a prerelease and is not marked latest). Anything else fails and leaves the draft unpublished.
+      When the publish request reports an error, GitHub may still have applied it (a 5xx or a dropped
+      connection after the server committed), so the release is read again and its real state is
+      reported: still a draft (exit 1), published (exit 0, with a warning) or unknown (exit 1).
 
 Publishing the draft creates the tag at the release's target commit when the tag does not exist yet
 (native-v*); an experimental-v* tag was pushed before the run and stays where it is.
@@ -119,9 +126,12 @@ def absent(arguments: argparse.Namespace) -> int:
         kind = "draft" if release.get("draft") else "published"
         print(f"  release {release.get('id')} ({kind}): {release.get('html_url', '')}", file=sys.stderr)
     print(
-        "A published version is never replaced or completed: publish a new version. A draft is what a\n"
-        "failed run leaves; it was never public: delete it (gh release delete <tag> -R <repository>,\n"
-        "without --cleanup-tag) and run the release again.",
+        "A published release's files are never replaced, and it is never deleted and published again\n"
+        "under the same version: publish a new version. The one exception is a published release that is\n"
+        "missing files (made by hand, or by a workflow from before drafts): complete it by hand with the\n"
+        "original run's artefact, checked against its SHA256SUMS (fork/docs/build-and-release.md, section\n"
+        "一个版本只发布一次). A draft is what a failed run leaves; it was never public: delete it\n"
+        "(gh release delete <tag> -R <repository>, without --cleanup-tag) and run the release again.",
         file=sys.stderr,
     )
     return 1
@@ -140,21 +150,55 @@ def publish(arguments: argparse.Namespace) -> int:
             print(f"  {problem}", file=sys.stderr)
         print("The draft was never public: delete it and run the release again.", file=sys.stderr)
         return 1
+    count = len(release.get("assets", []))
     try:
         published = json.loads(gh_api("-X", "PATCH", path, "-F", "draft=false", "-f", "make_latest=false"))
     except GhError as error:
-        print(f"::error::publishing draft release {arguments.release_id} failed: {error}", file=sys.stderr)
-        print("Its files are verified; it stays a draft. See fork/docs/build-and-release.md.", file=sys.stderr)
-        return 1
+        print(f"::error::the request to publish draft release {arguments.release_id} failed: {error}", file=sys.stderr)
+        return after_failed_publish(arguments, path, count)
     if published.get("draft") is not False or published.get("tag_name") != arguments.tag:
         print(
             f"::error::release {arguments.release_id} did not become a published release for {arguments.tag}",
             file=sys.stderr,
         )
         return 1
-    count = len(release.get("assets", []))
     print(f"Published {arguments.tag} with {count} verified files: {published.get('html_url', '')}")
     return 0
+
+
+def after_failed_publish(arguments: argparse.Namespace, path: str, count: int) -> int:
+    """The publish request reported an error, but GitHub may have applied it anyway (a 5xx or a
+    dropped connection after the server committed). Read the release again and report what it is."""
+    check = f"gh release view {arguments.tag} -R {arguments.repository} --json isDraft --jq .isDraft"
+    try:
+        current = json.loads(gh_api(path))
+    except (GhError, json.JSONDecodeError) as error:
+        print(
+            f"::error::cannot read release {arguments.release_id} again ({error}); it may already be public.\n"
+            f"Delete it only after `{check}` prints true. See fork/docs/build-and-release.md.",
+            file=sys.stderr,
+        )
+        return 1
+    if current.get("draft") is True:
+        print(
+            f"Release {arguments.release_id} is still a draft and was never public; its files are verified.\n"
+            "See fork/docs/build-and-release.md.",
+            file=sys.stderr,
+        )
+        return 1
+    if current.get("draft") is False and current.get("tag_name") == arguments.tag:
+        print(
+            f"::warning::the publish request reported an error, but GitHub published release "
+            f"{arguments.release_id}: {arguments.tag} is public. Do not delete it."
+        )
+        print(f"Published {arguments.tag} with {count} verified files: {current.get('html_url', '')}")
+        return 0
+    print(
+        f"::error::release {arguments.release_id} is now draft={current.get('draft')!r}, "
+        f"tag {current.get('tag_name')!r}; it may be public. Do not delete it before `{check}` prints true.",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def main(argv: list[str] | None = None) -> int:

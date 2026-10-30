@@ -16,7 +16,9 @@ TAG = "experimental-v9.9.9"
 FILES = {"package.whl": b"wheel bytes", "SHA256SUMS": b"sums", "README.md": b"readme"}
 
 # Stands in for the GitHub CLI. State is a JSON file: {"releases": [...], "fail": {...}, "patched": ...};
-# asset i serves the bytes of file assets/<i>. Every call is logged.
+# asset i serves the bytes of file assets/<i>. Every call is logged. fail keys: list, download, patch
+# (refused, nothing changes), patch_applied (published, then an error) and reread (reading the release
+# fails once it was published).
 FAKE_GH = f"""#!{sys.executable}
 import json, os, re, sys
 from pathlib import Path
@@ -39,6 +41,8 @@ elif len(args) == 1 and (m := re.fullmatch(r"repos/owner/name/releases/(\\d+)", 
     release = next((r for r in state["releases"] if r["id"] == int(m.group(1))), None)
     if release is None:
         fail(404)
+    if "reread" in state["fail"] and state.get("patched"):
+        fail(state["fail"]["reread"])
     print(json.dumps(release))
 elif args[:2] == ["-H", "Accept: application/octet-stream"]:
     asset = args[2].removeprefix("repos/owner/name/releases/assets/")
@@ -51,7 +55,10 @@ elif args[:2] == ["-X", "PATCH"] and args[3:] == ["-F", "draft=false", "-f", "ma
     release_id = int(args[2].removeprefix("repos/owner/name/releases/"))
     release = next(r for r in state["releases"] if r["id"] == release_id)
     release["draft"] = False
+    state["patched"] = True
     state_file.write_text(json.dumps(state))
+    if "patch_applied" in state["fail"]:  # the server published it, then the response was lost
+        fail(state["fail"]["patch_applied"])
     print(json.dumps(release))
 else:
     sys.exit(f"unexpected gh api call: {{args}}")
@@ -219,6 +226,38 @@ def test_api_failures_leave_the_draft_unpublished(github, fail):
     assert result.returncode == 1
     assert f"HTTP {next(iter(fail.values()))}" in result.stderr and "Traceback" not in result.stderr
     assert releases[0]["draft"] is True
+
+
+def test_a_refused_publish_request_is_checked_against_the_release(github):
+    draft = release(7, assets=uploaded(github))
+    result, calls, releases = github(publish_arguments(github), [draft], fail={"patch": 422})
+    assert result.returncode == 1
+    assert "is still a draft and was never public" in result.stderr
+    assert releases[0]["draft"] is True
+    assert calls[-1] == ["api", "repos/owner/name/releases/7"]  # read again after the failed PATCH
+
+
+def test_a_publish_request_github_applied_despite_an_error_is_reported_as_published(github):
+    """A 5xx after the server committed: the release is public, and the owner must not delete it."""
+    draft = release(7, assets=uploaded(github))
+    result, calls, releases = github(publish_arguments(github), [draft], fail={"patch_applied": 502})
+    assert result.returncode == 0, result.stderr
+    assert "HTTP 502" in result.stderr
+    assert "experimental-v9.9.9 is public. Do not delete it." in result.stdout
+    assert "Published experimental-v9.9.9 with 3 verified files" in result.stdout
+    assert "still a draft" not in result.stdout + result.stderr
+    assert releases[0]["draft"] is False
+    assert calls[-1] == ["api", "repos/owner/name/releases/7"]
+
+
+def test_an_unknown_state_after_a_failed_publish_request_is_not_called_a_draft(github):
+    fail = {"patch_applied": 502, "reread": 503}
+    result, _, releases = github(publish_arguments(github), [release(7, assets=uploaded(github))], fail=fail)
+    assert result.returncode == 1
+    assert "it may already be public" in result.stderr and "HTTP 503" in result.stderr
+    assert "gh release view experimental-v9.9.9 -R owner/name --json isDraft --jq .isDraft" in result.stderr
+    assert "still a draft" not in result.stderr and "Traceback" not in result.stderr
+    assert releases[0]["draft"] is False
 
 
 def test_the_digest_of_the_downloaded_bytes_is_compared(github):
