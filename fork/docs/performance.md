@@ -157,7 +157,7 @@ team 因而不超过调用线程掩码中的 CPU 数；同一组 CPU 上的几�
 ```bash
 csrc/build/integration-tests '[fp8][recipe]'
 csrc/build/integration-tests '[lora][fused-dx]'
-csrc/build/integration-tests '[moe][gemm][wgrad-zero]'
+csrc/build/integration-tests '[wgrad-zero]'
 csrc/build/dsl-run-state-tests '[dispatch-pp][host-copy]'
 ```
 
