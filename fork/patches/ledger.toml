@@ -347,15 +347,17 @@ switch = "always on for tie_word_embeddings models, Gemma 3 configs without the 
 # (a) Unedited functions in T10's own files, so the sync report groups upstream commits to them under T10:
 # the lm_head gradient being the embedding's buffer (dsl_grad_store.cpp DslGradStore ctor) and the pointer
 # dedupe in adamw_8bit_optimizer.cpp init_state.
-# (b) Files outside `files`, where only a failing pin signals an upstream change: the pointer dedupe in
-# adamw_optimizer.cpp and normuon_optimizer.cpp step/step_graph, dsl_model.cpp calculate_gradient_norm and
-# cpu_adamw.cpp cpu_gradient_norm_squared (the cpu_training norm over the shared host copy); the tie
-# resolution in pretrained_config.cpp load_pretrained_config, ir.cpp load_ir_from_json and dsl_model.cpp
-# apply_declared_config_defaults; the tied fallback in dsl_weight_loader.cpp DslWeightLoader::load_direct
-# (a missing lm_head.weight reads the embedding), which reloads T10 exports where the head has its own
-# storage (QLoRA, LoRA with the weight manager); and the dispatch-PP gradient collection the refusal below
-# replays (dsl_model_execution.cpp dispatch_pp_read_block_grads/dispatch_pp_write_grads; py_train.cpp
-# dispatch_pp_train_step_multigpu, whose upstream commits the report groups under T1).
+# (b) Files outside T10's `files`: the report never groups their upstream commits under T10, so a failing
+# pin is T10's signal. Two of them belong to other topics, whose groups list their commits: cpu_adamw.cpp
+# (T5) and py_train.cpp (T1). The code: the pointer dedupe in adamw_optimizer.cpp and normuon_optimizer.cpp
+# step/step_graph, dsl_model.cpp calculate_gradient_norm and cpu_adamw.cpp cpu_gradient_norm_squared (the
+# cpu_training norm over the shared host copy); the tie resolution in pretrained_config.cpp
+# load_pretrained_config, ir.cpp load_ir_from_json and dsl_model.cpp apply_declared_config_defaults; the
+# tied fallback in dsl_weight_loader.cpp DslWeightLoader::load_direct (a missing lm_head.weight reads the
+# embedding), which reloads T10 exports where the head has its own storage (QLoRA, LoRA with the weight
+# manager); and the dispatch-PP gradient collection the refusal below replays
+# (dsl_model_execution.cpp dispatch_pp_read_block_grads/dispatch_pp_write_grads; py_train.cpp
+# dispatch_pp_train_step_multigpu).
 # Refused, not fixed (pre-existing upstream, CPU replay only): dispatch-PP full training reads the
 # `embedding` gradient from stage 0's GPU and the `lm_head` gradient from the loss stage's GPU (py_train.cpp
 # dispatch_pp_train_step_multigpu, stage s on GPU s % ngpu) and memcpys both into GPU 0's one aliased buffer
