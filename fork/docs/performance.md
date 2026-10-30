@@ -87,7 +87,7 @@ team 因而不超过调用线程掩码中的 CPU 数；同一组 CPU 上的几�
 - 修复前 toy 负载的两个 R=2 格是 5 次有效运行的中位数：第一版测量程序在 rank 的结果不同时中止，第 2 轮的这两次因此没有计时，之后又补测了 3 轮。
 - 所有配置中，更新后的 master 与两份矩逐位相同（FNV 哈希一致）。
 
-阈值的测量：K 个 N 元素的张量（共约 4M 元素），串行构建对比总是开 team 的构建（`-DSUROGATE_FORK_OMP_MIN_PARALLEL_ELEMS=0`，team 按上面的规则确定）；“热”是 libgomp 默认的等待（worker 在并行区之间空转），“冷”是 `GOMP_SPINCOUNT=0`（worker 每次都要唤醒）。数字是 AdamW 更新的总耗时，串行 → 并行，单位 ms：
+阈值的测量：K 个 N 元素的张量（共约 4M 元素），串行构建对比总是开 team 的构建（`-DSUROGATE_FORK_OMP_MIN_PARALLEL_ELEMS=0`，team 按上面的规则确定）；“热”是 libgomp 默认的等待（worker 在并行区之间空转），“冷”是 `GOMP_SPINCOUNT=0`（worker 每次都要唤醒）。每格是一次运行（6 步的中位数），串行 → 并行，单位 ms。先是 AdamW 更新的耗时：
 
 | N | 2 个 CPU，热 | 2 个 CPU，冷 | 4 个 CPU，热 | 4 个 CPU，冷 |
 |---:|---:|---:|---:|---:|
@@ -97,13 +97,23 @@ team 因而不超过调用线程掩码中的 CPU 数；同一组 CPU 上的几�
 | 65536 | 17.8 → 11.3 | 17.2 → 10.4 | 16.9 → 9.3 | 17.5 → 8.2 |
 | 131072 | 17.7 → 11.4 | 17.6 → 12.1 | 17.6 → 6.0 | 18.7 → 7.6 |
 
-65536 是 4 种条件下并行更新都快于串行的最小 2 的幂；更小的张量在 worker 已睡眠时并行反而更慢（4096 元素时慢 2–4 倍）。范数每个元素的计算量更小：65536 元素时，热的情况下并行更快（4.2 → 3.3 ms，2 个 CPU），冷的情况下与串行相差在 ±12% 以内。
+再是整步（范数 + 更新）的耗时：
 
-复现：`fork/native/bench/cpu-optimizer/run.sh <已配置的 csrc 构建目录>` 用该目录 `compile_commands.json` 中 `cpu_adamw.cpp` 的编译命令编译带与不带 OpenMP 的两份对象并运行上表的配置；`CPU_ADAMW_SRC=<(git show 9a6018f2:csrc/src/runtime/optimizers/cpu_adamw.cpp)` 编译修复前的源码（T5 只链接了 OpenMP，没有改这个文件），`CONFIGS` 换成其他配置（例如阈值测量用的 `flat:N:K` 形状）。尚未在真实的多路主机上测量；GPU 主机上的端到端优化器步耗时也未测量。
+| N | 2 个 CPU，热 | 2 个 CPU，冷 | 4 个 CPU，热 | 4 个 CPU，冷 |
+|---:|---:|---:|---:|---:|
+| 4096 | 21.7 → 18.8 | 20.9 → 41.8 | 20.6 → 12.6 | 23.0 → 78.2 |
+| 16384 | 21.0 → 14.0 | 20.4 → 19.7 | 22.0 → 17.4 | 22.5 → 28.5 |
+| 32768 | 23.1 → 11.8 | 21.4 → 16.9 | 20.2 → 11.0 | 22.1 → 26.6 |
+| 65536 | 21.9 → 14.6 | 21.4 → 13.9 | 20.9 → 11.6 | 21.6 → 12.9 |
+| 131072 | 22.0 → 14.8 | 21.7 → 16.6 | 21.6 → 8.0 | 24.8 → 11.7 |
+
+阈值按整步选取：65536 是 4 种条件下整步都快于串行的最小 2 的幂。只看更新，32768 在 4 种条件下已经都更快；但在 32768 元素、4 个 CPU、冷的情况下，范数从 4.00 ms 变成 10.97 ms，整步反而更慢（22.1 → 26.6 ms）。每格只测了一次，32768 与 65536 的差别在这台共享虚拟机的噪声范围内，选 65536 偏保守。更小的张量在 worker 已睡眠时并行反而更慢（4096 元素时更新慢 2–4 倍）。范数每个元素的计算量更小：65536 元素时，热的情况下并行更快（2 个 CPU 4.2 → 3.3 ms，4 个 CPU 4.0 → 2.3 ms），冷的情况下相对串行在 −9%（2 个 CPU，4.09 → 3.73 ms）到 +13.5%（4 个 CPU，4.08 → 4.63 ms）之间。
+
+复现：`run.sh` 读取构建目录中的 `compile_commands.json`，`make configure` 不生成它，因此先运行 `make configure`，再运行 `cmake -S csrc -B csrc/build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON`。`fork/native/bench/cpu-optimizer/run.sh csrc/build` 用其中 `cpu_adamw.cpp` 的编译命令，把同一份源码编译成带 OpenMP（`openmp`）和去掉 `-fopenmp`（`serial`）的两份对象，并运行上表的配置。用检出的源码时，`openmp` 是“修复后”，`serial` 是这份源码的串行构建（范数仍按分块顺序求和）；加上 `CPU_ADAMW_SRC=<(git show 9a6018f2:csrc/src/runtime/optimizers/cpu_adamw.cpp)` 则编译修复前的源码（T5 只链接了 OpenMP，没有改这个文件），这时 `serial` 是“串行（T5 之前）”，`openmp` 是“OpenMP 默认（修复前）”。`CONFIGS` 换成其他配置（例如阈值测量用的 `flat:N:K` 形状）。尚未在真实的多路主机上测量；GPU 主机上的端到端优化器步耗时也未测量。
 
 ### OpenMP 测试
 
-独立的回归测试用 `fork/dev test openmp` 运行，需要 C++ 编译器和 OpenMP，但不需要 GPU 或 CUDA 头文件。`training-openmp-contract` 检查训练用的 OpenMP 辅助函数能让一个真实的双 worker 主机库生效，并得到精确的整数输出；运行时的线程数限制可能导致显式跳过。`training-openmp-team` 用同样的编译选项编译 `omp_team.h`，检查阈值、绑定线程的线程数及其 team 线程的掩码、共用与不相交掩码的分配规则，以及 `ordered_block_sum` 在 1–4 个线程下与串行分块顺序逐位相同。这两个测试都不编译 CUDA 训练库；`cpu_adamw.cpp` 中的并行区由源码 pin `fork/patches/tests/native/test_cpu_adamw_openmp.py`（`fork/dev test patches`）检查。
+独立的回归测试用 `fork/dev test openmp` 运行，需要 C++ 编译器和 OpenMP，但不需要 GPU 或 CUDA 头文件。`training-openmp-contract` 检查训练用的 OpenMP 辅助函数能让一个真实的双 worker 主机库生效，并得到精确的整数输出；运行时的线程数限制可能导致显式跳过。`training-openmp-team` 用同一个 OpenMP 辅助函数（`surogate_enable_training_openmp()`）编译 `omp_team.h`（该测试不设构建类型，优化级别与训练库的 `-O3` 不同），检查阈值、绑定线程的线程数及其 team 线程的掩码、共用与不相交掩码的分配规则，以及 `ordered_block_sum` 在 1–4 个线程下与串行分块顺序逐位相同。这两个测试都不编译 CUDA 训练库；`cpu_adamw.cpp` 中的并行区由源码 pin `fork/patches/tests/native/test_cpu_adamw_openmp.py`（`fork/dev test patches`）检查。
 
 ## RTX 5090 32 GB：稠密与 MoE 微调
 

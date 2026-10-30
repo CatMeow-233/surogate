@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # Times the cpu_training optimizer step (pinbench.cpp) with rank threads pinned the way NVML pins them, against
-# cpu_adamw.cpp compiled with the trainer's own compile command: once as compiled (OpenMP, ledger T5) and once
-# without -fopenmp (upstream's serial build). Prints one line per run; fork/docs/performance.md ("CPU 优化器并行")
-# records the results and the host. No GPU is needed, only the CUDA headers the configured build uses.
+# cpu_adamw.cpp compiled with the trainer's own compile command: once as compiled (build=openmp, ledger T5) and
+# once without -fopenmp (build=serial: the same source without OpenMP, which for the checkout's source still sums
+# the norm in T5's block order). Upstream's serial build and the OpenMP build before T5 sized its teams are the
+# two builds of the pre-fix source: CPU_ADAMW_SRC=<(git show 9a6018f2:csrc/src/runtime/optimizers/cpu_adamw.cpp).
+# Prints one line per run; fork/docs/performance.md ("CPU 优化器并行") records the results and the host. No GPU
+# is needed, only the CUDA headers the configured build uses.
 #
 # usage: fork/native/bench/cpu-optimizer/run.sh BUILD_DIR [OUT_DIR]
-#   BUILD_DIR  a configured csrc build directory with compile_commands.json (CMAKE_EXPORT_COMPILE_COMMANDS=ON)
+#   BUILD_DIR  a csrc build directory configured with -DCMAKE_EXPORT_COMPILE_COMMANDS=ON, which `make configure`
+#              does not pass: run `cmake -S csrc -B BUILD_DIR -DCMAKE_EXPORT_COMPILE_COMMANDS=ON` after it
 #   OUT_DIR    objects and binaries (default: a new directory under ${TMPDIR:-/tmp})
 # environment:
 #   CPU_ADAMW_SRC=<file>  compile this cpu_adamw.cpp instead of the checkout's, e.g. an older revision:
@@ -18,6 +22,11 @@ set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT=$(cd "$HERE/../../../.." && pwd)
 BUILD=$(cd "${1:?usage: run.sh BUILD_DIR [OUT_DIR]}" && pwd)
+[[ -f $BUILD/compile_commands.json ]] || {
+    echo "run.sh: $BUILD has no compile_commands.json;" \
+        "run: cmake -S csrc -B $BUILD -DCMAKE_EXPORT_COMPILE_COMMANDS=ON" >&2
+    exit 1
+}
 OUT=${2:-$(mktemp -d "${TMPDIR:-/tmp}/cpu-optimizer-bench.XXXXXX")}
 mkdir -p "$OUT"
 SRC=${CPU_ADAMW_SRC:-$ROOT/csrc/src/runtime/optimizers/cpu_adamw.cpp}
