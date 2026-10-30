@@ -266,6 +266,8 @@ switch = "always on for tie_word_embeddings models, Gemma 3 configs without the 
 # the above applied: lm_head, mapped to model.embed_tokens.weight, trained as a second matrix and the
 # export wrote that tensor twice and threw. gemma3.py now declares tie_word_embeddings = True; an explicit
 # key in config.json still wins. Gemma3ForConditionalGeneration has no DSL model (not trainable natively).
+# GPU-unverified; the [tied-head] and TLC G2 gates do not take this path (hand-built graph; explicit key and
+# lm_head.weight mapping), so the errata's verification paragraph gives a separate Gemma 3 full-training check.
 # Relies on upstream code the fork does not edit (the pins check each), in two groups:
 # (a) Unedited functions in T10's own files, so the sync report groups upstream commits to them under T10:
 # the lm_head gradient being the embedding's buffer (dsl_grad_store.cpp DslGradStore ctor) and the pointer

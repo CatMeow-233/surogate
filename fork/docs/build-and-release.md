@@ -49,7 +49,7 @@
 
 1. 更新版本号：`git grep -n '<旧版本>' -- fork/experimental` 列出所有写有版本号的地方（`fork/experimental/pyproject.toml`，`fork/experimental/README.md` 与 `fork/experimental/docs/training.md` 中的下载文件名，以及 `fork/experimental/RELEASE_NOTES.md`），全部改为新版本。
 2. 改写 `fork/experimental/RELEASE_NOTES.md`：它就是 Release 的正文。
-3. 在 GPU 主机上运行 `fork/dev test gpu`。整理后的 fork 原生 C++ 用例（`fork/native/tests`）、GRPO 周期计时指标和 T10 的 tied LM head 修复只在没有 GPU 的环境中验证过编译和 CPU 行为，下一个实验 tag 之前必须在 GPU 上通过一次（T10 还要通过 TLC 运行手册 G2 的 `test_g2_tied_head_trains_as_the_embedding`）；结果记在对应 topic（T1–T4、T6、T10）的 `conflict_history` 中。
+3. 在 GPU 主机上运行 `fork/dev test gpu`。整理后的 fork 原生 C++ 用例（`fork/native/tests`）、GRPO 周期计时指标和 T10 的 tied LM head 修复只在没有 GPU 的环境中验证过编译和 CPU 行为，下一个实验 tag 之前必须在 GPU 上通过一次（T10 还要通过 TLC 运行手册 G2 的 `test_g2_tied_head_trains_as_the_embedding`，并做 [upstream-errata.md](upstream-errata.md#全量训练时-tied-的-lm-head-停在初始值fork-已修复ledger-t10) 验证段中 Gemma 3 的全量训练检查：这两项测试都不经过 Gemma 3 的路径）；结果记在对应 topic（T1–T4、T6、T10）的 `conflict_history` 中。
 4. 运行 `fork/dev test experimental` 和 `fork/dev release experimental --tag experimental-v<新版本>`，确认测试通过、产物能构建。
 5. 提交并推送 `main`，等 fork CI 通过。
 6. 只推送这一个 tag：
