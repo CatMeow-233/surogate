@@ -132,10 +132,10 @@ git log --oneline HEAD..MERGE_HEAD -- <文件>                # 上游改了什�
 ### T3 MoE backward scratch 与条件清零
 
 - 文件：`csrc/src/runtime/ops/moe_grouped_gemm.cpp`。
-- 改动：包含 `fork/native/include/surogate_fork/moe_weight_grad_policy.h`（写作 `#include "surogate_fork/moe_weight_grad_policy.h"`）；基础专家权重梯度只在 `moe_weight_grad_needs_zero()` 判定需要时清零；backward 不再分配未使用的 FP8 输入量化缓冲。
-- 反向回放：2/0/0。
-- 解决：保留上游，重新加上 include 行和清零条件。只有在上游 backward 仍不使用 `ctx.inp_quant` 时才删去那段缓冲分配。
-- 测试：`fork/native/tests/test-fork-moe-grouped-gemm.cu`（`[wgrad-zero]`）。
+- 改动：包含 `fork/native/include/surogate_fork/moe_weight_grad.h`（写作 `#include "surogate_fork/moe_weight_grad.h"`）；`CompiledExecutor::backward_moe_base_weights()` 从形状检查开始的部分（dtype 映射、清零、逐 expert 的 `cublasGemmEx` 循环）移到 `fork/native/src/moe_weight_grad.cpp` 的 `dsl::moe_base_weight_grad()`，由 `fork_native.cmake` 编译进 `surogate-common`，原处只留一次调用；其中清零改为只在 `moe_weight_grad_needs_zero()` 判定需要时执行（上游在不累加时总是清零）；backward 不再分配未使用的 FP8 输入量化缓冲。
+- 反向回放：2/0/0（移动循环前后相同）。
+- 解决：保留上游，重新加上 include 行，再把 `ensure_output_tensor()` 与 `store_tensor()` 之间的代码换回 `accumulate` 的计算和对 `moe_base_weight_grad()` 的调用。上游修改了移走的那些行（形状检查、dtype、GEMM 参数或循环）时，冲突出现在这个 hunk：把上游的修改移植到 `fork/native/src/moe_weight_grad.cpp`，并确认每个有 token 的 expert 仍由一次 beta 为零的 GEMM 写满整个 rows×cols 块；做不到时把清零条件改回上游的 `!accumulate`。只有在上游 backward 仍不使用 `ctx.inp_quant` 时才删去那段缓冲分配。
+- 测试：`fork/patches/tests/native/test_moe_weight_grad.py`（CPU，`fork/dev test patches`）确认 `backward_moe_base_weights()` 只通过 `moe_base_weight_grad()` 写 dW、fork 源文件编译进库、GPU 测试调用的正是这个函数。`fork/native/tests/test-fork-moe-grouped-gemm.cu`（`[wgrad-zero]`，在 `integration-tests` 中，GPU 主机上运行 `fork/dev test native`）直接调用 `moe_base_weight_grad()`，覆盖：dW 预填 NaN、每个 expert 都有 token 且不累加（相当于 `cpu_training` 流式模式下不清零就复用的梯度槽）；BF16 输入配 BF16 或 FP32 的 dW；dY 全为零的 expert；跨层复用同一个梯度槽；按 tile 截断的 offsets。上游修改 `moe_grouped_gemm.cpp` 后（第 11 步），这些用例检查的就是生产代码。
 
 ### T4 FP8 与 matmul 临时张量
 

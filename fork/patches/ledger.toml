@@ -124,14 +124,30 @@ id = "T3"
 title = "MoE backward scratch and conditional zero-fill"
 commits = ["df81e9f7"]
 switch = "always on"
+# backward_moe_base_weights keeps its early returns, ensure_output_tensor, the accumulate flag and
+# store_tensor; from the shape check on, its body (dtype mapping, the zero-fill, now gated by
+# moe_weight_grad_needs_zero, and the per-expert cublasGemmEx loop) is dsl::moe_base_weight_grad in
+# fork/native/src/moe_weight_grad.cpp, compiled into surogate-common. The [wgrad-zero] GPU test calls
+# that function: NaN-filled dW with every expert routed and accumulate=false (the cpu_training slots
+# are reused without clearing), BF16 operands with BF16 or FP32 dW, a routed expert whose dY is zero,
+# reused slots, and per-tile clamped offsets as compiled_ops_tiled_mlp.cpp passes them. An upstream
+# edit to the moved lines conflicts with this hunk; port it into the fork function.
 files = ["csrc/src/runtime/ops/moe_grouped_gemm.cpp"]
 fork_files = [
+    "fork/native/cmake/fork_native.cmake",   # compiles src/moe_weight_grad.cpp into surogate-common (shared with T5)
+    "fork/native/include/surogate_fork/moe_weight_grad.h",
     "fork/native/include/surogate_fork/moe_weight_grad_policy.h",
+    "fork/native/src/moe_weight_grad.cpp",
     "fork/native/tests/test-fork-moe-grouped-gemm.cu",
+    "fork/patches/tests/native/test_moe_weight_grad.py",
 ]
-tests = ["fork/native/tests/test-fork-moe-grouped-gemm.cu"]
+tests = [
+    "fork/native/tests/test-fork-moe-grouped-gemm.cu",
+    "fork/patches/tests/native/test_moe_weight_grad.py",
+]
 conflict_history = [
     "2026-10-27 reverse replay from b5af2f8e, conflict blocks at 90/30/14 days: moe_grouped_gemm.cpp 2/0/0",
+    "2026-10-30 reverse replay from b5af2f8e after moving the expert dW loop into fork/native/src, conflict blocks at 90/30/14 days: moe_grouped_gemm.cpp 2/0/0",
 ]
 
 [[topic]]
@@ -155,7 +171,7 @@ title = "OpenMP for CPU training kernels"
 commits = ["9a6018f2", "0ba0f7f9"]   # 0ba0f7f9: teams sized per rank thread, ordered norm (finding T5-1)
 switch = "always on (links OpenMP::OpenMP_CXX into surogate-common; teams sized per calling thread)"
 # csrc/CMakeLists.txt carries only the two-line hook into fork_native.cmake,
-# which also adds the fork include root (T3) and attaches the T1-T4 tests.
+# which also adds the fork include root and source (T3) and attaches the fork tests.
 # cpu_adamw.cpp (verification finding T5-1): linking OpenMP turned on its upstream pragmas, which took libgomp's
 # default team, sized once from the process CPU mask. Rank threads pin themselves to their GPU's CPUs
 # (set_cpu_affinity -> nvmlDeviceSetCpuAffinity, comm.cpp:1643-1645) and team threads inherit that mask, so on a

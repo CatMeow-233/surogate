@@ -14,7 +14,7 @@
 #include "runtime/dsl/tensor_role.h"
 #include "runtime/executor/op_registry.h"
 #include "runtime/executor/graph_executor_utils.h"
-#include "surogate_fork/moe_weight_grad_policy.h"
+#include "surogate_fork/moe_weight_grad.h"
 #include "kernels/kernels.h"
 #include "recipes/recipe.h"
 #include "utilities/dtype.h"
@@ -49,43 +49,17 @@ void CompiledExecutor::backward_moe_base_weights(const CompiledOp& op,
         throw std::runtime_error("Full expert-weight training with expert parallelism is not implemented");
     if (!offsets) throw std::runtime_error("Expert weight gradients require cached token offsets");
     Tensor& dw = ensure_output_tensor(op.outputs[1]);
-    const int rows = dout.Sizes[1], cols = input.Sizes[1];
-    if (dw.Rank != 3 || dw.Sizes[0] != experts || dw.Sizes[1] != rows || dw.Sizes[2] != cols)
-        throw std::runtime_error("Expert weight gradient shape mismatch: " + op.outputs[1].name);
-    auto dtype = [](ETensorDType type) {
-        if (type == ETensorDType::BF16) return CUDA_R_16BF;
-        if (type == ETensorDType::FP32) return CUDA_R_32F;
-        throw std::runtime_error("Expert weight gradients require BF16/FP32 tensors");
-    };
     const bool accumulate = mFfnTileAccumulate || mAccumulateTensors.count(op.outputs[1].name) > 0;
-    if (moe_weight_grad_needs_zero(offsets, experts, accumulate)) fill_zero(dw, mRunState.MainStream);
-    const float alpha = 1.f, beta = accumulate ? 1.f : 0.f;
-    CUBLAS_CHECK(cublasSetStream(mRunState.cublas_handle(), mRunState.MainStream));
-    for (int e = 0; e < experts; ++e) {
-        const int count = offsets[e + 1] - offsets[e];
-        if (count <= 0) continue;
-        // Row-major dW = dY^T X; cuBLAS sees dW^T = X^T dY.
-        CUBLAS_CHECK(
-            cublasGemmEx(mRunState.cublas_handle(),
-                         CUBLAS_OP_N,
-                         CUBLAS_OP_T,
-                         cols,
-                         rows,
-                         count,
-                         &alpha,
-                         input.Data + static_cast<std::size_t>(offsets[e]) * cols * get_dtype_size(input.DType),
-                         dtype(input.DType),
-                         cols,
-                         dout.Data + static_cast<std::size_t>(offsets[e]) * rows * get_dtype_size(dout.DType),
-                         dtype(dout.DType),
-                         rows,
-                         &beta,
-                         dw.Data + static_cast<std::size_t>(e) * rows * cols * get_dtype_size(dw.DType),
-                         dtype(dw.DType),
-                         cols,
-                         CUBLAS_COMPUTE_32F,
-                         CUBLAS_GEMM_DEFAULT_TENSOR_OP));
-    }
+    // Fork ledger T3: shape check, conditional zero-fill and per-expert GEMMs, tested by [wgrad-zero].
+    moe_base_weight_grad(dw,
+                         dout,
+                         input,
+                         offsets,
+                         experts,
+                         accumulate,
+                         mRunState.cublas_handle(),
+                         mRunState.MainStream,
+                         op.outputs[1].name);
     store_tensor(op.outputs[1], dw);
 }
 
