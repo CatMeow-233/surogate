@@ -82,7 +82,7 @@
 
 fork 的原生 wheel 由 `.github/workflows/native-release.yml` 在 GitHub 免费 runner（4 核、16 GB）上构建：工作流腾出磁盘、加 swap，然后在 CUDA 13.1 构建镜像中运行 `fork/native/release/build-wheel.sh`。脚本照搬上游 `wheel.yml` 的 `wheel` job（系统包、Rust、`set_cuda_version_tag.py`、构建目标、auditwheel 排除项和产物检查），区别是训练和服务端的 GPU 代码只编译所选架构（默认 `120a`，即 RTX 50 系列），版本号取自 `fork/native/release/VERSION`，并且不发布 `install.sh`。同步报告在上游修改 `wheel.yml` 时会提示把改动移植到这个脚本。
 
-工作流只能手动运行：推送（包括合并到 `main`）既不构建也不发布。手动运行要求工作流文件已经在默认分支 `main` 上。一次运行能否发布由 `fork/native/release/plan.sh` 判断，条件是：
+工作流只能手动运行：推送包含提交 `042a070b` 的提交（包括合并到 `main`）既不构建也不发布。更早的提交上的工作流定义由推送触发并会发布，见本节末尾。手动运行要求工作流文件已经在默认分支 `main` 上。一次运行能否发布由 `fork/native/release/plan.sh` 判断，条件是：
 
 1. 运行在 `main` 上，并勾选了 `publish`。
 2. `VERSION` 是不带本地部分的 PEP 440 版本，按规范写法书写（数字不带前导零，例如 `1.5.12.post1`，不能写成 `1.5.12.post01` 或 `1.5.12post1`：它们与 `1.5.12.post1` 是同一个版本，wheel 文件名相同，却对应另一个还不存在的 tag），并且形如 `<上游版本>.postN`。上游版本是被构建的提交历史中最新的上游发布 tag `vX.Y.Z`。`fork/dev sync` 合并的是上游 `main`，不一定正好是这个 tag，所以 Release 说明另外写明 fork 合并的上游提交（被构建的提交与上游 `main` 的 merge base，与 `check_divergence.py` 的定义相同）以及它比该发布多出的提交数，例如 “at `<sha>` (v1.5.12 + 3 commits)”。
@@ -94,7 +94,7 @@ plan job 在构建之前检查全部条件，不满足时运行失败，不会�
 发布步骤（要发布的代码已经合并进 `main`，并且 fork CI 已经通过）：
 
 1. 确认 `fork/native/release/VERSION`。wheel 的版本为 `<版本>+cu130`，tag 为 `native-v<版本>`。基于上游 `vX.Y.Z` 的第一个 fork 版本是 `X.Y.Z.post1`，之后每次发布把 N 加一，例如基于上游 v1.5.12 时第一个版本是 `1.5.12.post1`；同步到新的上游发布后，下一个版本从新的 `.post1` 开始。需要修改时，像其他改动一样把修改合并进 `main`。在本地运行 `fork/native/release/plan.sh build` 会打印版本、上游发布与合并的上游提交，以及发布运行会拒绝的原因（只读取远端，不需要 GitHub 权限；本地只写入 `FETCH_HEAD` 和取回的对象，不移动任何分支或远程跟踪分支）。
-2. 在 GitHub 上打开 Actions → Native Wheel Release → Run workflow，“Use workflow from” 选 `main`，勾选 `publish`，然后运行。不需要也不要手动推送 `native-v*` tag。
+2. 在 GitHub 上打开 Actions → Native Wheel Release → Run workflow，“Use workflow from” 选 `main`，勾选 `publish`，然后运行。不需要也不要手动推送 `native-v*` tag：推送到旧提交 `4fce6f95` 或 `e78c8d5e` 上时，它会不经任何检查直接构建并发布（见本节末尾）。
 3. 构建期间不要把修改 `.github/workflows` 的提交（例如上游同步）合并进 `main`，否则 release job 按条件 4 拒绝发布，需要在新的 `main` 上重新运行。
 4. 冷构建需要数小时。构建步骤超时或运行被取消时，工作流先停止构建容器，再把已经编译完成的结果存进 Actions 缓存；这次运行中 ccache 没有写入或使用任何条目（例如在编译之前就被停止）时不保存，以免这个几乎为空的条目在下次恢复时被选中。在 GitHub 上对这次运行选择 “Re-run all jobs”（推荐，plan 会在重新构建之前检查条件）或 “Re-run failed jobs”：新的尝试恢复同一提交最新的缓存，只编译缺少的部分，被停止时正在编译的单元重新编译。两种重新运行都会在发布前重新检查，tag 或 Release（包括草稿）已经存在时拒绝发布。需要改代码才能修复时，把修复合并进 `main` 后重新运行工作流；这个版本还没有发布时不用改 `VERSION`。
 5. release job 失败时，先按 [一个版本只发布一次](#一个版本只发布一次) 确认 Release 仍是草稿：发布请求报错时 GitHub 可能已经执行了它，此时这个版本已经公开，不能删除。仍是草稿时（上传中断、文件校验失败，或发布请求没有生效），tag 还不存在，这个版本没有公开过。删除草稿，然后：在原运行开始后 30 天内，对它选择 “Re-run failed jobs”，重用它的 wheel 产物，不重新构建；超过 30 天后 GitHub 不再允许重新运行这次运行（Actions 产物的保留期更长，但工作流只在原运行的新尝试中使用它），或者发布因条件 4 被拒绝时，在 `main` 上重新运行工作流并勾选 `publish`，它会重新构建。草稿从未公开，所以 `VERSION` 可以不改（plan 仍按条件 2 检查它）。Release 一旦发布，它的文件在发布前已经全部校验过；之后发现问题时不删除重发，把 `VERSION` 改成下一个版本再发布。
@@ -107,6 +107,11 @@ GitHub 重新运行一次运行时，使用的是原运行提交上的工作流�
 ```bash
 gh run delete 40634738095 -R CatMeow-233/surogate
 ```
+
+推送同样会启动旧定义：推送触发的运行使用被推送提交上的工作流定义。`4fce6f95` 与 `e78c8d5e` 上的定义在推送 `native-v*` tag 时运行，只要 ref 是 `native-v*` tag，release job 就在构建之后直接发布预发布 Release：没有 plan、发布前的再检查、`release_guard.py`、草稿和 `overwrite_files: false`。tag 是推送者自己创建的，所以 GitHub 不允许 `GITHUB_TOKEN` 创建 tag 的那条限制也挡不住它。从 `8e91b723` 到 `042a070b` 之前的 12 个提交上的定义则由改动 `fork/native/release/VERSION` 的分支推送触发，在被推送的提交上创建 tag 并发布，与上面那次运行一样，挡住它的只有那条没有验证过的服务端限制。这些提交都已推送到 fork；`main` 只合并、不变基，合并之后它们永远留在 `main` 的历史中，任何时候都可以被新的 tag 或分支指向。因此：
+
+- 任何人都不手动推送 `native-v*` tag，无论指向哪个提交。`native-v*` tag 只由 `main` 上当前的 `native-release.yml` 在发布时创建。
+- 不推送指向 `042a070b` 之前的提交的分支，例如为了重现旧版本而在旧提交上建分支并推送。
 
 ## 一个版本只发布一次
 
@@ -158,7 +163,7 @@ fork 上没有 `v*` tag（`git ls-remote --tags origin` 只有 `experimental-v*`
 
 规则：
 
-- 只推送 `experimental-v*` tag；`native-v*` tag 由 `native-release.yml` 创建。不要推送 `v*` 或 `jackalope-v*` tag，它们会触发上游的发布工作流。
+- 只推送 `experimental-v*` tag；`native-v*` tag 由 `native-release.yml` 创建，任何时候、在任何提交上都不要手动推送：推送到 `4fce6f95` 或 `e78c8d5e` 这两个旧提交上（它们永远留在 `main` 的历史中）会运行那个提交上由 tag 触发的旧定义，不经任何检查直接构建并发布，GitHub 对 `GITHUB_TOKEN` 创建 tag 的限制也挡不住它，因为 tag 已经存在（见[发布原生版本](#发布原生版本)末尾）。不要推送 `v*` 或 `jackalope-v*` tag，它们会触发上游的发布工作流。
 - 不要运行 `git push --tags`：它会把从上游取到的 tag 一起推到 fork。
 - `experimental-v0.1.0a1`、`a2`、`a3` 指向 `main` 上的提交，所以同步上游时只能 merge，不能 rebase。
 
