@@ -126,7 +126,14 @@ The initial implementation requires:
 - `optimizer: rank_scaled` and `gradient_accumulation_steps: 1`;
 - `max_grad_norm: 0`, without a global clipping pass;
 - no gradient checkpointing, compilation, or LISA;
-- no trainable tied/shared-storage parameters.
+- no distinct trainable parameters that share storage.
+
+Tied weights, one parameter reachable under two names such as the embedding and
+LM head of Qwen3-4B (`tie_word_embeddings`), are supported. PyTorch sums the
+gradients of both uses before that parameter's hook runs, so it is updated once
+per step with its full gradient, exactly as the regular optimizer step would.
+The cost is residency: that gradient stays allocated from the LM head's backward
+until the embedding's, which is the whole backward pass.
 
 FP16 GradScaler is not implemented. Use FP32 or BF16. These constraints protect
 the ordering of updates; accepting convergence risk does not make repeated or
@@ -141,7 +148,7 @@ The examples archive and `fork/experimental/examples/` provide:
 | --- | --- |
 | `smoke.yaml` | Offline CPU end-to-end test with local tiny weights and data. |
 | `5090-lisa.yaml` | Rank-scaled state, two rotating layers, nonreentrant activation checkpointing, gradient accumulation. |
-| `5090-oib.yaml` | All-parameter updates with early gradient release, no checkpointing or accumulation. |
+| `5090-oib.yaml` | All-parameter updates with early gradient release, no checkpointing or accumulation; the tied embedding/LM head is updated once per step. |
 | `5090-lora.yaml` | PEFT adapter control run with ordinary AdamW on this backend. |
 
 Replace the model and `train_jsonl` path with your own compatible model and token
@@ -241,6 +248,8 @@ checkpoints retain the base state needed for their own resume.
 CPU tests exercise actual tiny Transformers and PEFT training, sketch mathematics
 and state budgets, stochastic rounding, selection state ownership, token-weighted
 loss, early gradient release, and uninterrupted versus checkpoint/resume behavior.
+Each `5090-*.yaml` example also trains for two steps with its own settings on a
+tiny Qwen3 stand-in that ties its embeddings like Qwen3-4B.
 The installed wheel also runs the offline smoke CLI outside the checkout.
 
 These checks establish executable algorithms and packaging, not GPU speed,

@@ -1,5 +1,7 @@
 # All parameters trainable; release each gradient after its own update.
 # No accumulation, checkpointing, global clipping, compile, or LISA in this mode.
+# Qwen3-4B ties its embedding and LM head: that one weight is updated once per
+# step, after backward has accumulated both of its gradient contributions.
 schema_version: 1
 model: Qwen/Qwen3-4B
 train_jsonl: ./train.tokens.jsonl

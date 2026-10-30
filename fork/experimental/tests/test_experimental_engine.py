@@ -203,11 +203,28 @@ def test_lora_updates_only_adapters_and_exports_reloadable_peft_artifact(tmp_pat
     assert_state_equal(loaded.state_dict(), state)
 
 
-def test_in_backward_rejects_real_tied_weights_and_distinct_shared_storage(tmp_path):
-    config = tiny_config(tmp_path, optimizer_in_backward=True)
-    config.model_config["tie_word_embeddings"] = True
-    with pytest.raises(ValueError, match="trainable aliases"):
-        run_training(config)
+def test_optimizer_in_backward_updates_tied_embeddings_once_like_the_regular_step(tmp_path):
+    regular_config = tiny_config(tmp_path, "tied-regular", max_steps=3)
+    regular_config.model_config["tie_word_embeddings"] = True
+    hook_config = replace(regular_config, output_dir=str(tmp_path / "tied-in-backward"), optimizer_in_backward=True)
+    regular = run_training(regular_config)
+    hooked = run_training(hook_config)
+    assert hooked["gradients_cleared"]
+    left, right = checkpoint(regular), checkpoint(hooked)
+    assert "lm_head.weight" not in right["parameter_names"]  # one Parameter, listed under its first name
+    assert_state_equal(left["model_state"], right["model_state"])
+    assert_state_equal(left["optimizer_state"], right["optimizer_state"])
+    # The tied weight's hook ran once per backward, with the summed gradient of both uses.
+    embedding = right["parameter_names"].index("model.embed_tokens.weight")
+    assert right["optimizer_state"]["state"][embedding]["step"] == 3
+    exported = AutoModelForCausalLM.from_pretrained(hooked["final_export"], local_files_only=True)
+    assert exported.lm_head.weight is exported.model.embed_tokens.weight
+    torch.testing.assert_close(
+        exported.lm_head.weight, right["model_state"]["model.embed_tokens.weight"], rtol=0, atol=0
+    )
+
+
+def test_in_backward_rejects_distinct_parameters_sharing_storage():
     module = torch.nn.Module()
     backing = torch.randn(8)
     module.first = torch.nn.Parameter(backing[:4])

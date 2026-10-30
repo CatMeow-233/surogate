@@ -186,23 +186,26 @@ def _build_model(config: TrainConfig, device: torch.device, dtype: torch.dtype, 
 
 
 def _check_in_backward_aliases(model: torch.nn.Module) -> None:
-    seen_parameters: dict[int, str] = {}
-    seen_storages: dict[int, str] = {}
-    for name, parameter in model.named_parameters(remove_duplicate=False):
-        if not parameter.requires_grad:
+    """Reject distinct trainable parameters over one storage; allow tied names.
+
+    One Parameter object reachable under several names (``tie_word_embeddings``)
+    has a single AccumulateGrad node: autograd sums every use's gradient before
+    its post-accumulate hook runs, so the hook runs once per backward with the
+    full gradient, as a regular step would see it. Distinct Parameter objects
+    sharing storage would each run a hook with a partial gradient and update the
+    same memory twice.
+    """
+    seen_storages: dict[tuple[torch.device, int], str] = {}
+    # named_parameters() lists each Parameter object once, under its first name.
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad or not parameter.numel():
             continue
-        if id(parameter) in seen_parameters:
+        storage = (parameter.device, parameter.untyped_storage().data_ptr())
+        if storage in seen_storages:
             raise ValueError(
-                f"optimizer_in_backward does not support trainable aliases: {seen_parameters[id(parameter)]}, {name}"
+                f"optimizer_in_backward does not support shared parameter storage: {seen_storages[storage]}, {name}"
             )
-        seen_parameters[id(parameter)] = name
-        if parameter.numel():
-            storage = parameter.untyped_storage().data_ptr()
-            if storage in seen_storages:
-                raise ValueError(
-                    f"optimizer_in_backward does not support shared parameter storage: {seen_storages[storage]}, {name}"
-                )
-            seen_storages[storage] = name
+        seen_storages[storage] = name
 
 
 def _prepare_output(output: Path, resumed: dict[str, Any] | None) -> Path:
