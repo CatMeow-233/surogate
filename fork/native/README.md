@@ -8,8 +8,9 @@
 |---|---|---|
 | [cmake/fork_native.cmake](cmake/fork_native.cmake) | 挂接入口：定义 `surogate_fork_configure_common()`，并在 `csrc` 目录处理完毕后为测试目标补充设置 | T5 |
 | [cmake/training_openmp.cmake](cmake/training_openmp.cmake) | `surogate_enable_training_openmp()`：把 `OpenMP::OpenMP_CXX` 链接到训练库 | T5 |
-| [include/surogate_fork/](include/surogate_fork/) | fork 头文件，源码中写作 `#include "surogate_fork/<文件名>"` | T3 |
-| [openmp-contract/](openmp-contract/) | 独立的 OpenMP 接线回归测试，只需主机 C++ 编译器和 OpenMP | T5 |
+| [include/surogate_fork/](include/surogate_fork/) | fork 头文件，源码中写作 `#include "surogate_fork/<文件名>"`：`moe_weight_grad_policy.h`（T3）、`omp_team.h`（T5，CPU 优化器各并行区的线程数和定序的范数求和） | T3、T5 |
+| [openmp-contract/](openmp-contract/) | 独立的 OpenMP 回归测试，只需主机 C++ 编译器和 OpenMP：接线（`check.cpp`）与线程数契约（`team_check.cpp`） | T5 |
+| [bench/cpu-optimizer/](bench/cpu-optimizer/) | `run.sh` 用训练库的编译命令编译 `cpu_adamw.cpp`（带与不带 OpenMP），按 NVML 的方式绑定 rank 线程，测 `cpu_training` 的优化器步耗时；结果记在 [performance.md](../docs/performance.md#cpu-优化器并行) | T5 |
 | [tests/](tests/) | fork 的 C++ 测试用例，编译进上游的 `dsl-run-state-tests`（T1、T10）和 `integration-tests`（T2–T4） | T1–T4、T10 |
 | [release/](release/) | `build-wheel.sh` 在 CUDA 构建镜像中构建 fork 的原生 wheel；`VERSION` 是发布版本号；`plan.sh` 判断一次运行能否发布，并在发布前再检查一次，`test_plan.sh` 是它的测试（`fork/dev test release`）。由 `.github/workflows/native-release.yml` 使用，只有在 `main` 上手动运行并勾选 `publish` 才发布，推送不会发布。见 [发布原生版本](../docs/build-and-release.md#发布原生版本) | — |
 
@@ -43,7 +44,9 @@ git diff -U0 upstream/main -- csrc/CMakeLists.txt   # 只有一个 hunk，恰好
 
 ## 运行 OpenMP 接线测试
 
-运行 `fork/dev test openmp`（不需要 GPU、CUDA 编译器或 CUDA 头文件）。测试用 `surogate_enable_training_openmp()` 构建一个主机共享库，检查它确实以两个 worker 运行，并得到与串行参考完全一致的整数结果。如果运行时把线程上限设为 1（例如 `OMP_THREAD_LIMIT=1`），测试以退出码 77 报告跳过，ctest 将其列为 Skipped；`OMP_NUM_THREADS` 不影响结果，因为测试用 `num_threads(2)` 显式请求两个线程。构建目录 `build/fork-openmp` 已被根目录的 `.gitignore` 忽略。
+运行 `fork/dev test openmp`（不需要 GPU、CUDA 编译器或 CUDA 头文件）。测试用 `surogate_enable_training_openmp()` 构建一个主机共享库，检查它确实以两个 worker 运行，并得到与串行参考完全一致的整数结果。如果运行时把线程上限设为 1（例如 `OMP_THREAD_LIMIT=1`），测试以退出码 77 报告跳过，ctest 将其列为 Skipped；`OMP_NUM_THREADS` 不影响结果，因为测试用 `num_threads(2)` 显式请求两个线程。
+
+同一个库还编译了 `include/surogate_fork/omp_team.h`（编译选项与 `surogate-common` 中的 `cpu_adamw.cpp` 相同），`training-openmp-team` 检查：低于阈值的循环串行；按 NVML 方式绑定的线程，其线程数不超过自身掩码中的 CPU 数，且每个 team 线程都在调用线程的掩码内；共用 CPU 的线程平分 CPU，掩码不相交的线程不平分，线程退出或空闲超过共享窗口后不再计入；`ordered_block_sum` 在任何线程数下的结果都与串行的分块顺序逐位相同。需要更多 CPU 的检查在 CPU 不足时打印 skipped，其余检查照常运行。构建目录 `build/fork-openmp` 已被根目录的 `.gitignore` 忽略。
 
 ## 运行 fork 的 C++ 测试
 

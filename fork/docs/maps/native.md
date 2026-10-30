@@ -19,11 +19,11 @@
 | `csrc/src/third_party` | 第三方 | 228 | vendored 代码，不做格式化 |
 | `csrc/src/tokenizer` | 共享 | 9 | 分词器，训练与服务各编译一次（见下文“接缝”） |
 | `csrc/src/utilities` | 训练 | 33 | 分配器、GPU 信息等工具 |
-| `fork/native` | fork | 16 | fork 的 CMake 挂接、头文件和 C++ 测试 |
+| `fork/native` | fork | 22 | fork 的 CMake 挂接、头文件和 C++ 测试 |
 
 ## CMake 目标
 
-已跟踪的 CMakeLists.txt 中每一处 `add_library`、`add_executable`、`nanobind_add_module`，共 75 处（条件分支中的同名定义各算一处）。标有 `EXCLUDE_FROM_ALL` 的目标只在显式构建或被依赖时才编译。
+已跟踪的 CMakeLists.txt 中每一处 `add_library`、`add_executable`、`nanobind_add_module`，共 76 处（条件分支中的同名定义各算一处）。标有 `EXCLUDE_FROM_ALL` 的目标只在显式构建或被依赖时才编译。
 
 | 目标 | 类型 | 标志 | OUTPUT_NAME | 定义在 |
 |---|---|---|---|---|
@@ -102,6 +102,7 @@
 | `sinfer_qwen3_5_moe_dflash_round_bench` | 可执行文件 | — | — | `csrc/src/testing/serve/bench/CMakeLists.txt` |
 | `training-openmp-probe` | 库 | SHARED | — | `fork/native/openmp-contract/CMakeLists.txt` |
 | `training-openmp-contract` | 可执行文件 | — | — | `fork/native/openmp-contract/CMakeLists.txt` |
+| `training-openmp-team` | 可执行文件 | — | — | `fork/native/openmp-contract/CMakeLists.txt` |
 
 ## 产物入口
 
@@ -177,6 +178,7 @@
 | `test_tts_cpu_kernels` | PRIVATE | `"${SOURCE_DIR}/include"` | `csrc/src/serve/tts/CMakeLists.txt` |
 | `${target}` | PRIVATE | `"${SUROGATE_FORK_NATIVE_DIR}/include"` | `fork/native/cmake/fork_native.cmake` |
 | `integration-tests` | PRIVATE | `"${SUROGATE_FORK_NATIVE_DIR}/include"` | `fork/native/cmake/fork_native.cmake` |
+| `training-openmp-probe` | PRIVATE | `${CMAKE_CURRENT_SOURCE_DIR}/../include` | `fork/native/openmp-contract/CMakeLists.txt` |
 
 ## 训练与服务之间的接缝
 

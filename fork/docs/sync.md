@@ -145,12 +145,12 @@ git log --oneline HEAD..MERGE_HEAD -- <文件>                # 上游改了什�
 - 解决：保留上游，重新应用这两处。如果上游的 recipe 不再接受空的 `dweight`，就恢复上游的临时张量写法，并在 `conflict_history` 中记录。
 - 测试：`fork/native/tests/test-fork-fp8-quant.cpp`（`[recipe]`）。
 
-### T5 OpenMP 与原生挂接点
+### T5 OpenMP、原生挂接点与 CPU 优化器的线程数
 
-- 文件：`csrc/CMakeLists.txt` 中的两行挂接（`include(.../fork_native.cmake)` 和 `surogate_fork_configure_common(surogate-common)`），紧跟在 `surogate-common` 的 `target_link_libraries` 之后。约定见 [native/README.md](../native/README.md)。
-- 反向回放：无冲突。该文件 90 天内有 147 次上游提交，但挂接点所在区域没有改动。
-- 解决：上游移动这一区域时，把两行放回 `surogate-common` 定义之后。上游改名 `surogate-common` 时，同时修改挂接行的参数。上游自己为训练库链接 OpenMP 时，从 `fork/native/cmake/fork_native.cmake` 删去 `surogate_enable_training_openmp()` 调用，并更新 T5。
-- 测试：`fork/dev test openmp`；GPU 主机上 `fork/dev test native`（确认 fork 的测试仍编进上游目标）。
+- 文件：`csrc/CMakeLists.txt` 中的两行挂接（`include(.../fork_native.cmake)` 和 `surogate_fork_configure_common(surogate-common)`），紧跟在 `surogate-common` 的 `target_link_libraries` 之后。约定见 [native/README.md](../native/README.md)。`csrc/src/runtime/optimizers/cpu_adamw.cpp`：包含 `surogate_fork/omp_team.h`；5 个逐元素循环的 pragma 前一行是 `const surogate_fork::OmpTeam team(n);`，pragma 末尾加 `num_threads(team.threads) if (team.threads > 1)`；`cpu_gradient_norm_squared` 的两个 `reduction(+ : param_norm)` 循环改为调用 `surogate_fork::ordered_block_sum`。原因与测量见 [performance.md](performance.md#cpu-优化器并行)。
+- 反向回放：无冲突。`csrc/CMakeLists.txt` 90 天内有 147 次上游提交，但挂接点所在区域没有改动；上游最后一次修改 `cpu_adamw.cpp` 是 2026-04-19（`a7ebaa56`），早于 90 天窗口。
+- 解决：上游移动挂接区域时，把两行放回 `surogate-common` 定义之后。上游改名 `surogate-common` 时，同时修改挂接行的参数。上游自己为训练库链接 OpenMP 时，从 `fork/native/cmake/fork_native.cmake` 删去 `surogate_enable_training_openmp()` 调用，并更新 T5。`cpu_adamw.cpp` 以上游为准，再重新加上 include、每个区域前的 `OmpTeam` 和两个子句；上游新增的 `#pragma omp parallel` 区域同样处理（pin 会因区域个数变化而失败）。上游改写范数循环时，保留它跳过非有限值和指针去重的逻辑（T10 依赖去重），只把求和换回 `ordered_block_sum`。上游自己为这些区域确定线程数时，比较两种做法，再决定是否删去 fork 的版本。
+- 测试：`fork/dev test openmp`（`training-openmp-contract` 和线程数契约 `training-openmp-team`）；`fork/dev test patches`（源码 pin `fork/patches/tests/native/test_cpu_adamw_openmp.py`）；GPU 主机上 `fork/dev test native`（确认 fork 的测试仍编进上游目标）。
 
 ### T6–T8 GRPO
 

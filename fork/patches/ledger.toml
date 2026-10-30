@@ -153,20 +153,49 @@ conflict_history = [
 id = "T5"
 title = "OpenMP for CPU training kernels"
 commits = ["9a6018f2"]
-switch = "always on (links OpenMP::OpenMP_CXX into surogate-common)"
+switch = "always on (links OpenMP::OpenMP_CXX into surogate-common; teams sized per calling thread)"
 # csrc/CMakeLists.txt carries only the two-line hook into fork_native.cmake,
 # which also adds the fork include root (T3) and attaches the T1-T4 tests.
-files = ["csrc/CMakeLists.txt"]
+# cpu_adamw.cpp (verification finding T5-1): linking OpenMP turned on its upstream pragmas, which took libgomp's
+# default team, sized once from the process CPU mask. Rank threads pin themselves to their GPU's CPUs
+# (set_cpu_affinity -> nvmlDeviceSetCpuAffinity, comm.cpp:1643-1645) and team threads inherit that mask, so on a
+# multi-socket or multi-NUMA host each region ran more threads than CPUs and spun at every barrier (1056 ms
+# against 44 ms serial for 8M + 64x4096 elements on 2 of 4 CPUs), once per tensor and twice per step. Each region
+# now runs surogate_fork::OmpTeam (omp_team.h): serial below 65536 elements (if clause), otherwise the CPUs of the
+# calling thread's mask divided by the callers sharing them, capped by omp_get_max_threads(). The norm sums in
+# fixed 16384-element blocks (ordered_block_sum) instead of reduction(+): the result no longer depends on the
+# team, which now differs between ranks, but for tensors over one block it differs from upstream's serial
+# left-to-right sum in the last bits of the double. Element-wise AdamW stays bit-identical to the serial build.
+# Kept in T5 rather than a topic of its own: the edit only matters when T5 links OpenMP, the switch is the same,
+# and reverting T5 without it (or it without T5) is the case this topic exists to avoid.
+# T10 also relies on cpu_gradient_norm_squared's pointer dedupe (its pin checks it); listing the file here makes
+# the sync report group upstream commits to it under T5.
+files = [
+    "csrc/CMakeLists.txt",
+    "csrc/src/runtime/optimizers/cpu_adamw.cpp",
+]
 fork_files = [
     "fork/native/cmake/fork_native.cmake",
     "fork/native/cmake/training_openmp.cmake",
+    "fork/native/include/surogate_fork/omp_team.h",
     "fork/native/openmp-contract/CMakeLists.txt",
     "fork/native/openmp-contract/check.cpp",
     "fork/native/openmp-contract/probe.cpp",
+    "fork/native/openmp-contract/team.cpp",
+    "fork/native/openmp-contract/team_api.h",
+    "fork/native/openmp-contract/team_check.cpp",
+    "fork/native/bench/cpu-optimizer/pinbench.cpp",
+    "fork/native/bench/cpu-optimizer/run.sh",
+    "fork/patches/tests/native/test_cpu_adamw_openmp.py",
 ]
-tests = ["fork/native/openmp-contract/check.cpp"]
+tests = [
+    "fork/native/openmp-contract/check.cpp",
+    "fork/native/openmp-contract/team_check.cpp",
+    "fork/patches/tests/native/test_cpu_adamw_openmp.py",
+]
 conflict_history = [
     "2026-10-27 reverse replay from b5af2f8e, conflict blocks at 90/30/14 days: none",
+    "2026-10-30 cpu_adamw.cpp joins T5: upstream last changed it on 2026-04-19 (a7ebaa56), before the 90-day window, so 0/0/0",
 ]
 
 [[topic]]

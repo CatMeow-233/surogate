@@ -41,11 +41,69 @@ nsys stats --report cuda_gpu_mem_size_sum train-trace.nsys-rep
 
 ## CPU 优化器并行
 
-训练库直接链接 `OpenMP::OpenMP_CXX`，因此其现有的 CPU AdamW、梯度范数和向量加法 pragma 的启用与服务端 encoder 无关。该 imported target 只对 C++ 源文件施加主机编译选项，不会把 `-fopenmp` 直接传给 nvcc。
+训练库直接链接 `OpenMP::OpenMP_CXX`，因此其现有的 CPU AdamW、梯度范数和向量加法 pragma 的启用与服务端 encoder 无关。该 imported target 只对 C++ 源文件施加主机编译选项，不会把 `-fopenmp` 直接传给 nvcc。安装匹配的编译器运行库，例如 GCC 的 `libgomp` 或 Clang 的 `libomp`。
 
-安装匹配的编译器运行库，例如 GCC 的 `libgomp` 或 Clang 的 `libomp`。根据主机可用核数、内存带宽和 NUMA 布局选择 `OMP_NUM_THREADS`，不要假定线程越多越快。逐元素的 AdamW 更新保持原有算术；并行的浮点范数归约可能改变最终的舍入位。请在目标主机上验证梯度裁剪与数值容差，以及实际的优化器步耗时。
+### 每个并行区的线程数
 
-独立的接线回归测试用 `fork/dev test openmp` 运行，需要 C++ 编译器和 OpenMP，但不需要 GPU 或 CUDA 头文件。它检查训练用的 OpenMP 辅助函数能让一个真实的双 worker 主机库生效，并得到精确的整数输出。运行时的线程数限制可能导致显式跳过。该测试不编译 CUDA 训练库，也不验证 AdamW 数值。
+`cpu_training` 的全参微调在每个 rank 线程上执行 CPU 优化器步（`AdamW8BitOptimizer::step_cpu_streaming`）：先对所有主机梯度求范数，再对每个参数调用一次 AdamW，每个张量各开一个并行区，每步两轮。rank 线程启动时用 `nvmlDeviceSetCpuAffinity` 把自己绑定到 GPU 所在 NUMA 节点的 CPU 上（`set_cpu_affinity()`，只作用于调用线程），team 线程继承这个掩码；libgomp 的默认线程数却在库加载时按整个进程的掩码算出。于是在多路或多 NUMA 主机上，默认 team 的线程比它能用的 CPU 多，并在每个 barrier 上空转。上游在 `cudaSetDevice` 之前调用 `set_cpu_affinity()`（`comm.cpp` 的 rank 线程先绑定、再构造通信器），新线程的当前设备是 0，所以每个 rank 都绑定到 GPU 0 的 CPU 上，多个 rank 共用同一组 CPU；fork 没有改这一点。
+
+因此 `cpu_adamw.cpp` 的每个并行区都由 `fork/native/include/surogate_fork/omp_team.h` 的 `OmpTeam` 决定线程数（ledger T5）：
+
+- 元素数少于 `kOmpMinParallelElems` = 65536 时用 1 个线程：并行区的 `if` 子句为假，循环在调用线程上执行。
+- 否则用调用线程当前掩码中的 CPU 数（每次进入这样的并行区都重新读取，一次 `sched_getaffinity` 系统调用），除以掩码与它重叠、且正在并行区中或 1 秒内离开过并行区的调用线程数（含它自己），至少 1，至多 `omp_get_max_threads()`。
+
+team 因而不超过调用线程掩码中的 CPU 数；同一组 CPU 上的几个 rank 平分这些 CPU，绑在不相交 CPU 上的 rank 互不影响。线程退出时注销，空闲超过 1 秒不再计入，所以只调用过一次优化器的线程不会长期占用份额。一步开始时最先进入的 rank 可能在其他 rank 进入之前用满整组 CPU，持续到其他 rank 的第一个并行区。
+
+环境变量：
+
+- `OMP_NUM_THREADS` 是上限，只能把线程数调低。在设置了 CPU 配额（cgroup `cpu.max`）的容器中设置它：libgomp 和 `OmpTeam` 都不读取配额。
+- `OMP_WAIT_POLICY=PASSIVE` 让 team 线程在两个并行区之间睡眠而不是空转，把 CPU 让给同一组 CPU 上的 CUDA 与 NCCL 线程，代价是每个并行区多一次唤醒。阈值按 worker 已睡眠的情况选取（见下文阈值测量中“冷”的两列），在本机上 PASSIVE 与默认等待策略的步耗时相同（23.2–24.5 ms 对 24.2–28.1 ms，8M + 64×4096，R=1，绑定 2 个 CPU）。
+- 不要设置 `OMP_PROC_BIND` 或 `OMP_PLACES`：libgomp 按进程的掩码计算 place，会把 team 线程绑到 rank 的掩码之外。
+
+### 数值
+
+逐元素的 AdamW 更新与串行构建逐位相同，与线程数无关：每个元素由一个线程按同样的算术计算。梯度范数不再用 `reduction(+)`：`ordered_block_sum` 把每个张量分成 `kOrderedSumBlock` = 16384 个元素的块，块内按下标顺序求和，块和再按块的顺序相加。结果与线程数、绑定、阈值以及是否启用 OpenMP 都无关。不超过一块的张量与上游的串行循环逐位相同；更大的张量与上游从左到右的单个累加器在 double 的末几位不同。在下表的 8M + 64×4096 负载上，相对于精确和（`math.fsum`），上游顺序的误差是 −7.9e-12，分块顺序是 −1.2e-14；裁剪用的 float 范数在上游顺序、分块顺序和修复前的 OpenMP 结果之间都相同，但在舍入边界上不能保证。
+
+修复前的 `reduction(+)` 结果随 team 大小变化，线程多于 2 个时还取决于各线程完成的先后：在下表的 toy 负载上，同一进程中两个 rank 对相同的梯度求得的范数在 12 次 R=2 运行中有 9 次相差 1 ulp（Llama 形状的 6 次运行中没有出现），单 rank 的重复运行也在两个值之间变化。修复后每个 team 大小、每次运行、每个 rank 的结果都相同。请在目标主机上验证梯度裁剪与数值容差，以及实际的优化器步耗时。
+
+### 测量
+
+主机：4 vCPU 的 KVM 虚拟机（Intel Xeon，family 6 model 207，2.1 GHz，1 个 socket，无 SMT，16 GB 内存），没有 GPU，测量时与其他会话共用。“两个 socket”用两组不相交的 2-CPU 掩码模拟：rank 线程像 NVML 那样只绑定自己。代码：`cpu_adamw.cpp` 用训练库的编译命令（GCC 13.3，`-O3 -fopenmp`，libgomp）编译，链接进 `fork/native/bench/cpu-optimizer/pinbench.cpp`；该程序在每个 rank 线程上执行 `step_cpu_streaming` 的 CPU 部分（范数，然后每个参数一次 `cpu_adamw_step_bf16`，FP32 master、BF16 梯度）。负载：toy 是一个 8M 元素的张量加 64 个 4096 元素的张量；Llama 形状是 L=8、h=896、im=4864、V=32000（embedding、`lm_head` 与各层矩阵，共 75 个张量、1.78 亿元素，近似 Qwen 0.5B 但词表较小）。每格是 3 轮的中位数，每轮取最慢 rank 的步耗时中位数（toy 6 步，Llama 4 步，均不含预热步）；只在机器其余进程占用低于 0.25 个 CPU 时计时，否则重测。
+
+| 配置 | 负载 | 串行（T5 之前） | OpenMP 默认（修复前） | 修复后 |
+|---|---|---:|---:|---:|
+| R=1，绑定 2/4 个 CPU | toy | 43.6 ms | 1056 ms | 27.3 ms |
+| R=2，两个“socket”各 2 个 CPU | toy | 46.9 ms | 32.0 ms | 25.7 ms |
+| R=2，共用 2 个 CPU（上游的 GPU 0 绑定） | toy | 45.1 ms | 49.9 ms | 47.6 ms |
+| R=1，不绑定（对照） | toy | 44.5 ms | 13.1 ms | 13.3 ms |
+| R=1，绑定 2/4 个 CPU | Llama 形状 | 945 ms | 1540 ms | 479 ms |
+| R=2，两个“socket”各 2 个 CPU | Llama 形状 | 949 ms | 554 ms | 504 ms |
+| R=2，共用 2 个 CPU | Llama 形状 | 956 ms | 952 ms | 961 ms |
+| R=1，不绑定（对照） | Llama 形状 | 925 ms | 279 ms | 255 ms |
+
+- 修复前，绑定 2 个 CPU 的单 rank 开 4 个线程（`/proc/<pid>/task` 中 4 个线程的掩码是 0-1），两个 rank 共用 2 个 CPU 时开 8 个；修复后分别是 2 个和 3 个（第 3 个是一步开始时短暂用满 2 个 CPU 时创建的 worker，之后在 libgomp 的线程池中睡眠）。修复前在该配置下设 `OMP_NUM_THREADS=2` 得 21.1–24.3 ms，`OMP_WAIT_POLICY=PASSIVE` 得 28.0–30.9 ms；修复后设 `OMP_NUM_THREADS=1` 得 44.8–48.6 ms，与串行相同。
+- 两个 rank 共用 2 个 CPU 时，每个 rank 只分到 1 个线程，与串行相同：这里没有可并行的 CPU。修复前的 8 个线程比串行慢。
+- 不绑定时 toy 修复后略慢（13.3 对 13.1 ms，3 轮分别是 11.9–14.4 对 11.8–15.3 ms）：64 个 4096 元素的张量在阈值以下串行执行。
+- 修复前 toy 负载的两个 R=2 格是 5 次有效运行的中位数：第一版测量程序在 rank 的结果不同时中止，第 2 轮的这两次因此没有计时，之后又补测了 3 轮。
+- 所有配置中，更新后的 master 与两份矩逐位相同（FNV 哈希一致）。
+
+阈值的测量：K 个 N 元素的张量（共约 4M 元素），串行构建对比总是开 team 的构建（`-DSUROGATE_FORK_OMP_MIN_PARALLEL_ELEMS=0`，team 按上面的规则确定）；“热”是 libgomp 默认的等待（worker 在并行区之间空转），“冷”是 `GOMP_SPINCOUNT=0`（worker 每次都要唤醒）。数字是 AdamW 更新的总耗时，串行 → 并行，单位 ms：
+
+| N | 2 个 CPU，热 | 2 个 CPU，冷 | 4 个 CPU，热 | 4 个 CPU，冷 |
+|---:|---:|---:|---:|---:|
+| 4096 | 17.5 → 12.9 | 16.8 → 37.0 | 16.5 → 7.7 | 18.2 → 71.0 |
+| 16384 | 17.0 → 9.7 | 16.5 → 15.6 | 17.4 → 11.8 | 18.1 → 23.9 |
+| 32768 | 18.5 → 9.4 | 17.5 → 12.2 | 16.3 → 6.3 | 17.5 → 14.1 |
+| 65536 | 17.8 → 11.3 | 17.2 → 10.4 | 16.9 → 9.3 | 17.5 → 8.2 |
+| 131072 | 17.7 → 11.4 | 17.6 → 12.1 | 17.6 → 6.0 | 18.7 → 7.6 |
+
+65536 是 4 种条件下并行更新都快于串行的最小 2 的幂；更小的张量在 worker 已睡眠时并行反而更慢（4096 元素时慢 2–4 倍）。范数每个元素的计算量更小：65536 元素时，热的情况下并行更快（4.2 → 3.3 ms，2 个 CPU），冷的情况下与串行相差在 ±12% 以内。
+
+复现：`fork/native/bench/cpu-optimizer/run.sh <已配置的 csrc 构建目录>` 用该目录 `compile_commands.json` 中 `cpu_adamw.cpp` 的编译命令编译带与不带 OpenMP 的两份对象并运行上表的配置；`CPU_ADAMW_SRC=<(git show 9a6018f2:csrc/src/runtime/optimizers/cpu_adamw.cpp)` 编译修复前的源码（T5 只链接了 OpenMP，没有改这个文件），`CONFIGS` 换成其他配置（例如阈值测量用的 `flat:N:K` 形状）。尚未在真实的多路主机上测量；GPU 主机上的端到端优化器步耗时也未测量。
+
+### OpenMP 测试
+
+独立的回归测试用 `fork/dev test openmp` 运行，需要 C++ 编译器和 OpenMP，但不需要 GPU 或 CUDA 头文件。`training-openmp-contract` 检查训练用的 OpenMP 辅助函数能让一个真实的双 worker 主机库生效，并得到精确的整数输出；运行时的线程数限制可能导致显式跳过。`training-openmp-team` 用同样的编译选项编译 `omp_team.h`，检查阈值、绑定线程的线程数及其 team 线程的掩码、共用与不相交掩码的分配规则，以及 `ordered_block_sum` 在 1–4 个线程下与串行分块顺序逐位相同。这两个测试都不编译 CUDA 训练库；`cpu_adamw.cpp` 中的并行区由源码 pin `fork/patches/tests/native/test_cpu_adamw_openmp.py`（`fork/dev test patches`）检查。
 
 ## RTX 5090 32 GB：稠密与 MoE 微调
 

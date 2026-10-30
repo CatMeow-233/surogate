@@ -15,6 +15,10 @@
 #include <omp.h>
 #endif
 
+// Fork ledger T5: each region's team fits the calling thread's CPU mask, small loops run serially, and the norm
+// sums in an order that does not depend on the team size.
+#include "surogate_fork/omp_team.h"
+
 namespace optimizers {
 
 void cpu_adamw_step(float* __restrict__ p,
@@ -33,7 +37,8 @@ void cpu_adamw_step(float* __restrict__ p,
     const float bc2 = 1.0f - std::pow(beta2, static_cast<float>(step));
     const float wd_factor = 1.0f - lr * weight_decay;
 
-#pragma omp parallel for schedule(static)
+    const surogate_fork::OmpTeam team(n);
+#pragma omp parallel for schedule(static) num_threads(team.threads) if (team.threads > 1)
     for (std::size_t i = 0; i < n; ++i) {
         const float gi = g[i] * grad_scale;
         m[i] = beta1 * m[i] + (1.0f - beta1) * gi;
@@ -61,7 +66,8 @@ void cpu_adamw_step_bf16(float* __restrict__ p,
     const float bc2 = 1.0f - std::pow(beta2, static_cast<float>(step));
     const float wd_factor = 1.0f - lr * weight_decay;
 
-#pragma omp parallel for schedule(static)
+    const surogate_fork::OmpTeam team(n);
+#pragma omp parallel for schedule(static) num_threads(team.threads) if (team.threads > 1)
     for (std::size_t i = 0; i < n; ++i) {
         const float gi = static_cast<float>(g[i]) * grad_scale;
         m[i] = beta1 * m[i] + (1.0f - beta1) * gi;
@@ -90,7 +96,8 @@ void cpu_adamw_step_bf16_param(void* param_bf16,
     const float bc2 = 1.0f - std::pow(beta2, static_cast<float>(step));
     const float wd_factor = 1.0f - lr * weight_decay;
 
-#pragma omp parallel for schedule(static)
+    const surogate_fork::OmpTeam team(n);
+#pragma omp parallel for schedule(static) num_threads(team.threads) if (team.threads > 1)
     for (std::size_t i = 0; i < n; ++i) {
         float pi = static_cast<float>(p[i]);
         const float gi = static_cast<float>(g[i]) * grad_scale;
@@ -130,27 +137,21 @@ double cpu_gradient_norm_squared(const std::unordered_map<std::string, Tensor>& 
     // are skipped so a single bad gradient can't poison the global norm —
     // the per-element AdamW step already filters those to zero-update, so
     // excluding them here keeps `gnorm_scale` finite for the remaining
-    // good gradients.
+    // good gradients. (Fork T5: ordered_block_sum fixes the summation order.)
     for (const auto& info : infos) {
         double param_norm = 0.0;
         if (info.dtype == ETensorDType::FP32) {
             const auto* d = static_cast<const float*>(info.data);
-#pragma omp parallel for reduction(+ : param_norm) schedule(static)
-            for (std::size_t i = 0; i < info.nelem; ++i) {
+            param_norm = surogate_fork::ordered_block_sum(info.nelem, [d](std::size_t i) {
                 const float v = d[i];
-                if (std::isfinite(v)) {
-                    param_norm += static_cast<double>(v) * static_cast<double>(v);
-                }
-            }
+                return std::isfinite(v) ? static_cast<double>(v) * static_cast<double>(v) : 0.0;
+            });
         } else if (info.dtype == ETensorDType::BF16) {
             const auto* d = reinterpret_cast<const nv_bfloat16*>(info.data);
-#pragma omp parallel for reduction(+ : param_norm) schedule(static)
-            for (std::size_t i = 0; i < info.nelem; ++i) {
+            param_norm = surogate_fork::ordered_block_sum(info.nelem, [d](std::size_t i) {
                 const float val = static_cast<float>(d[i]);
-                if (std::isfinite(val)) {
-                    param_norm += static_cast<double>(val) * static_cast<double>(val);
-                }
-            }
+                return std::isfinite(val) ? static_cast<double>(val) * static_cast<double>(val) : 0.0;
+            });
         }
         total += param_norm;
     }
@@ -158,7 +159,8 @@ double cpu_gradient_norm_squared(const std::unordered_map<std::string, Tensor>& 
 }
 
 void cpu_vector_add_f32(float* __restrict__ dst, const float* __restrict__ src, std::size_t n) {
-#pragma omp parallel for schedule(static)
+    const surogate_fork::OmpTeam team(n);
+#pragma omp parallel for schedule(static) num_threads(team.threads) if (team.threads > 1)
     for (std::size_t i = 0; i < n; ++i) {
         dst[i] += src[i];
     }
@@ -166,7 +168,8 @@ void cpu_vector_add_f32(float* __restrict__ dst, const float* __restrict__ src, 
 
 void cpu_vector_add_bf16_to_f32(float* __restrict__ dst, const void* src_bf16, std::size_t n) {
     const auto* src = reinterpret_cast<const nv_bfloat16*>(src_bf16);
-#pragma omp parallel for schedule(static)
+    const surogate_fork::OmpTeam team(n);
+#pragma omp parallel for schedule(static) num_threads(team.threads) if (team.threads > 1)
     for (std::size_t i = 0; i < n; ++i) {
         dst[i] += static_cast<float>(src[i]);
     }
