@@ -145,7 +145,7 @@ conflict_history = [
 [[topic]]
 id = "T3"
 title = "MoE backward scratch and conditional zero-fill"
-commits = ["df81e9f7"]
+commits = ["df81e9f7", "406f16ca"]   # 406f16ca: expert dW loop moved into fork/native/src (finding T3-1)
 switch = "always on"
 # backward_moe_base_weights keeps its early returns, ensure_output_tensor, the accumulate flag and
 # store_tensor; from the shape check on, its body (dtype mapping, the zero-fill, now gated by
@@ -191,7 +191,7 @@ conflict_history = [
 [[topic]]
 id = "T5"
 title = "OpenMP for CPU training kernels"
-commits = ["9a6018f2", "0ba0f7f9"]   # 0ba0f7f9: teams sized per rank thread, ordered norm (finding T5-1)
+commits = ["9a6018f2", "70181d42"]   # 70181d42: teams sized per rank thread, ordered norm (finding T5-1)
 switch = "always on (links OpenMP::OpenMP_CXX into surogate-common; teams sized per calling thread)"
 # csrc/CMakeLists.txt carries only the two-line hook into fork_native.cmake,
 # which also adds the fork include root and source (T3) and attaches the fork tests.
@@ -317,9 +317,9 @@ conflict_history = [
 [[topic]]
 id = "T10"
 title = "tied lm_head shares the embedding in full training"
-commits = ["5722fc7f", "213f2997", "8ccd7055", "da6abdb5", "e3443afb"]
-# 213f2997: Gemma 3 declaration, CPU-norm pin; 8ccd7055: dispatch-PP refusal; da6abdb5: loader-fallback pin;
-# e3443afb: published Gemma 3 configs check
+commits = ["5722fc7f", "76b3f714", "7e16a238", "0d0310f0", "a5ed040f"]
+# 76b3f714: Gemma 3 declaration, CPU-norm pin; 7e16a238: dispatch-PP refusal; 0d0310f0: loader-fallback pin;
+# a5ed040f: published Gemma 3 configs check
 switch = "always on for tie_word_embeddings models, Gemma 3 configs without the key included; LoRA/QLoRA unchanged, except that Gemma 3 LoRA now aliases the frozen head to the embedding as the other tied models do; dispatch-PP full training of a tied model refuses plans whose stage 0 and loss stage run on different GPUs"
 # Defect (upstream 282f9901, unchanged since 2580d6cc / 4ac6a3d8): in full training the IR's lm_head is a
 # trainable parameter of its own, while its gradient is the embedding's buffer (dsl_grad_store.cpp:104-113)
