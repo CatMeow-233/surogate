@@ -1,7 +1,9 @@
 # Upstream CPU-lane failures accepted by fork/tools/test_cpu.sh.
 # One pytest node id per line: <nodeid>  # <reason>; first seen at upstream <sha>
 # Only failures that also fail at that upstream commit belong here; a failure the fork causes
-# must be fixed instead. test_cpu.sh reports entries that no longer fail as stale.
+# must be fixed instead. test_cpu.sh reports entries that no longer fail as stale, except those
+# whose reason starts with "flaky:": upstream tests that fail only sometimes (for example under
+# load) and pass on a rerun. Keep such an entry while the upstream test is unchanged.
 # Measured with two identical runs of test_cpu.sh (Python 3.12, torch 2.11.0, no GPU, no built extension).
 csrc/src/testing/serve/targets/qwen3_5/test_reference_ops.py::test_t1_gdn_matches_sequential_oracle  # gated_delta_net differs bitwise from the sequential bf16 oracle on CPU torch; first seen at upstream 282f9901
 csrc/src/testing/serve/targets/qwen3_5/test_verify.py::test_structure_rejects_identity_signature_and_offset_drift  # expected 'identity' in the error, got "unknown weights profile 'wrong'"; first seen at upstream 282f9901
@@ -30,6 +32,7 @@ tests/grpo/test_native_colocate.py::test_policy_parity_is_selected_before_alloca
 tests/grpo/test_native_formula.py  # collection error: imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
 tests/grpo/test_native_parity.py  # collection error: imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
 tests/grpo/test_reap_process_group.py  # collection error: imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
+tests/grpo/test_teacher_logprobs.py::test_k0_request_and_single_candidate  # flaky: asserts on server.bodies[0], but the two samples' requests reach the fake teacher concurrently, and under CPU load the second arrives first (it passes when rerun alone or on an idle host); first seen at upstream 282f9901
 tests/grpo/test_turn_stats.py::TestDiagnosticLayoutRoundTrip::test_multiple_packed_samples  # imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
 tests/grpo/test_turn_stats.py::TestDiagnosticLayoutRoundTrip::test_raw_buffer_without_unshift_is_detectably_wrong  # imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901
 tests/grpo/test_turn_stats.py::TestDiagnosticLayoutRoundTrip::test_single_sample  # imports surogate._surogate, the native extension is not built; first seen at upstream 282f9901

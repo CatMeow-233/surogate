@@ -33,7 +33,7 @@
 | `fork/dev test cpu` | `fork/tools/test_cpu.sh`：fork 的补丁测试（`fork/patches/tests`），以及上游 `tests/` 与 `csrc/src/testing/serve` 的 pytest，分 7 个进程运行，结果与 [known_failures.txt](../tools/known_failures.txt) 比较 | `FORK_PY` 指向装有 torch 和 [requirements-cpu-lane.txt](../tools/requirements-cpu-lane.txt) 的解释器（默认 `.venv/bin/python`） |
 | `fork/dev test experimental` | 在 `fork/` 下的 `.venv-experimental` 中运行 `fork/experimental/tests` | uv；无法访问 download.pytorch.org 时设 `FORK_TORCH_INDEX=pypi` |
 | `fork/dev test patches` | `fork/patches/tests` | `FORK_PY`（默认 `.venv/bin/python`），需要 [requirements-cpu-lane.txt](../tools/requirements-cpu-lane.txt)（其中有 pytest-timeout） |
-| `fork/dev test tools` | `fork/tools/tests`：同步脚本、`check_divergence.py`、`fork/dev` 的超时与参数传递、`csrc/CMakeLists.txt` 挂接点的 configure 检查，都在临时 git 仓库中运行；以及发布检查 `fork/tools/release_guard.py`，对着一个假的 GitHub CLI 运行 | `FORK_PY`，需要 pytest 和 pytest-timeout；git；挂接点用例需要 CMake 和主机 C++ 编译器，缺少时跳过 |
+| `fork/dev test tools` | `fork/tools/tests`：同步脚本、`check_divergence.py`、`fork/dev` 的超时与参数传递、`csrc/CMakeLists.txt` 挂接点的 configure 检查，都在临时 git 仓库中运行；`test_cpu.sh` 对 `known_failures.txt` 的比较；以及发布检查 `fork/tools/release_guard.py`，对着一个假的 GitHub CLI 运行 | `FORK_PY`，需要 pytest 和 pytest-timeout；git；挂接点用例需要 CMake 和主机 C++ 编译器，缺少时跳过 |
 | `fork/dev test tlc` | `fork/tlc/tests/cpu`：TLC 包的 CPU 测试，不需要原生扩展。GPU 测试 `fork/tlc/tests/gpu` 按 [TLC 运行手册](../tlc/docs/runbook.md) 在 GPU 主机上运行 | `FORK_PY`（默认 `.venv/bin/python`），需要 CPU torch 和 [requirements-cpu-lane.txt](../tools/requirements-cpu-lane.txt) |
 | `fork/dev test openmp` | OpenMP 接线测试和 CPU 优化器的线程数契约（`fork/native/include/surogate_fork/omp_team.h`），构建目录 `build/fork-openmp` | 主机 C++ 编译器、OpenMP、CMake；不需要 GPU 或 CUDA |
 | `fork/dev test release` | 两个发布闸门的测试，都在临时目录中建立合成的 fork 仓库（原生的还有上游仓库）：`fork/native/release/test_plan.sh` 检查 `plan.sh` 的每个发布条件、`build-wheel.sh` 的版本检查和共用的 `fork/tools/release_gate.sh`，以及 `native-release.yml` 在构建之前和发布之前调用 `plan.sh`；`fork/experimental/test_release_plan.sh` 检查 `release_plan.sh` 的每个发布条件，以及 `experimental-release.yml` 在测试和构建之前、上传之前调用它 | git、bash、python3（3.11 及以上）；不访问网络 |
@@ -44,7 +44,7 @@
 
 `fork/dev test native` 替代坏掉的 `make test`（见下文“上游构建的已知问题”）。`fork/dev fmt` 需要 `ruff` 和 `git clang-format`（clang-format 自带的 git 子命令）。
 
-`known_failures.txt` 每行一个 pytest node id，格式为 `nodeid  # 原因; first seen at upstream <sha>`。只有在 `upstream/main` 上同样失败的用例才能列入；由 fork 引起的失败必须修复。列表中已经通过的条目会被报告为过期（stale），但不会让运行失败，此时把该行删除即可。
+`known_failures.txt` 每行一个 pytest node id，格式为 `nodeid  # 原因; first seen at upstream <sha>`。只有在 `upstream/main` 上同样失败的用例才能列入；由 fork 引起的失败必须修复。列表中已经通过的条目会被报告为过期（stale），但不会让运行失败，此时把该行删除即可。原因以 `flaky:` 开头的条目例外：它们是只在部分运行中失败的上游用例（例如 `tests/grpo/test_teacher_logprobs.py` 中依赖两个并发请求到达顺序的用例，CPU 负载高时会失败），通过时不报告为过期，上游修改该用例之前保留这一行。
 
 ## 发布实验版本
 

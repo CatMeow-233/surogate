@@ -15,7 +15,8 @@
 #
 # Exit status 1 when a fork patch test fails, when an upstream test fails or errors (including
 # collection errors) and is not listed in known_failures.txt, or when a partition does not run.
-# Listed entries that no longer fail are reported as stale and do not fail the run.
+# Listed entries that no longer fail are reported as stale and do not fail the run, except entries
+# whose reason starts with "flaky:" (upstream tests that fail only sometimes), which may pass.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
@@ -80,15 +81,18 @@ for report in sorted(out.glob("*.xml"), key=lambda p: int(p.stem)):
         if case.find("failure") is not None or case.find("error") is not None:
             failed.setdefault(node_id(case), int(report.stem))
 
-known = {}
+known, flaky = {}, set()
 for line in known_file.read_text(encoding="utf-8").splitlines():
-    entry = re.split(r"(?:^|\s)#", line, maxsplit=1)[0].strip()
+    parts = re.split(r"(?:^|\s)#", line, maxsplit=1)
+    entry, reason = parts[0].strip(), parts[1].strip() if len(parts) > 1 else ""
     if entry:
         known[entry] = line
+        if reason.startswith("flaky:"):
+            flaky.add(entry)
 
 fork_failures = sorted(n for n, part in failed.items() if part == 1)
 new_failures = sorted(n for n, part in failed.items() if part != 1 and n not in known)
-stale = sorted(n for n in known if n not in failed)
+stale = sorted(n for n in known if n not in failed and n not in flaky)
 
 for title, items in [
     ("fork patch tests failed", fork_failures),
