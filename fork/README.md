@@ -48,7 +48,7 @@ python3.12 -m venv .venv
 | 服务 | `csrc/src/serve`（CMake 中是 `csrc/CMakeLists.txt` 里 `if(SUROGATE_BUILD_SERVE)` 开始的段落），绑定 `csrc/src/binding/py_serve*.cpp` | `surogate/serve` | 扩展模块 `_surogate_serve`：`csrc/src/binding/py_serve.cpp` 中的 `NB_MODULE(_surogate_serve, m)`；引擎可执行文件见 [maps/native.md](docs/maps/native.md) 的“产物入口” |
 | 共享 | `csrc/src/tokenizer`（训练与服务各编译一次），`csrc/src/serve/core/unified_memory.h`（训练侧也包含它，文件列表见 [maps/native.md](docs/maps/native.md) 的“接缝”） | | |
 | 命令行 | | `surogate/cli` | 命令 `surogate` = `surogate.cli.main:cli_main`（根目录 `pyproject.toml` 的 `[project]` 表中的 `scripts`），子命令表 `COMMAND_MAPPING` 在 `surogate/cli/main.py` |
-| fork：GRPO 补丁调用的代码 | | `surogate/_fork`（随原生 wheel 发布） | 由 `surogate/grpo/trainer.py` 在函数内导入（ledger T6、T7） |
+| fork：Python 补丁调用的代码 | | `surogate/_fork`（随原生 wheel 发布） | 由 `surogate/grpo/trainer.py`（ledger T6、T7、T10）和 `surogate/train/trainer.py`（T10）在函数内导入 |
 | fork：原生代码 | `fork/native`：CMake 挂接、头文件、C++ 测试 | | `csrc/CMakeLists.txt` 中紧跟 `surogate-common` 的 `target_link_libraries` 之后的两行挂接点，见 [native/README.md](native/README.md) |
 | TLC 实验 | 无 | 独立 fork 包 `fork/tlc`：代码 `fork/tlc/src/surogate_tlc`，测试 `fork/tlc/tests/cpu` 与 `fork/tlc/tests/gpu`，纯 PyTorch 原型 `fork/tlc/prototypes`（不打包），打包 `fork/tlc/pyproject.toml`（不发布，也不进原生 wheel） | editable 安装进 `fork/.venv-tlc` 后运行 `python -m surogate_tlc <命令>`（模型目录、训练与评测）和 `python -m surogate_tlc.data.<工具>`（数据），运行配置为 `fork/tlc/examples/p0.yaml`；CPU 测试 `fork/dev test tlc`；说明见 [tlc/README.md](tlc/README.md)，GPU 运行手册见 [tlc/docs/runbook.md](tlc/docs/runbook.md) |
 | 实验训练 | 无 | 独立项目 `fork/experimental`：代码 `fork/experimental/src/surogate/experimental`，测试 `fork/experimental/tests`，文档 `fork/experimental/docs`，示例 `fork/experimental/examples`，打包 `fork/experimental/pyproject.toml` 与 `fork/experimental/build_release.py` | `python -m surogate.experimental.train` 或脚本 `surogate-experimental-train`（`fork/experimental/pyproject.toml` 的 `[project.scripts]`）；从检出目录运行用 `fork/dev exp-train`；发布工作流 `.github/workflows/experimental-release.yml` |
@@ -93,7 +93,7 @@ python3 -I fork/tools/check_divergence.py --strict
 
 未登记的改动会使其以退出码 1 失败并列出路径；`--strict` 还会报告过期条目（topic 文件已与上游一致、登记路径已不存在等）。实现见 [tools/check_divergence.py](tools/check_divergence.py)。
 
-GRPO 补丁（T6–T8）调用的 fork 代码位于 `surogate/_fork`，上游文件中只保留调用它的几行。这些补丁的 CPU 测试位于 `fork/patches/tests/grpo`，T10（tied 的 LM head 在全量训练时共用 embedding）的源码 pin 位于 `fork/patches/tests/native`，都用 `fork/dev test patches` 运行；`tests/` 与上游逐字节一致。
+GRPO 补丁（T6–T8）和 T10 的 dispatch-PP 拒绝调用的 fork 代码位于 `surogate/_fork`，上游文件中只保留调用它的几行。这些补丁的 CPU 测试位于 `fork/patches/tests/grpo`，T10（tied 的 LM head 在全量训练时共用 embedding）的源码 pin 和 dispatch-PP 拒绝的测试位于 `fork/patches/tests/native`，都用 `fork/dev test patches` 运行；`tests/` 与上游逐字节一致。
 
 ## 文档
 

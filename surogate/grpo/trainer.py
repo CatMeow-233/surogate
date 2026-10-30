@@ -104,6 +104,11 @@ class GRPOTrainer:
         ir_json = build_dsl_ir_for_model(config.model_dir, extra_config=dsl_extra or None)
         config.runtime_config.dsl_ir_json = ir_json
 
+        # Dispatch-PP full training of a tied model keeps the tied gradient only when
+        # stage 0 and the loss stage share GPU 0; refuse the plans that drop the lookup part.
+        from surogate._fork.dispatch_pp_tied_head import refuse_lost_tied_gradient
+        refuse_lost_tied_gradient(config, ir_json)
+
         # Compile JIT kernels (e.g. gated delta rule Triton kernels)
         from surogate.kernels.jit_compile import compile_jit_kernels
 

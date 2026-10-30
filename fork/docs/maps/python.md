@@ -9,7 +9,7 @@
 | 子包 | .py 文件 | 作用 |
 |---|---|---|
 | `surogate` | 2 | 包根：`__init__.py` 与 setuptools-scm 生成的 `_version.py` |
-| `surogate/_fork` | 3 | fork：GRPO 补丁调用的代码，随原生 wheel 发布（ledger T6、T7） |
+| `surogate/_fork` | 4 | fork：Python 补丁调用的代码，随原生 wheel 发布（ledger T6、T7、T10） |
 | `surogate/cli` | 20 | `surogate` 命令及其子命令入口 |
 | `surogate/core` | 38 | 共享基础：配置、数据集、模型与分词器加载 |
 | `surogate/debug` | 16 | 调试与诊断（`surogate debug`） |
@@ -24,7 +24,7 @@
 | `surogate/train` | 24 | SFT 与预训练训练循环 |
 | `surogate/transplant` | 2 | 分词器移植（`surogate transplant-tokenizer`） |
 | `surogate/utils` | 22 | 通用工具：日志、系统信息、adapter 合并等 |
-| 合计 | 553 |  |
+| 合计 | 554 |  |
 
 ## 命令行入口
 
@@ -69,6 +69,7 @@
 | 从 | 到 | 导入方式 |
 |---|---|---|
 | _fork | grpo | 模块级 |
+| _fork | train | 仅函数内 |
 | _fork | utils | 模块级 |
 | cli | (包根) | 仅函数内 |
 | cli | core | 模块级 |
@@ -118,6 +119,7 @@
 | serve | core | 模块级 |
 | serve | dsl | 模块级 |
 | train | (包根) | 模块级 |
+| train | _fork | 仅函数内 |
 | train | _surogate | 模块级 |
 | train | _surogate_serve | 仅函数内 |
 | train | core | 模块级 |
@@ -130,7 +132,7 @@
 | utils | (包根) | 仅函数内 |
 | utils | _surogate | 仅函数内 |
 
-互相导入的子包：_fork ↔ grpo、cli ↔ serve、distill ↔ train、grpo ↔ rewards。
+互相导入的子包：_fork ↔ grpo、_fork ↔ train、cli ↔ serve、distill ↔ train、grpo ↔ rewards。
 
 ## 动态导入
 

@@ -316,6 +316,11 @@ class SurogateTrainerWrapper:
         config.runtime_config.dsl_ir_json = ir_json
         self._block_schema_summary = _summarize_block_schemas(ir_json)
 
+        # Dispatch-PP full training of a tied model keeps the tied gradient only when
+        # stage 0 and the loss stage share GPU 0; refuse the plans that drop the lookup part.
+        from surogate._fork.dispatch_pp_tied_head import refuse_lost_tied_gradient
+        refuse_lost_tied_gradient(config, ir_json)
+
         # Packed documents restart the Gated DeltaNet state only in eager execution; a captured
         # step would carry each document's recurrent state into the next one.
         from surogate.train.row_packing import cuda_graphs_for_gated_delta_rule

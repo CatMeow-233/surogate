@@ -17,7 +17,7 @@ last_synced = "282f99012a78c888725b8c3d8f9000749eca4e66"   # 2026-10-23
 # Fork-only paths: the merge base has no history for them.
 prefixes = [
     "fork/",
-    "surogate/_fork/",   # code the GRPO patches import; ships in the native wheel, so TLC code stays in fork/tlc
+    "surogate/_fork/",   # code the ledgered Python patches import; ships in the native wheel, so TLC code stays in fork/tlc
 ]
 files = [
     "AGENTS.md",
@@ -246,7 +246,7 @@ conflict_history = [
 id = "T10"
 title = "tied lm_head shares the embedding in full training"
 commits = ["5722fc7f", "213f2997"]   # 213f2997: Gemma 3 declaration, CPU-norm pin
-switch = "always on for tie_word_embeddings models, Gemma 3 configs without the key included; LoRA/QLoRA unchanged, except that Gemma 3 LoRA now aliases the frozen head to the embedding as the other tied models do"
+switch = "always on for tie_word_embeddings models, Gemma 3 configs without the key included; LoRA/QLoRA unchanged, except that Gemma 3 LoRA now aliases the frozen head to the embedding as the other tied models do; dispatch-PP full training of a tied model refuses plans whose stage 0 and loss stage run on different GPUs"
 # Defect (upstream 282f9901, unchanged since 2580d6cc / 4ac6a3d8): in full training the IR's lm_head is a
 # trainable parameter of its own, while its gradient is the embedding's buffer (dsl_grad_store.cpp:104-113)
 # and the GPU optimizers skip a gradient pointer they have seen (adamw_8bit_optimizer.cpp:237-241,
@@ -272,13 +272,17 @@ switch = "always on for tie_word_embeddings models, Gemma 3 configs without the 
 # cpu_adamw.cpp cpu_gradient_norm_squared (the cpu_training norm over the shared host copy); the tie
 # resolution in pretrained_config.cpp load_pretrained_config, ir.cpp and dsl_model.cpp. These are not in
 # `files`, so the sync report does not group upstream commits to them under T10: a failing pin does.
-# Not fixed (pre-existing upstream, CPU replay only): dispatch-PP full training reads the `embedding`
-# gradient from stage 0's GPU and the `lm_head` gradient from the loss stage's GPU (py_train.cpp, stage s
-# on GPU s % ngpu) and memcpys both into GPU 0's one aliased buffer (dispatch_pp_write_grads,
-# dsl_model_execution.cpp:2431-2443), the later write winning. When (num_stages-1) % ngpu != 0 the tied
-# matrix gets only the head gradient and silently loses the embedding-lookup gradient (e.g. 28 layers on
-# 2 GPUs with SUROGATE_DISPATCH_STAGE_BLOCKS=14, or on 4/8 GPUs by default). Upstream never updated the
-# head in any configuration; T10's setup refusal does not fire (every GPU holds a full replica).
+# Refused, not fixed (pre-existing upstream, CPU replay only): dispatch-PP full training reads the
+# `embedding` gradient from stage 0's GPU and the `lm_head` gradient from the loss stage's GPU (py_train.cpp
+# dispatch_pp_train_step_multigpu, stage s on GPU s % ngpu) and memcpys both into GPU 0's one aliased buffer
+# (dsl_model_execution.cpp dispatch_pp_write_grads), the later write winning. When (num_stages-1) % ngpu != 0
+# the tied matrix would get only the head gradient and lose the embedding-lookup gradient (e.g. 28 layers on
+# 2 GPUs with SUROGATE_DISPATCH_STAGE_BLOCKS=14, or on 4/8 GPUs by default). Upstream never updated the head
+# in any configuration; T10's setup refusal does not fire (every GPU holds a full replica). The SFT and GRPO
+# trainers now call surogate/_fork/dispatch_pp_tied_head.py right after building the IR: with lora false and
+# a tie resolved as the native trainer resolves it (config.json, else the declaration), such a plan raises
+# ValueError naming stage sizes and GPU counts that keep both stages on GPU 0. A native fix (sum the copies
+# across GPUs) would make the refusal unnecessary; test_dispatch_pp_tied_head.py pins the code it describes.
 files = [
     "csrc/src/runtime/dsl/dsl_param_store.h",
     "csrc/src/runtime/dsl/dsl_param_store.cpp",
@@ -288,16 +292,23 @@ files = [
     "csrc/src/runtime/dsl/dsl_grad_store.cpp",
     "csrc/src/runtime/optimizers/adamw_8bit_optimizer.cpp",
     "surogate/dsl/models/gemma3.py",   # declares the tie the official Gemma 3 configs leave to HF's default
+    "surogate/train/trainer.py",       # SFT: the dispatch-PP refusal call after the IR is built
+    "surogate/grpo/trainer.py",        # GRPO: the same call (the file is shared with T6-T8)
 ]
 fork_files = [
     "fork/native/cmake/fork_native.cmake",   # attaches the C++ test to dsl-run-state-tests (shared with T5)
     "fork/native/tests/test-fork-tied-lm-head.cpp",
     "fork/patches/tests/native/test_tied_lm_head.py",
+    "surogate/_fork/dispatch_pp_tied_head.py",
+    "fork/patches/tests/native/test_dispatch_pp_tied_head.py",
 ]
 tests = [
     "fork/patches/tests/native/test_tied_lm_head.py",
+    "fork/patches/tests/native/test_dispatch_pp_tied_head.py",
     "fork/native/tests/test-fork-tied-lm-head.cpp",
     "fork/tlc/tests/gpu/test_gates.py",
     "fork/tlc/tests/cpu/test_gpu_gate_logic.py",
 ]
-conflict_history = []
+conflict_history = [
+    "2026-10-30 reverse replay of the dispatch-PP refusal call sites, conflict blocks at 90/30/14 days: surogate/train/trainer.py 0/0/0, surogate/grpo/trainer.py 0/0/0",
+]
