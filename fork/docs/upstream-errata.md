@@ -239,3 +239,34 @@ GPU 检查（未做）：在 5090 上用 transformers 构建一个随机权重�
 1. 前向：B=1、T=256，一条随机 token 序列，`trainer.validate(inputs, targets)`（`targets` 为左移一位的 `inputs`，末位 -100），然后运行 `python3 fork/patches/tests/native/t22_attention_dump_check.py <目录> --layer 5 --hq 4 --hkv 2 --scale 0.07715167498104596`。期望：`[ATTN] dir=fwd layer=5` 一行是 `backend=cudnn`、`packed=0`，其余各层是 `flash_varlen`；修复后脚本对 out 与 lse 都报告 `declared`、以 0 退出：out 与声明比例参考的相对 L2 约 0.2%（阈值 2%），与默认比例参考约 7%；lse 与声明比例参考的最大差约 1e-6 nats（阈值 0.05），与默认比例参考约 2 nats（5 条随机序列中 1.9–2.3）。修复前两边对调，脚本报告 `default`、以 1 退出。
 2. 反向：清空目录，对同一批数据做一次 `trainer.step`（一个微步），再运行同一条命令；目录中多了 `qkv_bwd`、`d_out` 与 `d_qkv`，脚本也比较 d_qkv。期望：`[ATTN] dir=bwd layer=5` 是 `backend=cudnn`；修复后 d_qkv 与声明比例参考的相对 L2 在阈值 3% 以内（模拟约 0.2%；把 P 与 dS 舍入为 bf16 后约 0.3%），与默认比例参考约 14%，脚本以 0 退出；修复前报告 `default`。
 3. loss 只作粗查：把第 1 步的 loss 与 HF（`attn_implementation="eager"`，bf16，`labels=inputs`）比较。它分辨不了修复前后：在这个模型上（loss 约 8.4），缺陷只让 loss 变化 1.6e-4–8.7e-4（5 条随机序列，fp32），而 HF 自己的 bf16 与 fp32 之差可达 1.05e-3，sdpa 与 eager 之差可达 3.8e-4。两者相差超过 1e-2 时另有问题。早先的写法以 loss 为判据：修复前的差“远大于 bf16 噪声”在这个模型上不成立；比较两种文档布局训练一步后的 loss，其差距没有量化过。两者都已由上面两步代替。
+
+## 交叉熵 kernel 按 int 计算行偏移，一个 LM-head 分块超过 2^31 个 logits 时越界读写（fork 已修复：ledger T23）
+
+本节同样是例外：fork 修改了上游文件。行号对应上游 `282f9901`；`fused_classifier.cu` 在 `488e5f00` 与上游 `82d42c72` 中相同。
+
+缺陷：`csrc/src/kernels/fused_classifier.cu` 中四个交叉熵 kernel 用 int 计算 logits 与 dlogits 的下标 `row * P + i`（行号、`P` 与 `i` 都是 int），共 7 处：
+
+- `chunked_cross_entropy_forward_kernel`（V > 65536）：`:680` 读每个词表分块的 logits 求 LSE，`:699` 读目标 logit。
+- `chunked_cross_entropy_backward_kernel`：`:768` 给 target 为 -100 的行写零，`:788` 写梯度。
+- `cross_entropy_forward_kernel`（V ≤ 65536）：`:598` 读目标 logit。
+- `cross_entropy_backward_kernel`：`:626`、`:653` 两处写。
+
+同一文件中两个反向 kernel 的读取（`:640`、`:775`）、`prepare_softmax_blockwide3`、`fused_classifier_kernel5`、`argmax_correct_kernel`、`extract_logprobs_kernel`、`scale_logits_rows_kernel`、softcap 与 `kd_*`/`candidate_*` kernel 已经用 int64 的行基址。nvcc 13.1 为 compute_120a 生成的 PTX 中，这 7 处是 `mul.lo.s32`/`mad.lo.s32`（PTX 规定按 32 位回绕）再 `mul.wide.s32` 成字节偏移：先回绕，再符号扩展。
+
+触发：这些 kernel 一次处理一个 LM-head 分块的行（`fused_lm_head_loss.cpp` 的 SFT 路径 `:477`、`:729`，GRPO/DPO 默认的行压缩路径 `:976`、`:1207`，以及 `cross_entropy_loss.cpp:58`、`:118`），logits 缓冲区是 `{B*T/lmhead_chunks, V}`（`dsl_run_state.cpp:618-621`）。分块行数 × V 超过 2^31 时回绕：V=151936（Qwen2.5/3）从 14,135 行起，128256（Llama 3）从 16,744 行起，201088（GPT-OSS）从 10,680 行起，248320（Qwen3.5）从 8,649 行起，262144 从 8,193 行起；V=65536（LFM2，走非分块 kernel）从 32,769 行起。`surogate/core/config/sft_config.py:726-759` 的自动分块：全量训练按约 256 行一块、最多 32 块；LoRA 默认不自动分块，只在 LoRA+recompute 时取第一个能整除 BT 的块数（fp8_hybrid 依次试 2、4、8，其他 recipe 试 8、4、2），都不能整除或 `recompute: false` 时保持 1 块。GRPO 与 DPO 沿用这段逻辑，并默认走行压缩路径，分块行数是该块中的有效行数。V=151936 时可达的配置：
+
+- fp8_hybrid LoRA+recompute，BT ≥ 28,270（2 块），例如 `docs/guides/long-context.md` 开头的配置（`sequence_len: 32768`、`recompute: true`、batch 1）配 fp8_hybrid：两块各 16,384 行，第 14,134 行起共 13.7% 的元素回绕。`sequence_len` 不写时取 `max_model_len`（`sft_config.py:708-709`；Qwen3 为 40,960），batch 1 即每块 20,480 行。
+- LoRA 且 `recompute: false`，BT ≥ 14,135（1 块），例如 4096×4、8192×2、16384×1。
+- bf16/nvfp4 LoRA+recompute，BT ≥ 113,080（8 块），例如 131,072 个 token（`docs/guides/long-context.md` 的表中列出的长度）。
+- BT 不能被候选块数整除时退回 1 块。全量训练的自动分块取能整除 BT 的最大 2 的幂（最多 32）：BT 是 32 的倍数时，约 45 万个 token 以下不触发；BT 含 2 的因子少时阈值随之降低（奇数 BT 只有 1 块，从 14,135 起触发）；关闭自动分块（`auto_lmhead_chunks: false`）或显式给 `lmhead_chunks` 时按实际块数计算。
+
+影响（读代码与 CPU 模拟，GPU 上未确认）：回绕的前向读取让损失与保存的 LSE（反向用它）取到错误的值，或触发非法地址。反向是原地运算（`dlogits` 就是 `logits`）：读取正确，写入错位，回绕行的真实位置留着原始 logits，dX、dW（以及 LoRA）的 GEMM 把它们当作梯度；错位的写入落在 logits 缓冲区之前至多 2^31 个元素处（BF16 为 4 GiB），分块超过 2^32 个元素时落在缓冲区内更早的行上。那里是不是别的分配、结果是静默破坏还是 `cudaErrorIllegalAddress`，取决于 GPU 上的地址布局，未确认。
+
+修复（T23，始终开启，没有开关）：这 7 处在乘法前把行号转成 `int64_t`（`static_cast<int64_t>(row) * P + i`），与同文件中 `kd_*` 版本和反向读取的写法相同。只有地址计算改变：为 compute_120a 编译修复前后的 PTX，这四个 kernel（各有 float 与 BF16 两个实例）之外的 29 个入口逐字节相同；这 8 个入口的浮点指令序列（操作码、立即数与源码行）相同；按数据流追踪全局读写的地址，修复前有 20 处经过含 `P` 的 32 位乘法，修复后为 0。分块行数 × V ≤ 2^31 的形状读写相同的元素、做相同的浮点运算，结果不变。
+
+验证（没有 GPU）：`fork/patches/tests/native/test_cross_entropy_row_offsets.py`（`fork/dev test patches`）把这四个 kernel、`prepare_softmax_blockwide3`、`SoftmaxParams`、`maybe_softcap_value` 以及 `kernels.h` 的两个分块常量按源码原样编译成主机 C++，用 `-fwrapv`，int 溢出按 PTX 的方式回绕。每次调用运行一个 block、一个线程（`blockReduce` 退化为恒等），这个线程访问 GPU 上整个 block 访问的全部元素。logits 缓冲区是一段 `PROT_NONE` 的地址保留（行数 × V 个元素，下方另留 2^31 个元素），只有被测的行可读写，越界访问立即触发 SIGSEGV，探针报告元素偏移。float 与 BF16 两种实例各跑：V=151936 的第 14,134 行（前向的全部分块；反向的全部 block，target 分别为普通 token 与 -100）；V=100000 第 21,474 行的目标 logit（分块 0 的循环都在 2^31 以内，只有 `:699` 越界）；V=65536 的第 32,768 行（非分块的前向与反向）；另有 28,270 行时的末行（超过 2^32，回绕后落在缓冲区内）。在上游源码（`488e5f00`）上这 15 个用例都在回绕的访问处出错（元素偏移 -2^31 附近，或缓冲区内更早的行），修复后与 float64 参考一致；不回绕的最后一行（V=151936 的第 14,133 行、V=65536 的第 32,767 行）在修复前后都通过。用同一个探针分别编译上游与修复后的 kernel，36 个不回绕的用例输出逐字节相同。`fused_classifier.cu` 按 sm_120a 的编译命令编译通过（PTX 与 SASS）。
+
+GPU 检查（未做）：在 5090 上运行。
+
+1. kernel 级：BF16 logits `{16384, 151936}`（4.64 GiB），随机值，target 随机，其中若干行为 -100。调用 `chunked_cross_entropy_forward`，再用它的 LSE 调用原地的 `chunked_cross_entropy_backward`（`dloss` 为 1/16384），在 `compute-sanitizer --tool memcheck` 下运行，与 torch float32 的 `log_softmax`/`softmax` 参考比较每行的 loss、LSE 与 dlogits。期望：修复前 memcheck 报告第 14,134 行起的越界读写（或出现非法地址错误），或这些行与参考不符；修复后 memcheck 干净，结果在 bf16 误差内与参考一致，第 14,134 行之前的行与修复前逐位相同。非分块 kernel 同样检查：V=65536、32,769 行，`fused_cross_entropy_forward` 与 `fused_cross_entropy_backward`（4.3 GB）。
+2. 端到端：Qwen3-0.6B，LoRA，`recipe: fp8_hybrid`，`recompute: true`，`per_device_train_batch_size: 1`，`sequence_len: 32768`（日志出现 `Auto-setting lmhead_chunks=2`），训练 1 步；同一配置加 `lmhead_chunks: 4`（每块 8,192 行，不回绕）作对照，比较 loss 与 grad norm。期望：修复前出现非法地址错误，或 loss、grad norm 与对照不一致；修复后两者在 bf16 误差内相同。显存估计约 8 GB（logits 4.64 GiB），32 GB 的卡放得下（估计，未确认）。

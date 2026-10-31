@@ -618,3 +618,33 @@ tests = ["fork/patches/tests/native/test_cudnn_softmax_scale.py"]
 conflict_history = [
     "2026-10-31 reverse replay of 7523eb3b onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: attention_kernels.h 0/0/0, attention_cudnn.cpp 0/0/0, attention_custom.cu 0/0/0, backend_cudnn.cpp 0/0/0",
 ]
+
+[[topic]]
+id = "T23"
+title = "64-bit row offsets in the cross-entropy kernels"
+commits = []
+switch = "always on (defect fix); chunks of at most 2^31 logits read and write the same elements with the same float arithmetic"
+# Defect (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "交叉熵 kernel 按 int 计算行偏移"):
+# fused_classifier.cu formed the logits/dlogits index as `row * P + i` in int at seven sites:
+# chunked_cross_entropy_forward_kernel (:680 the LSE loop, :699 the target logit), chunked_cross_entropy_backward_kernel
+# (:768 the masked-row zeros, :788 the gradient), cross_entropy_forward_kernel (:598 the target logit) and
+# cross_entropy_backward_kernel (:626, :653). nvcc emits mul.lo.s32/mad.lo.s32 then mul.wide.s32, a 32-bit wrap;
+# the backward reads already used an int64 row base. The LM-head loss runs these kernels on one LM-head chunk
+# (fused_lm_head_loss.cpp, cross_entropy_loss.cpp), so rows-per-chunk x V > 2^31 wraps: from 14,135 rows at
+# V=151936 (Qwen2.5/3), 32,769 rows at V=65536 (LFM2). Reached by LoRA fp8_hybrid with recompute at BT >= 28,270
+# (lmhead_chunks 2), LoRA without recompute at BT >= 14,135 (1 chunk), bf16 LoRA at 128k context (8 chunks), any BT
+# the auto-chunking cannot divide, and GRPO/DPO compact chunks with that many valid rows. Wrapped reads feed garbage
+# into the loss and the saved LSE; wrapped writes land up to 2^31 elements (4 GiB in BF16) below the logits buffer,
+# or inside it past 2^32, and the in-place backward leaves raw logits in the rows' true slots for the dX/dW GEMMs.
+# Fix: the seven sites cast the row to int64_t before the multiply, as the kd_* copies of these kernels and the
+# backward reads already did. Only the address arithmetic of the four kernels changes (PTX for compute_120a:
+# every other entry of the TU is identical, the four kernels' float op sequences are identical, and no 32-bit
+# product of P reaches a global address); in-range shapes give byte-identical results in the host probe.
+# The CPU test compiles the four kernels and their helpers from the sources as host C++ with -fwrapv and runs
+# blocks of rows past 2^31 elements in a PROT_NONE reservation where only the row under test is accessible; it
+# fails on upstream's sources (each wrapped access faults up to 2^31 elements below the base, or in an earlier row).
+# Compiled for sm_120a; GPU behaviour is unverified (5090 check in the errata).
+files = ["csrc/src/kernels/fused_classifier.cu"]
+fork_files = ["fork/patches/tests/native/test_cross_entropy_row_offsets.py"]
+tests = ["fork/patches/tests/native/test_cross_entropy_row_offsets.py"]
+conflict_history = []

@@ -595,7 +595,7 @@ __global__ void cross_entropy_forward_kernel(const floatX* logits,
     }
 
     if (threadIdx.x == 0) {
-        float logit_val = maybe_softcap_value((float)logits[idx * P + ix], softcap);
+        float logit_val = maybe_softcap_value((float)logits[static_cast<int64_t>(idx) * P + ix], softcap);
         // Accumulate loss (not overwrite) to support gradient accumulation
         losses[idx] += lse - logit_val;
         if (logsumexp) {
@@ -623,7 +623,7 @@ __global__ void cross_entropy_backward_kernel(floatX* dlogits,
     int ix = targets[idx];
     if (ix == -100) {
         for (int i = threadIdx.x; i < V; i += blockDim.x) {
-            dlogits[idx * P + i] = (floatX)0.0f;
+            dlogits[static_cast<int64_t>(idx) * P + i] = (floatX)0.0f;
         }
         return;
     }
@@ -650,7 +650,7 @@ __global__ void cross_entropy_backward_kernel(floatX* dlogits,
             float y = capped * inv_softcap;
             dlogit *= 1.0f - y * y;
         }
-        dlogits[idx * P + i] = (floatX)dlogit;
+        dlogits[static_cast<int64_t>(idx) * P + i] = (floatX)dlogit;
     }
 }
 
@@ -677,7 +677,7 @@ __global__ void chunked_cross_entropy_forward_kernel(const floatX* logits,
     float thread_maxval = -INFINITY;
     float thread_sumval = 0.0f;
     for (int i = start + threadIdx.x; i < end; i += blockDim.x) {
-        float v = maybe_softcap_value((float)logits[row_idx * P + i], softcap);
+        float v = maybe_softcap_value((float)logits[static_cast<int64_t>(row_idx) * P + i], softcap);
         float old_max = thread_maxval;
         thread_maxval = fmaxf(thread_maxval, v);
         thread_sumval *= expf(old_max - thread_maxval);
@@ -696,7 +696,7 @@ __global__ void chunked_cross_entropy_forward_kernel(const floatX* logits,
                 if (valid_token_count) {
                     atomicAdd(valid_token_count, 1);
                 }
-                float logit_val = maybe_softcap_value((float)logits[row_idx * P + ix], softcap);
+                float logit_val = maybe_softcap_value((float)logits[static_cast<int64_t>(row_idx) * P + ix], softcap);
                 // Accumulate loss (not overwrite) to support gradient accumulation
                 losses[row_idx] -= logit_val;
             }
@@ -765,7 +765,7 @@ __global__ void chunked_cross_entropy_backward_kernel(floatX* dlogits,
     int ix = targets[row_idx];
     if (ix == -100) {
         for (int i = start + threadIdx.x; i < end; i += blockDim.x) {
-            dlogits[row_idx * P + i] = (floatX)0.0f;
+            dlogits[static_cast<int64_t>(row_idx) * P + i] = (floatX)0.0f;
         }
         return;
     }
@@ -785,7 +785,7 @@ __global__ void chunked_cross_entropy_backward_kernel(floatX* dlogits,
             float y = capped * inv_softcap;
             dlogit *= 1.0f - y * y;
         }
-        dlogits[row_idx * P + i] = (floatX)dlogit;
+        dlogits[static_cast<int64_t>(row_idx) * P + i] = (floatX)dlogit;
     }
 }
 

@@ -87,7 +87,7 @@ fork CI（`.github/workflows/fork-ci.yml`）在每个分支的每次推送时运
 | 8. 检查 | `fork/dev check`；不带 `--fast` 时还运行 `fork/dev test patches`、`fork/dev test experimental`、`fork/dev test tlc`、`fork/dev test tools` 和 `fork/dev test cpu`，它们需要准备好的 `.venv`（或 `FORK_PY`）、uv，以及 download.pytorch.org（无法访问时设 `FORK_TORCH_INDEX=pypi`），见 [fork/README.md 的“首次准备环境”](../README.md#首次准备环境)。 | 退出码 4 |
 | 9. 发布 | `git push -u origin <同步分支>`；PR 还没有打开时 `gh pr create -R CatMeow-233/surogate --base main`，正文（`.git/fork-sync-pr.md`）是第 3 步的报告加上同步分支的提交列表；PR 已经打开时（例如 `--continue` 之后）推送就更新了它，不再新建。`--local` 跳过此步。 | 退出码 1 |
 | 10. 完成 | PR 的检查通过后运行 `fork/dev sync --finish`。它先 `git fetch origin main <同步分支>`，要求本地 `HEAD` 等于 `origin/<同步分支>` 和 PR 的 head（`gh pr view --json headRefOid`），并且包含 `origin/main`；再用 `gh api .../commits/<HEAD>/check-runs` 确认 `check`、`experimental`、`fork-tests`、`openmp-contract` 在这个提交上都已通过（同名检查重跑过时以最新一次为准）；然后 `git switch main`、`git merge --ff-only <HEAD>`、`git push origin <HEAD>:refs/heads/main`。推送的总是检查过的那个提交：本地还没推送的提交、比 PR head 旧的本地分支都不会进入 `main`。 | 任一条件不满足时退出码 4，列出原因或未通过的 job，`main` 不变 |
-| 11. GPU 复测 | 报告中出现 T1–T5、T6–T8 或 T10 的上游提交时，在 GPU 主机上运行 `fork/dev test gpu`，并在该 topic 的 `conflict_history` 末尾记一行（日期、上游 sha、结果）。出现 T17–T19 的上游提交时，再做 [errata](upstream-errata.md) 中对应一节的 GPU 检查；出现 T20 的，再做 [performance.md](performance.md#不能捕获的整步只预热一次) 中的检查。出现 T22 的上游提交时，再做 [errata](upstream-errata.md#cudnn-注意力忽略-softmax_scalegemma3-27b-的全局层按-1sqrt128-训练fork-已修复ledger-t22) 中 T22 一节的 GPU 检查。 | — |
+| 11. GPU 复测 | 报告中出现 T1–T5、T6–T8 或 T10 的上游提交时，在 GPU 主机上运行 `fork/dev test gpu`，并在该 topic 的 `conflict_history` 末尾记一行（日期、上游 sha、结果）。出现 T17–T19 的上游提交时，再做 [errata](upstream-errata.md) 中对应一节的 GPU 检查；出现 T20 的，再做 [performance.md](performance.md#不能捕获的整步只预热一次) 中的检查。出现 T22 的上游提交时，再做 [errata](upstream-errata.md#cudnn-注意力忽略-softmax_scalegemma3-27b-的全局层按-1sqrt128-训练fork-已修复ledger-t22) 中 T22 一节的 GPU 检查。出现 T23 的上游提交时，再做 [errata](upstream-errata.md#交叉熵-kernel-按-int-计算行偏移一个-lm-head-分块超过-231-个-logits-时越界读写fork-已修复ledger-t23) 中 T23 一节的 GPU 检查。 | — |
 
 `--continue` 在同步分支上重新执行第 6–9 步，已经完成的部分会跳过，所以修复之后可以反复运行。它按分支名 `sync/<日期>-<sha 前 8 位>` 找同步合并：同步分支第一父链上第二父提交以这 8 位开头、并且是 `upstream/main` 祖先的最新合并；找不到（例如 `git merge --abort` 之后）或该提交不在上游历史中时停下，不会把别的合并当作同步合并。
 
@@ -211,6 +211,13 @@ git log --oneline HEAD..MERGE_HEAD -- <文件>                # 上游改了什�
 - 反向回放：4 个文件都是 0/0/0。90 天内上游只改过 `attention_kernels.h`（2 次，flash_varlen 与 kvprefix 反向声明的 `dq_splits`）和 `backend_cudnn.cpp`（1 次，`supports()` 拒绝非因果），都不在 T22 的行附近；`attention_cudnn.cpp` 与 `attention_custom.cu` 上游最后一次修改在 2026-04。
 - 解决：以上游为准，再把 `scale` 参数和这几处传递放回。上游新增 cuDNN 封装的调用方时，同样传入 op 的比例。上游让 `attn_scale` 不再是 pass-by-value，或把比例放进图缓存的键时，按新代码重新判断（pin 会失败）。上游自己传递了比例时，删去 T22。`flash_attention.cpp` 中 `MoeRolloutParity` 置空 `cudnn_handle` 的做法 fork 没有改动。
 - 测试：`fork/patches/tests/native/test_cudnn_softmax_scale.py`（`fork/dev test patches`，不需要 GPU；探针按源码原样编译 `CuDNNAttention` 与各封装，函数改名或签名变化时它在提取或编译时失败，按新代码调整测试中的桩）；GPU 检查见 errata，它用同一目录的 `t22_attention_dump_check.py` 比较 `flash_attention.cpp` 转储的第 5 层 attention 张量。上游改了转储的名字、格式或位置时，同一个测试文件中的 pin 失败，按新代码改脚本。
+
+### T23 交叉熵 kernel 的 64 位行偏移
+
+- 文件：`csrc/src/kernels/fused_classifier.cu`（`cross_entropy_forward_kernel`、`cross_entropy_backward_kernel`、`chunked_cross_entropy_forward_kernel`、`chunked_cross_entropy_backward_kernel` 中 7 处 logits/dlogits 下标写成 `static_cast<int64_t>(行号) * P + i`）。缺陷与证据见 [upstream-errata.md](upstream-errata.md#交叉熵-kernel-按-int-计算行偏移一个-lm-head-分块超过-231-个-logits-时越界读写fork-已修复ledger-t23)。
+- 反向回放：见 ledger 中 T23 的 `conflict_history`。
+- 解决：以上游为准，再把这几处的 `static_cast<int64_t>` 放回；上游新增按行索引 logits 的 kernel，或改写这四个 kernel 时，同样在乘法前转成 64 位。上游自己改成 64 位时删去 T23。
+- 测试：`fork/patches/tests/native/test_cross_entropy_row_offsets.py`（`fork/dev test patches`，不需要 GPU；探针按源码原样编译这四个 kernel、`prepare_softmax_blockwide3` 与 `kernels.h` 的分块常量，函数改名或签名变化时它在提取或编译时失败，按新代码调整探针中的调用）；GPU 检查见 errata。
 
 ### 移动过的上游笔记与删除的文件
 
