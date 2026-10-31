@@ -208,7 +208,7 @@ git log --oneline HEAD..MERGE_HEAD -- <文件>                # 上游改了什�
 ### T22 cuDNN SDPA 使用 op 的 softmax_scale
 
 - 文件：`csrc/src/runtime/attention/attention_kernels.h`（`attention_forward_cudnn` 与 `attention_backward_cudnn` 的 5 个声明末尾加 `float scale`）、`attention_cudnn.cpp`（BF16 前向与反向的签名，`attn_scale_cpu` 取 `scale != 0.0f ? scale : 1.f / sqrtf(HS)`）、`attention_custom.cu`（FP32 前向与反向的签名和传给 `attention_gpu_forward`/`attention_gpu_backward` 的比例；Tensor 重载的签名，两个分支都传 `scale`）、`backend_cudnn.cpp`（`forward()`、`backward()` 的三处调用传 `p.softmax_scale`）。缺陷与证据见 [upstream-errata.md](upstream-errata.md#cudnn-注意力忽略-softmax_scalegemma3-27b-的全局层按-1sqrt128-训练fork-已修复ledger-t22)。
-- 反向回放：见 ledger 中 T22 的 `conflict_history`。
+- 反向回放：4 个文件都是 0/0/0。90 天内上游只改过 `attention_kernels.h`（2 次，flash_varlen 与 kvprefix 反向声明的 `dq_splits`）和 `backend_cudnn.cpp`（1 次，`supports()` 拒绝非因果），都不在 T22 的行附近；`attention_cudnn.cpp` 与 `attention_custom.cu` 上游最后一次修改在 2026-04。
 - 解决：以上游为准，再把 `scale` 参数和这几处传递放回。上游新增 cuDNN 封装的调用方时，同样传入 op 的比例。上游让 `attn_scale` 不再是 pass-by-value，或把比例放进图缓存的键时，按新代码重新判断（pin 会失败）。上游自己传递了比例时，删去 T22。`flash_attention.cpp` 中 `MoeRolloutParity` 置空 `cudnn_handle` 的做法 fork 没有改动。
 - 测试：`fork/patches/tests/native/test_cudnn_softmax_scale.py`（`fork/dev test patches`，不需要 GPU；探针按源码原样编译 `CuDNNAttention` 与各封装，函数改名或签名变化时它在提取或编译时失败，按新代码调整测试中的桩）；GPU 检查见 errata。
 

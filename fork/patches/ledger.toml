@@ -575,7 +575,7 @@ conflict_history = [
 [[topic]]
 id = "T22"
 title = "cuDNN SDPA applies the op's softmax_scale"
-commits = []
+commits = ["7523eb3b"]
 switch = "always on (defect fix); ops without an explicit softmax_scale are bit-identical"
 # Defect (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "cuDNN 注意力忽略 softmax_scale"):
 # CuDNNAttention::supports() never read AttentionParams::softmax_scale and forward()/backward() did not pass it on;
@@ -604,4 +604,6 @@ files = [
 ]
 fork_files = ["fork/patches/tests/native/test_cudnn_softmax_scale.py"]
 tests = ["fork/patches/tests/native/test_cudnn_softmax_scale.py"]
-conflict_history = []
+conflict_history = [
+    "2026-10-31 reverse replay of 7523eb3b onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: attention_kernels.h 0/0/0, attention_cudnn.cpp 0/0/0, attention_custom.cu 0/0/0, backend_cudnn.cpp 0/0/0",
+]
