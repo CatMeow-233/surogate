@@ -677,7 +677,7 @@ conflict_history = [
 id = "T24"
 title = "NVFP4 Four Over Six: unbiased SR, stored-scale encode, fresh SR noise on graph replays"
 commits = ["af89ae9b", "33b73381"]   # af89ae9b: SR and RN; 33b73381: fresh SR noise on graph replays
-switch = "on by default (defect fixes); SUROGATE_NVFP4_4O6_SR_LEGACY=1 runs upstream's 4/6 SR kernel, SUROGATE_NVFP4_4O6_RN_LEGACY=1 upstream's 4/6 RN kernel, SUROGATE_NVFP4_SR_GRAPH_LEGACY=1 makes graph replays reuse the captured SR noise again (each read once per process)"
+switch = "on by default (defect fixes), each switch read once per process: SUROGATE_NVFP4_4O6_SR_LEGACY=1 runs upstream's 4/6 SR kernel, which takes no graph generation, so under graphs the wgrad 4/6 operand reuses the captured noise too; SUROGATE_NVFP4_4O6_RN_LEGACY=1 runs upstream's 4/6 RN kernel; SUROGATE_NVFP4_SR_GRAPH_LEGACY=1 makes graph replays reuse the captured SR noise again in the fork 4/6 SR kernel and the standard SR kernels (for the 4/6 operand it matters only while SR_LEGACY is unset)"
 # Defects (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "NVFP4 随机舍入与 Four Over Six 块比例的缺陷"):
 # (SR) quantize_block_4o6_stochastic (quant_nvfp4_4o6_sm100.cu) adds a fixed (b/256-0.5)*0.5 dither before
 # round-to-nearest, unbiased only where the E2M1 spacing is 0.5 (2.4 rounds up with p=76/256, not 0.4; bias up
@@ -690,8 +690,8 @@ switch = "on by default (defect fixes); SUROGATE_NVFP4_4O6_SR_LEGACY=1 runs upst
 # host value fixed at capture, so every replay of the captured training step reuses one noise pattern; this also
 # holds for the standard Philox SR kernels in quant_nvfp4_cutlass.cu (dgrad dout, LoRA included).
 # Fix: the 4/6 kernels live in fork/native/src/nvfp4_4o6.cu, compiled into surogate-common; the three launchers in
-# quant_nvfp4_4o6.cu call them after abs_max unless the legacy switch is set (upstream's kernel file is untouched
-# and stays the legacy path). SR: upstream's 4-vs-6 choice; the smallest E4M3 scale >= d(1-2^-16), clamped to
+# quant_nvfp4_4o6.cu call them unless the legacy switch is set, after abs_max (the two auto_scale launchers) or
+# with the caller's amax (from_amax) (upstream's kernel file is untouched and stays the legacy path). SR: upstream's 4-vs-6 choice; the smallest E4M3 scale >= d(1-2^-16), clamped to
 # [2^-9, 448]; encode with the stored scale; SRC few-bit rounding (arXiv:2504.20634) on the local spacing, |E-y| <=
 # spacing/512; one Philox4x32-10 per 16 values. RN: both candidates encoded with and judged on their stored RN
 # scale, clamp [2^-9, 448]. Graphs: surogate_fork/sr_graph_generation.cuh gives each including TU a device

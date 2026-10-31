@@ -8,7 +8,8 @@
 //     5e-2 on this tensor.
 //   - RN: the codes and scales match the host model; blocks below upstream's 1/128 clamp decode at their size.
 //   - Graphs: a replayed capture of the 4/6 SR and the standard SR quantizer gives new codes on every replay,
-//     eager calls with one seed give identical codes.
+//     eager calls with one seed give identical codes. With SUROGATE_NVFP4_4O6_SR_LEGACY=1 the 4/6 codes repeat
+//     (upstream's kernel takes no generation); the standard codes still follow SUROGATE_NVFP4_SR_GRAPH_LEGACY.
 #include <catch2/catch_test_macros.hpp>
 
 #include <cuda_bf16.h>
@@ -330,6 +331,9 @@ TEST_CASE("NVFP4 SR draws fresh noise on every CUDA graph replay", "[nvfp4-4o6][
     cudaDeviceProp prop{};
     if (!have_sm100(prop)) SKIP("needs an SM100+ GPU");
     const bool fresh = !env_is_one("SUROGATE_NVFP4_SR_GRAPH_LEGACY");
+    // SUROGATE_NVFP4_4O6_SR_LEGACY=1 runs upstream's 4/6 SR kernel, which takes no generation: its replays reuse the
+    // captured noise whatever the graph switch says. The standard SR kernels follow the graph switch alone.
+    const bool four_fresh = fresh && q4::four_over_six_sr_fixed();
     constexpr int M = 128, K = 1024;
     const std::vector<float> x = make_input(M, K, 29, false);
     Device four(M, K, x), standard(M, K, x);
@@ -365,8 +369,8 @@ TEST_CASE("NVFP4 SR draws fresh noise on every CUDA graph replay", "[nvfp4-4o6][
         four_scales.push_back(four.scales.get());
     }
     for (int replay = 1; replay < 3; ++replay) {
-        INFO("replay " << replay << ", fresh noise expected: " << fresh);
-        CHECK((four_codes[replay] != four_codes[replay - 1]) == fresh);
+        INFO("replay " << replay << ", fresh noise expected: 4/6 " << four_fresh << ", standard " << fresh);
+        CHECK((four_codes[replay] != four_codes[replay - 1]) == four_fresh);
         CHECK((standard_codes[replay] != standard_codes[replay - 1]) == fresh);
         CHECK(four_scales[replay] == four_scales[0]);
     }

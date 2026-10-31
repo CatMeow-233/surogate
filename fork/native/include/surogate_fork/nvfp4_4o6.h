@@ -4,8 +4,9 @@
 // The fork's Four Over Six NVFP4 quantization kernels (fork/native/src/nvfp4_4o6.cu), which the upstream
 // launchers in csrc/src/recipes/nvfp4/kernels/quant_nvfp4_4o6.cu call instead of the kernels in
 // quant_nvfp4_4o6_sm100.cu unless the matching *_LEGACY switch is set. Both take the tensor's global amax (the
-// launcher computes it first) and write the same outputs as upstream's kernels: packed E2M1 codes [M, K/2],
-// E4M3 block scales in CUTLASS's Sm1xxBlkScaledConfig layout, decoded by the GEMM as code * scale * amax / 1536.
+// auto_scale launchers compute it first, quantize_nvfp4_4o6_cutlass_from_amax passes the caller's) and write the
+// same outputs as upstream's kernels: packed E2M1 codes [M, K/2], E4M3 block scales in CUTLASS's
+// Sm1xxBlkScaledConfig layout, decoded by the GEMM as code * scale * amax / 1536.
 //
 // T24, SR: quantize_4o6_stochastic (the wgrad dout^T operand): stochastic rounding that is unbiased on the whole
 //   E2M1 grid, an E4M3 scale rounded up so that no value saturates, encoding with the stored scale, and one
