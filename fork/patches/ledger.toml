@@ -517,7 +517,7 @@ conflict_history = [
 id = "T21"
 title = "cpu_training checkpoints its CPU AdamW moments"
 commits = ["b5ca1061"]
-switch = "always on (defect fix): checkpoints hold the moments and a resume reads them; SUROGATE_FORK_CPU_ADAMW_SAVE_STATE=0 writes none (upstream's checkpoints), SUROGATE_FORK_CPU_ADAMW_ALLOW_MISSING_STATE=1 resumes from a checkpoint without them (upstream's zero moments); GPU optimizers unchanged"
+switch = "always on (defect fix): checkpoints hold the moments and a resume reads them; SUROGATE_FORK_CPU_ADAMW_SAVE_STATE=0 writes none (upstream's checkpoints), SUROGATE_FORK_CPU_ADAMW_ALLOW_MISSING_STATE=1 resumes from a checkpoint without them (upstream's zero moments); GPU training unchanged; cpu_training with adamw/normuon now refuses a resume unless SUROGATE_FORK_CPU_ADAMW_ALLOW_MISSING_STATE=1 and briefly allocates the host moments (errata)"
 # Defect (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "cpu_training 的全量训练不保存 CPU AdamW
 # 的矩"): under cpu_training, AdamW8BitOptimizer::step routes every step to step_cpu_streaming, whose FP32 moments
 # (CPUAdamWState, pageable std::vectors) momentum_container()/variance_container() never exposed, so adam.m/adam.v
@@ -540,12 +540,14 @@ switch = "always on (defect fix): checkpoints hold the moments and a resume read
 # cudaMemcpy, so the weights shards and exports are unchanged). Results: a fresh run's step is unchanged (same
 # slots, offsets and kernels); a resume from a T21 checkpoint continues with the saved moments. Costs: 8 B/param
 # of disk per checkpoint and local rank (65.5 GB at 8B; SUROGATE_FORK_CPU_ADAMW_SAVE_STATE=0 skips it). Compatibility
-# rules: fork/docs/performance.md "cpu_training 的 AdamW 状态 checkpoint". Unchanged, adjacent: cpu_training with
-# adamw or normuon (no CPU path; their checkpoints hold no optimizer state, so their resume is now refused unless
-# opted in, and DslModel::prepare_optimizer_for_checkpoint_load's ADAMW_8BIT lays out host moments it drops at the
-# first step). The CPU test builds the production writer/reader and the fork module against libcudart without a
-# GPU and fails on upstream's writer; the sources compile for sm_120a; the GPU behaviour is unverified (5090 check
-# in the errata).
+# rules: fork/docs/performance.md "cpu_training 的 AdamW 状态 checkpoint". Not fixed, adjacent, but changed by T21:
+# cpu_training with adamw or normuon (no CPU path; their checkpoints hold no optimizer state, so their resume is now
+# refused unless opted in, and DslModel::prepare_optimizer_for_checkpoint_load's ADAMW_8BIT lays out host moments
+# it drops at the first step). Not checked: a GPU-training resume from a cpu_training checkpoint (require_complete
+# checks T21's containers only) starts the 8-bit state at zero without a warning, as upstream did. The CPU test
+# builds the production writer/reader and the fork module against libcudart without a GPU and fails on upstream's
+# writer; the sources compile for sm_120a; the GPU behaviour is unverified (5090 check in the errata: resume from a
+# copy of an uninterrupted max_steps: 30 run's step-10 checkpoint, with a zero-moment resume as positive control).
 files = [
     "csrc/src/runtime/optimizers/adamw_8bit_optimizer.cpp",   # shared with T10
     "csrc/src/runtime/training/checkpoint.cpp",

@@ -193,7 +193,7 @@ roadmap 还说整步 warmup 也会重复计数，这不对：微步 0 的前向�
 
 旧 checkpoint：上游和不带 T21 的 fork 写出的 `cpu_training` checkpoint 中没有矩（没有张量，或者是此后每次保存写下的无用 8-bit 状态），无法补救。用带 T21 的构建恢复它们会报错并说明原因；设 `SUROGATE_FORK_CPU_ADAMW_ALLOW_MISSING_STATE=1` 后照旧恢复（矩为零，与上游相同，打印警告），之后的 checkpoint 带有矩。
 
-未修复（相邻问题，只读了代码）：`cpu_training` 配 `adamw` 或 `normuon` 没有 CPU 路径（块参数的梯度在 GPU 上为空，T10 一节末尾已记），它们的 checkpoint 也不带优化器状态；它们恢复时 `DslModel::prepare_optimizer_for_checkpoint_load` 建的 `ADAMW_8BIT` 现在布置主机上的矩（8B 时 65.5 GB，第一步换成配置的优化器时释放），并且因文件里没有矩而拒绝，除非设上面的开关。应在配置阶段拒绝这种组合，不属于本修复。
+未修复（相邻问题，只读了代码）：`cpu_training` 配 `adamw` 或 `normuon` 没有 CPU 路径（块参数的梯度在 GPU 上为空，T10 一节末尾已记），它们的 checkpoint 也不带优化器状态；它们恢复时 `DslModel::prepare_optimizer_for_checkpoint_load` 建的 `ADAMW_8BIT` 现在布置主机上的矩（8B 时 65.5 GB，第一步换成配置的优化器时释放），并且因文件里没有矩而拒绝，除非设上面的开关。应在配置阶段拒绝这种组合，不属于本修复。另外，换训练方式的恢复只在一个方向上被拒绝：`cpu_training` 从 GPU 训练的 checkpoint 恢复时被拒绝；GPU 训练（不设 `cpu_training`）从 `cpu_training` 的 checkpoint 恢复时不检查（`require_complete` 只检查 T21 的容器），读取器跳过 `cpu_adamw.*`，`init_state` 初始化的 8-bit 状态（矩为零）留在原处，`on_restore_checkpoint` 把它标为已初始化，没有警告，与上游从任何 `cpu_training` checkpoint 恢复时相同。
 
 验证：`fork/patches/tests/native/test_cpu_adamw_checkpoint.py`（`fork/dev test patches`）用主机编译器从生产源码（`utilities/safetensors.cpp`、`cu_file_fallback.cpp`、`cu_file_common.cpp`、`tensor.cpp`、`dtype.cpp`、`utils.cpp`）和 `fork/native/src/cpu_adamw_checkpoint.cpp` 构建 `fork/native/tests/host/cpu_adamw_checkpoint.cpp`，链接 libcudart，不用 GPU：带 tied 别名的布局与上游的步顺序一致；保存、恢复后矩逐字节相同；只有文件头的旧文件和只有 8-bit 状态的文件被拒绝，开关打开后以零恢复；参数集不同、格式版本不同、形状或 dtype 不同时拒绝；保存开关关闭时不写矩但恢复仍读。需要 CUDA 工具包（`CUDA_HOME`）以及 fmt 与 nlohmann_json 的头文件（`FORK_FC_DEPS` 或 `csrc/build/_deps`），没有时跳过并说明原因（fork CI 中跳过，只运行源码 pin）。同一程序换成上游的 `safetensors.cpp` 时，写入在 `:518` 以 `cudaErrorInsufficientDriver` 失败。三个上游文件和 fork 源文件都按 sm_120a 的编译命令编译通过。
 

@@ -217,7 +217,7 @@ GRPO 在现有训练指标之外，还记录获取和发布的耗时。trainer �
 
 ## cpu_training 的 AdamW 状态 checkpoint
 
-`cpu_training` 的全量训练（`lora: false`，`optimizer: adamw_8bit`）在主机上用 FP32 的一阶矩和二阶矩做 AdamW（`step_cpu_streaming`）。上游不把它们写进 checkpoint，恢复时矩从零开始，同时在 GPU 上分配一份不用的 8-bit 状态；现象、证据与 5090 上的检查见 [upstream-errata.md](upstream-errata.md#cpu_training-的全量训练不保存-cpu-adamw-的矩fork-已修复ledger-t21)。T21 修复这个缺陷，默认开启：checkpoint 带上矩，恢复时读回，不再分配设备状态。代码在 `fork/native/src/cpu_adamw_checkpoint.cpp`（布局、容器、加载检查）与 `fork/native/include/surogate_fork/pageable_host.h`（写入器的主机分支），上游文件中只有调用点。GPU 优化器、LoRA 与新训练的 CPU 步都不变。
+`cpu_training` 的全量训练（`lora: false`，`optimizer: adamw_8bit`）在主机上用 FP32 的一阶矩和二阶矩做 AdamW（`step_cpu_streaming`）。上游不把它们写进 checkpoint，恢复时矩从零开始，同时在 GPU 上分配一份不用的 8-bit 状态；现象、证据与 5090 上的检查见 [upstream-errata.md](upstream-errata.md#cpu_training-的全量训练不保存-cpu-adamw-的矩fork-已修复ledger-t21)。T21 修复这个缺陷，默认开启：checkpoint 带上矩，恢复时读回，不再分配设备状态。代码在 `fork/native/src/cpu_adamw_checkpoint.cpp`（布局、容器、加载检查）与 `fork/native/include/surogate_fork/pageable_host.h`（写入器的主机分支），上游文件中只有调用点。GPU 训练、LoRA 与新训练的 CPU 步都不变。`cpu_training` 配 `adamw` 或 `normuon` 的恢复变了：它们的 checkpoint 没有优化器状态，恢复时被拒绝，除非设 `SUROGATE_FORK_CPU_ADAMW_ALLOW_MISSING_STATE=1`，并且恢复时先分配主机上的矩（8 字节/参数），第一步换成配置的优化器时释放（见 errata 的“未修复”段）。
 
 格式 v1（`adam.m.shard_<rank>_of_<n>.safetensors` 与 `adam.v.shard_...`）：
 
@@ -245,9 +245,9 @@ GRPO 在现有训练指标之外，还记录获取和发布的耗时。trainer �
 
 兼容规则：
 
-1. 名字与 GPU 路径的 `adamw8bit.state1`/`scales1`/`state2`/`scales2`（BYTE 与 FP16）不相交。在 `cpu_training` 与 GPU 训练之间切换后恢复，文件里没有任何应有的名字，被拒绝，不会悄悄归零。GPU 路径的加载不做这项检查，行为与上游相同。
+1. 名字与 GPU 路径的 `adamw8bit.state1`/`scales1`/`state2`/`scales2`（BYTE 与 FP16）不相交。只有 `cpu_training` 的恢复检查文件：`cpu_training` 从 GPU 训练的 checkpoint 恢复时，文件里没有任何应有的名字，被拒绝，不会悄悄归零。反方向不检查：GPU 训练从 `cpu_training` 的 checkpoint 恢复时，读取器跳过 `cpu_adamw.*`，8-bit 状态从零开始，没有警告，与上游相同。
 2. 每个 master 一个张量：参数集变化（换了模型，或可训练参数不同）表现为缺少名字（拒绝，报错写明缺少的名字）或形状不符；dtype 或形状不符由读取器报错（`allow_cast` 为 false）。
-3. 上游与不带 T21 的 fork 写出的 `cpu_training` checkpoint 没有矩（没有张量，或者是此后每次保存写下的无用 8-bit 状态），`adamw` 与 `normuon` 的 checkpoint 也没有优化器状态。恢复它们被拒绝，除非设 `SUROGATE_FORK_CPU_ADAMW_ALLOW_MISSING_STATE=1`。
+3. 上游与不带 T21 的 fork 写出的 `cpu_training` checkpoint 没有矩（没有张量，或者是此后每次保存写下的无用 8-bit 状态），`adamw` 与 `normuon` 的 checkpoint 也没有优化器状态。以 `cpu_training` 恢复它们被拒绝，除非设 `SUROGATE_FORK_CPU_ADAMW_ALLOW_MISSING_STATE=1`。
 4. `cpu_adamw.format` 不是 1 时总是拒绝。
 5. 数据并行的各 rank 持有相同的矩，每个本地 rank 写、读自己的一份（N 个本地 rank 占 N 倍磁盘），与权重 shard 相同；shard 数由 `checkpoint.json` 的 `world` 检查。只有第一个节点写文件。
 6. 以后的格式（例如路线图 #9 的 8-bit CPU 状态）用新的名字或新的版本号，并转换（量化）或拒绝 v1 文件。如果它改用 `adamw8bit.*` 名字，必须与 `init_state` 的槽位布局一致（每个槽位按 32 对齐的 `state_offset`，int8 softsign 的 m，uint8 sqrt 的 v，每 32 个元素一个 FP16 scale），并保留同样的完整性检查：`require_complete` 只检查 T21 的容器。

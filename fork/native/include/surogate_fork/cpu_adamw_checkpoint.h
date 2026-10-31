@@ -22,10 +22,12 @@
 //
 // Compatibility rules (fork/docs/performance.md, "cpu_training 的 AdamW 状态 checkpoint"):
 //   - The names are disjoint from the GPU path's adamw8bit.state1/scales1/state2/scales2 (BYTE and FP16), so a
-//     resume that switches between cpu_training and GPU training finds none of its names and is refused, not
-//     silently zeroed. A per-parameter entry makes a layout change (other parameters, another order or size) a
-//     missing name or a shape error rather than a silent misread; the reader already throws on a dtype or shape
-//     mismatch.
+//     cpu_training resume from a GPU-training checkpoint finds none of its names and is refused, not silently
+//     zeroed. Only that direction is checked: require_complete() returns at once for the GPU optimizers'
+//     containers, so a GPU-training resume from a cpu_training checkpoint skips the cpu_adamw.* names and starts
+//     the 8-bit state at zero without a warning, as upstream did. A per-parameter entry makes a layout change
+//     (other parameters, another order or size) a missing name or a shape error rather than a silent misread; the
+//     reader already throws on a dtype or shape mismatch.
 //   - require_complete() refuses a file that lacks any expected name, which covers checkpoints written by
 //     upstream or by a fork build without T21 (header-only adam.m/adam.v, or the unused 8-bit device state that
 //     every save after an earlier resume wrote). Their moments are lost: SUROGATE_FORK_CPU_ADAMW_ALLOW_MISSING_STATE=1
