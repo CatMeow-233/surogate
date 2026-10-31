@@ -44,6 +44,7 @@
 #include "runtime/optimizers/normuon.h"
 #include "serve/core/unified_memory.h"
 #include "surogate_fork/doc_mask_staging.h"  // fork T17
+#include "surogate_fork/full_step_warmup.h"  // fork T20
 
 namespace {
 bool env_enabled(const char* name) {
@@ -1492,7 +1493,16 @@ std::pair<float, float> MultiGPUPyTrainer::train_step_graphed(const std::int32_t
             }
         }
 
-        const bool warmup_full_graph = !gs.captured && !env_enabled("SUROGATE_DSL_GRAPH_SKIP_WARMUP");
+        // fork T20: a capture-unsafe model (MoE, EP) never captures, so this discarded warmup ran on every step;
+        // it now runs once, keeping the stack shrink below. SUROGATE_FORK_FORCE_GRAPH_WARMUP=1 restores upstream.
+        surogate_fork::full_step_warmup::Inputs warmup_in;
+        warmup_in.captured = gs.captured;
+        warmup_in.skip_env = env_enabled("SUROGATE_DSL_GRAPH_SKIP_WARMUP");
+        warmup_in.force_env = env_enabled("SUROGATE_FORK_FORCE_GRAPH_WARMUP");
+        warmup_in.capture_unsafe = dsl_model->has_capture_unsafe_ops();
+        warmup_in.expert_parallel = mOptions.EPSize > 1;
+        warmup_in.warmed_up = gs.fork_warmup_done;
+        const bool warmup_full_graph = surogate_fork::full_step_warmup::run_warmup(warmup_in);
         const bool warmup_skip_bwd = env_enabled("SUROGATE_DSL_GRAPH_WARMUP_SKIP_BWD");
         const bool prev_internal_graphs = dsl_model->internal_graphs_enabled();
         if (prev_internal_graphs) {
@@ -1510,6 +1520,7 @@ std::pair<float, float> MultiGPUPyTrainer::train_step_graphed(const std::int32_t
             dsl_model->zero_grads(rs.MainStream);
             dsl_model->set_rng_state(rng_state);
             CUDA_CHECK(cudaStreamSynchronize(rs.MainStream));
+            gs.fork_warmup_done = true;  // fork T20
 
             // Full-step graph capture bakes stack addresses into the graph, so
             // Python cannot safely shrink the DSL stack after step 0. Do the

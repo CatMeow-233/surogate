@@ -5,6 +5,7 @@
 | 节 | ledger topic |
 |---|---|
 | [避免冗余工作与交接](#避免冗余工作与交接) | T1、T3、T4、T6、T7、T8 |
+| [不能捕获的整步只预热一次](#不能捕获的整步只预热一次) | T20 |
 | [CPU 优化器并行](#cpu-优化器并行) | T5 |
 | [LoRA 融合输入梯度](#lora-融合输入梯度) | T2 |
 | [GRPO 周期计时](#grpo-周期计时) | T6 |
@@ -38,6 +39,25 @@ nsys stats --report cuda_gpu_mem_size_sum train-trace.nsys-rep
 - Dispatch-PP 把两个常驻的边界张量作为一批读取：先分配主机端目标缓冲区再排队拷贝，整批只等待一次。这去掉了一个多余的显式完成栅栏；传输仍使用现有的主机边界协议，不是 P2P 或零拷贝。
 - 通用 FP8 MoE 反向不再分配只有前向 recipe 才使用的输入量化缓冲区。这节省了与 `routed_tokens * input_features` 成正比的对齐 scratch 及其统计量。它降低的是 stack 需求；已预留的 arena 不一定立即释放显存。
 - 全参数 MoE 权重反向在每个 expert 都有 token、且每个目标元素都会被 beta 为零的 GEMM 覆盖时，跳过对整个 dW 的清零。覆盖步中，空 expert 的梯度仍保持为零；累加时从不清除已有梯度。冻结的 LoRA base 不走这条 base 权重路径。
+
+## 不能捕获的整步只预热一次
+
+`train_step_graphed` 在捕获整步 graph 之前，先 eager 跑一遍所有微步的前向和反向，再丢弃结果（`zero_grads`，恢复 RNG 状态），并按这一遍测得的高水位把 DSL stack 缩小一次。含捕获不安全 op 的模型（MoE 路由与 grouped GEMM、EP 的 dispatch/combine，见 `graph_executor.cpp` 的 `is_capture_unsafe_op_type`）从不捕获：每一步都走 eager 分支，`gs.captured` 一直为 false，所以上游每一步都多跑一遍被丢弃的前向+反向和一次流同步。受影响的是非 QLoRA、非预量化的 MoE SFT：`use_cuda_graphs` 默认开启，Python 侧没有为 MoE 关掉 graph 的规则。QLoRA、预量化、`offload_master` 等已经关掉 graph 的配置不受影响，发布的 MoE SFT 示例都是预量化的。
+
+ledger T20：`has_capture_unsafe_ops()` 在第一次 warmup 之前就已知（graph 在 `allocate_run_state` 中编译），所以这类模型只在第一次执行的步跑 warmup，stack 照旧在那里缩小一次，之后的步跳过它。判断在 `fork/native/include/surogate_fork/full_step_warmup.h` 的 `run_warmup` 中。warmup 不留下 eager 分支会用到的状态：梯度在微步 0 清零，RNG（包括 executor 自己的状态）被恢复，loss 缓冲在微步 0 重新初始化，FP8 记录的 amax 在 `begin_step` 中清零、历史只由优化器滚动，MoE 统计在微步 0 清零。因此结果应逐位相同，这只是读代码的结论。例外是专家并行：warmup 会推进 sticky EP plan 的年龄（`ep_strategy.cpp`，`ep_plan_refresh_interval` 默认 16），跳过后 plan 按不同的节奏刷新，结果仍正确但不再逐位相同，所以 `ep_size > 1` 时每步仍跑 warmup。EP 也想跳过时，可以用上游的 `SUROGATE_DSL_GRAPH_SKIP_WARMUP=1`，它对所有模型都跳过 warmup，也不再缩小 stack。
+
+开关：默认开启，因为它只去掉重复且被丢弃的工作。`SUROGATE_FORK_FORCE_GRAPH_WARMUP=1` 恢复上游行为，即每步都跑 warmup。
+
+预期：设一遍前向+反向为 P、优化器为 U，一步从 2P+U（加一次同步）变为 P+U，加速 (2P+U)/(P+U)。roadmap 对 LoRA 估计为 1.9–2.0 倍 tok/s，MoE 全量微调的优化器占比更大，加速更少。峰值显存不变，因为两遍从不重叠；每遍的分配流量不变，每步减半。
+
+尚未在 GPU 上验证。5090 检查：LFM2-8B-A1B 或 OLMoE-1B-7B 一类模型，BF16 LoRA，B=2，GA=4，至少 50 步，比较默认与 `SUROGATE_FORK_FORCE_GRAPH_WARMUP=1`：
+
+- tok/s：期望至少 1.8 倍。
+- `nsys stats --report cuda_gpu_kern_sum`：每个优化器步的 GemmGrouped kernel 数减半。
+- 100 步的 loss 逐位相同，报告的 MoE 统计相同。
+- allocator 峰值（`debug_memory_breakdown`）在 ±1% 内，stderr 中仍然有一次 “DSL stack shrunk before full-step capture”。
+
+零代码对照：上游的 `SUROGATE_DSL_GRAPH_SKIP_WARMUP=1` 跳过包括第 0 步在内的全部 warmup 和 stack 缩小，stack 因此会大一些。
 
 ## CPU 优化器并行
 

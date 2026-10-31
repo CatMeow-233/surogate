@@ -504,6 +504,7 @@ private:
         std::byte* stack_top = nullptr;
         std::size_t stack_alloc_count = 0;
         int captured_doc_cap = 0;
+        bool fork_warmup_done = false;  ///< fork T20: the full-step warmup ran once (kept by reset_capture)
         Tensor opt_params;
         Tensor opt_step;
         std::vector<Tensor> inputs;

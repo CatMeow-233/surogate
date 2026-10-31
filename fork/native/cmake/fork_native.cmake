@@ -39,8 +39,9 @@ endfunction()
 cmake_language(DEFER DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" CALL _surogate_fork_attach_tests)
 
 # The training extension module (_surogate, PYTHON_BINDING builds) is defined after the hook too.
-# T17: py_train.cpp's train_step_graphed includes surogate_fork/doc_mask_staging.h, a header-only
-# file, so the module needs only the fork include root (PRIVATE, like surogate-common's).
+# py_train.cpp's train_step_graphed includes two header-only fork files, surogate_fork/doc_mask_staging.h
+# (T17) and surogate_fork/full_step_warmup.h (T20), so the module needs only the fork include root
+# (PRIVATE, like surogate-common's).
 function(_surogate_fork_attach_binding)
     if(TARGET _surogate)
         target_include_directories(_surogate PRIVATE "${SUROGATE_FORK_NATIVE_DIR}/include")

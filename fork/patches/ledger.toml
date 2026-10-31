@@ -418,7 +418,7 @@ switch = "always on (defect fix)"
 # executor's and the profile's functions from the sources with host CUDA stubs and compares every replayed
 # micro-step's attention pairs with eager for FA2 and mem_eff; kernels are GPU-unverified (5090 checks in the errata).
 files = [
-    "csrc/src/binding/py_train.cpp",                              # shared with T1
+    "csrc/src/binding/py_train.cpp",                              # shared with T1, T20
     "csrc/src/runtime/executor/graph_executor.h",                 # shared with T1, T18
     "csrc/src/runtime/executor/graph_executor.cpp",               # shared with T1, T18
     "csrc/src/runtime/executor/causal_lm_execution_profile.cpp",
@@ -457,4 +457,27 @@ fork_files = [
     "fork/patches/tests/native/test_doc_mask_staging.py",         # shared with T17
 ]
 tests = ["fork/patches/tests/native/test_doc_mask_staging.py"]
+conflict_history = []
+
+[[topic]]
+id = "T20"
+title = "full-step warmup runs once for a model that never captures"
+commits = []
+switch = "on by default (removes duplicated, discarded work); SUROGATE_FORK_FORCE_GRAPH_WARMUP=1 restores upstream; ep_size > 1 keeps upstream's warmup"
+# Upstream ran train_step_graphed's discarded eager fwd+bwd warmup on every step for capture-unsafe models (MoE, EP),
+# which never capture. has_capture_unsafe_ops() is valid from allocate_run_state, so after one warmup (which keeps the
+# one-shot stack shrink) such a model skips it (surogate_fork/full_step_warmup.h, run_warmup). Nothing the eager pass
+# reads survives the warmup (grads zeroed at micro-step 0, RNG restored, loss buffers and MoE stats reset at
+# micro-step 0, FP8 amaxes zeroed in begin_step), so results should be bit-identical; with EP the warmup advances the
+# sticky plan ages (ep_plan_refresh_interval), so EP keeps it. Not a defect fix (no errata entry). Speed-up
+# ((2P+U)/(P+U), roadmap ~1.9-2.0x for MoE LoRA) and bit-identity are GPU-unverified: fork/docs/performance.md.
+files = [
+    "csrc/src/binding/py_train.cpp",   # shared with T1, T17
+    "csrc/src/binding/py_train.h",
+]
+fork_files = [
+    "fork/native/include/surogate_fork/full_step_warmup.h",
+    "fork/patches/tests/native/test_full_step_warmup.py",
+]
+tests = ["fork/patches/tests/native/test_full_step_warmup.py"]
 conflict_history = []
