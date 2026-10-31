@@ -167,6 +167,27 @@ def test_stream_rejects_changed_data_or_batch_contract_and_keeps_failed_cursor(t
         BatchStream(JSONLDataset(path, 8), 1, 7, True).load_state_dict(state)
 
 
+def test_stream_contract_key_added_later_compares_with_its_legacy_value(tmp_path):
+    dataset = JSONLDataset(_file(tmp_path, [{"input_ids": [1, 2]}, {"input_ids": [3, 4]}]), 8)
+    state = BatchStream(dataset, 1, 7, True).state_dict()  # written before the key existed
+
+    class LaterStream(BatchStream):
+        LEGACY_CONTRACT = {"packing": "none"}
+
+        def __init__(self, *args, packing="none", **kwargs):
+            super().__init__(*args, **kwargs)
+            self.packing = packing
+
+        def _contract(self):
+            return {**super()._contract(), "packing": self.packing}
+
+    LaterStream(dataset, 1, 7, True).load_state_dict(state)
+    with pytest.raises(ValueError, match=r'fingerprint: packing \(checkpoint "none", requested "window"\)'):
+        LaterStream(dataset, 1, 7, True, packing="window").load_state_dict(state)
+    with pytest.raises(ValueError, match=r"fingerprint: batch_size \(checkpoint 1, requested 2\)$"):
+        BatchStream(dataset, 2, 7, True).load_state_dict(state)
+
+
 def test_batches_stay_on_cpu_under_a_different_default_device(tmp_path):
     dataset = JSONLDataset(_file(tmp_path, [{"input_ids": [1, 2]}, {"input_ids": [3, 4]}]), 8)
     with torch.device("meta"):

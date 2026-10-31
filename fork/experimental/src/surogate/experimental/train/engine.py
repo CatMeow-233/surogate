@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import os
@@ -15,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn.functional as F
+from surogate.experimental.train import contract as resume_contract
 
 if TYPE_CHECKING:
     from surogate.experimental.train.config import TrainConfig
@@ -42,11 +42,6 @@ def _check_single_process() -> None:
         )
 
 
-def _fingerprint(values: dict[str, Any]) -> str:
-    encoded = json.dumps(values, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
-    return hashlib.sha256(encoded).hexdigest()
-
-
 def _atomic_save(state: dict[str, Any], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary: str | None = None
@@ -64,7 +59,8 @@ def _atomic_save(state: dict[str, Any], path: Path) -> None:
             os.unlink(temporary)
 
 
-def _load_checkpoint(path: str, contract: str) -> dict[str, Any]:
+def _load_checkpoint(path: str, requested: dict[str, Any]) -> dict[str, Any]:
+    """Load a checkpoint that may continue as the requested configuration (``TrainConfig.to_dict()``)."""
     state = torch.load(path, map_location="cpu", weights_only=True)
     if not isinstance(state, dict) or state.get("kind") != CHECKPOINT_KIND:
         raise ValueError("resume requires a surogate experimental PyTorch checkpoint")
@@ -73,8 +69,7 @@ def _load_checkpoint(path: str, contract: str) -> dict[str, Any]:
             f"unsupported experimental checkpoint version {state.get('checkpoint_version')!r}; "
             f"this trainer resumes only version {CHECKPOINT_VERSION}"
         )
-    if state.get("config_fingerprint") != contract:
-        raise ValueError("resume configuration changes the model, algorithm, or data processing contract")
+    resume_contract.check_resume(state, requested)
     if not isinstance(state.get("step"), int) or state["step"] < 0:
         raise ValueError("checkpoint has an invalid completed-step counter")
     return state
@@ -213,7 +208,7 @@ def _check_in_backward_aliases(model: torch.nn.Module) -> None:
         seen_storages[storage] = name
 
 
-def _prepare_output(output: Path, resumed: dict[str, Any] | None) -> Path:
+def _prepare_output(output: Path, resumed: dict[str, Any] | None, requested: dict[str, Any]) -> Path:
     output.mkdir(parents=True, exist_ok=True)
     reserved = [output / name for name in ("metrics.jsonl", "manifest.json", "checkpoints", "final")]
     if resumed is None and any(path.exists() for path in reserved):
@@ -223,8 +218,15 @@ def _prepare_output(output: Path, resumed: dict[str, Any] | None) -> Path:
         if not manifest.is_file():
             raise ValueError("resume output_dir contains artifacts without an experimental manifest")
         existing = json.loads(manifest.read_text(encoding="utf-8"))
-        if any(existing.get(key) != resumed.get(key) for key in ("kind", "config_fingerprint", "data_fingerprint")):
+        if any(existing.get(key) != resumed.get(key) for key in ("kind", "data_fingerprint")):
             raise ValueError("resume output_dir belongs to a different training experiment")
+        # The manifest was written by the run that last used this directory, maybe
+        # under another contract version or with other performance-only settings;
+        # it must name the same experiment under this trainer's contract rules.
+        try:
+            resume_contract.check_resume(existing, requested, "manifest")
+        except ValueError as error:
+            raise ValueError(f"resume output_dir belongs to a different training experiment: {error}") from error
     metrics = output / "metrics.jsonl"
     if resumed is not None and metrics.exists():
         with metrics.open(encoding="utf-8") as handle:
@@ -259,13 +261,14 @@ def run_training(config: TrainConfig, *, resume_from: str | None = None) -> dict
         torch.cuda.set_device(device)
         if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
             raise ValueError("the selected CUDA device does not support bfloat16")
-    contract = _fingerprint(config.resume_contract())
-    resumed = _load_checkpoint(resume_from, contract) if resume_from is not None else None
+    requested = config.to_dict()
+    contract_entries = resume_contract.record(requested)
+    resumed = _load_checkpoint(resume_from, requested) if resume_from is not None else None
     runtime = {"device_type": device.type, "dtype": str(dtype)}
     if resumed is not None and resumed.get("runtime") != runtime:
         raise ValueError("resume requires the same device type and dtype")
     output = Path(config.output_dir)
-    metrics_path = _prepare_output(output, resumed)
+    metrics_path = _prepare_output(output, resumed, requested)
     _seed_rng(config.seed, device)
     model, architecture = _build_model(config, device, dtype, resumed["model_config"] if resumed else None)
     named_parameters = [(name, parameter) for name, parameter in model.named_parameters() if parameter.requires_grad]
@@ -333,8 +336,8 @@ def run_training(config: TrainConfig, *, resume_from: str | None = None) -> dict
     manifest = {
         "kind": CHECKPOINT_KIND,
         "schema_version": config.schema_version,
-        "config": config.to_dict(),
-        "config_fingerprint": contract,
+        "config": requested,
+        **contract_entries,
         "data_fingerprint": dataset.fingerprint,
         "runtime": runtime,
         "base_model": config.model,
@@ -366,8 +369,8 @@ def run_training(config: TrainConfig, *, resume_from: str | None = None) -> dict
             {
                 "kind": CHECKPOINT_KIND,
                 "checkpoint_version": CHECKPOINT_VERSION,
-                "config": config.to_dict(),
-                "config_fingerprint": contract,
+                "config": requested,
+                **contract_entries,
                 "data_fingerprint": dataset.fingerprint,
                 "parameter_names": parameter_names,
                 "model_config": architecture,

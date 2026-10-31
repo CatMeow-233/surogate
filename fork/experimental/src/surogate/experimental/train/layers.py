@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import random
+from types import MappingProxyType
 
 import torch
+from surogate.experimental.train.contract import describe, differences
 from torch import nn
 
 _LAYER_PATHS = (
@@ -198,6 +200,11 @@ class LayerSampler:
             "state_variant": "reset_inactive_moments" if self.state_policy == "drop" else "retain_inactive_on_cpu",
         }
 
+    # Contract keys added after state version 1, each mapped to the value that
+    # reproduces the sampler from before the key existed. A state saved without
+    # such a key is compared with this value instead of being refused.
+    LEGACY_CONTRACT = MappingProxyType({})
+
     def _contract(self):
         return {
             "layer_path": self.layer_path,
@@ -221,10 +228,12 @@ class LayerSampler:
         }
 
     def load_state_dict(self, state):
-        if state.get("version") != 1 or any(state.get(key) != value for key, value in self._contract().items()):
-            raise ValueError(
-                "layer sampling checkpoint does not match model/initial trainable parameters/configuration"
-            )
+        message = "layer sampling checkpoint does not match model/initial trainable parameters/configuration"
+        if state.get("version") != 1:
+            raise ValueError(message)
+        found = differences(state, self._contract(), self.LEGACY_CONTRACT)
+        if found:
+            raise ValueError(f"{message}: {describe(found)}")
         selected = state.get("selected_layers")
         last, selection_step = state.get("last_step"), state.get("last_selection_step")
         if (

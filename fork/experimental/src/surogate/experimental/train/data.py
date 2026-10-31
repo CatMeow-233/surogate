@@ -6,6 +6,9 @@ import difflib
 import hashlib
 import json
 from pathlib import Path
+from types import MappingProxyType
+
+from surogate.experimental.train.contract import describe, differences
 
 # The complete record contract. Any other key is rejected: an allow-list cannot
 # silently accept packing/segment metadata or a misspelled supervision field.
@@ -224,6 +227,11 @@ class BatchStream:
         self.epoch, self.cursor, self._order = epoch, end, order
         return batch
 
+    # Contract keys added after state version 1, each mapped to the value that
+    # reproduces the stream from before the key existed. A state saved without
+    # such a key is compared with this value instead of being refused.
+    LEGACY_CONTRACT = MappingProxyType({})
+
     def _contract(self):
         return {
             "dataset_fingerprint": self.dataset.fingerprint,
@@ -241,8 +249,12 @@ class BatchStream:
         return {"version": 1, **self._contract(), "epoch": self.epoch, "cursor": self.cursor}
 
     def load_state_dict(self, state):
-        if state.get("version") != 1 or any(state.get(key) != value for key, value in self._contract().items()):
-            raise ValueError("batch stream checkpoint does not match the dataset/configuration fingerprint")
+        message = "batch stream checkpoint does not match the dataset/configuration fingerprint"
+        if state.get("version") != 1:
+            raise ValueError(message)
+        found = differences(state, self._contract(), self.LEGACY_CONTRACT)
+        if found:
+            raise ValueError(f"{message}: {describe(found)}")
         epoch, cursor = state.get("epoch"), state.get("cursor")
         if not _integer(epoch) or epoch < 0 or not _integer(cursor) or not 0 <= cursor <= len(self.dataset):
             raise ValueError("invalid batch stream epoch/cursor")

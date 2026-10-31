@@ -9,6 +9,8 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
+from surogate.experimental.train.contract import compared_values
+
 
 @dataclass
 class TrainConfig:
@@ -163,9 +165,8 @@ class TrainConfig:
         return asdict(self)
 
     def resume_contract(self) -> dict[str, Any]:
-        """Numerical/model contract; dataset contents are fingerprinted separately."""
-        ignored = {"max_steps", "output_dir", "save_every", "train_jsonl"}
-        return {key: value for key, value in self.to_dict().items() if key not in ignored}
+        """Keys a resume must keep (classified in contract.py); dataset contents are fingerprinted separately."""
+        return compared_values(self.to_dict())
 
 
 def load_config(path: str | Path) -> TrainConfig:

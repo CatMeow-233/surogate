@@ -64,6 +64,8 @@ examples archive describes that release, which behaves differently:
   0.1.0a3 examples archive, fails at startup with it.
 - 0.1.0a3 writes and resumes checkpoint format 2, the checkout format 3;
   neither resumes the other's checkpoints.
+- 0.1.0a3 refuses a resume that changes `gradient_checkpointing` or `device`,
+  and its refusal does not name the keys that differ.
 - With `lisa_state_policy: drop`, 0.1.0a3 restarts a re-activated layer's step
   counter and projection index, so it replays that layer's earlier rounding
   noise and basis.
@@ -312,8 +314,31 @@ not require CUDA RNG state. A CPU-retained layer history is
 not eagerly copied to GPU during restore. Ordinary native checkpoints are not
 accepted.
 
-You may increase `max_steps` or change `save_every` and `output_dir` on resume;
-numerical/model configuration changes and different dataset contents are rejected.
+On resume you may increase `max_steps`, change `save_every` and `output_dir`,
+point `train_jsonl` at another file with the same bytes, and change the
+performance-only keys `gradient_checkpointing` and `device`. `device` may change
+only within a device type (`cuda`, `cuda:1` and, on a GPU host, `auto` are
+interchangeable): the device type and dtype must stay the same. Any other
+configuration change, and different dataset contents, are rejected; the error
+names each key that differs, with its recorded and requested values. On CPU, a
+resume that toggles `gradient_checkpointing` continues bitwise as the
+uninterrupted run would. On a GPU this has not been measured yet; kernels whose
+results vary between runs can make the two differ as much as two uninterrupted
+runs differ from each other.
+
+Checkpoints and `manifest.json` record their configuration, a resume-contract
+version and a fingerprint; the checkout writes contract version 2. Format-3
+checkpoints from earlier checkouts record no contract version and count as
+version 1; the checkout resumes them under the rules above. A configuration key
+added after a checkpoint was written is compared with its legacy value, the value
+that reproduces the trainer's behavior from before the key existed: a format-3
+checkpoint written before the checkout had `projection_scale_rule` resumes only
+with `projection_scale_rule: constant`. Checkouts from before contract version 2
+refuse version-2 checkpoints with the generic configuration error. The contract
+covers configuration, not code: it does not notice two checkouts that run the
+same configuration differently, such as the `rms` rule, whose computation changed
+during 0.1.0a4 development without a new key.
+
 The checkpoint format is version 3. The trainer refuses version-2 checkpoints,
 written by 0.1.0a1–a3: their dropped LISA layers lost the step counters that
 seed rounding noise and bases, and they predate `projection_scale_rule`. Finish

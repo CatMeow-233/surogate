@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import copy
+import dataclasses
+import hashlib
 import json
 import shutil
 import weakref
@@ -11,6 +14,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from surogate.experimental.train import contract
 from surogate.experimental.train.config import TrainConfig
 from surogate.experimental.train.engine import (
     CHECKPOINT_KIND,
@@ -237,8 +241,13 @@ def test_in_backward_rejects_distinct_parameters_sharing_storage():
 def test_resume_rejects_changed_math_data_and_foreign_checkpoint(tmp_path):
     config = tiny_config(tmp_path)
     result = run_training(config)
-    with pytest.raises(ValueError, match="configuration"):
+    with pytest.raises(ValueError, match=r"contract: learning_rate \(checkpoint 0.001, requested 0.002\)$"):
         run_training(replace(config, learning_rate=2e-3), resume_from=result["checkpoint"])
+    # Compilation and the attention kernel change the arithmetic; they stay in the contract.
+    with pytest.raises(ValueError, match=r"contract: attention_implementation .*; compile_model "):
+        run_training(
+            replace(config, compile_model=True, attention_implementation="eager"), resume_from=result["checkpoint"]
+        )
     changed_data = tmp_path / "changed.jsonl"
     changed_data.write_text('{"input_ids":[1,2,3]}\n')
     with pytest.raises(ValueError, match="data content"):
@@ -254,6 +263,82 @@ def test_resume_rejects_changed_math_data_and_foreign_checkpoint(tmp_path):
     torch.save(older, older_path)
     with pytest.raises(ValueError, match="checkpoint version 2"):
         run_training(replace(config, output_dir=str(tmp_path / "from-version-2")), resume_from=str(older_path))
+
+
+def _version_1_fingerprint(values):
+    """The fingerprint format-3 trainers before contract version 2 recorded (488e5f00's engine._fingerprint)."""
+    kept = {
+        key: value
+        for key, value in values.items()
+        if key not in {"max_steps", "output_dir", "save_every", "train_jsonl"}
+    }
+    return hashlib.sha256(json.dumps(kept, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+
+def _as_written_by_856bd86c(state):
+    """A checkpoint or manifest in the form of 856bd86c (format 3 before projection_scale_rule; constant rule)."""
+    state = copy.deepcopy(state)
+    assert state["config"].pop("projection_scale_rule") == "constant"
+    state.pop("contract_version", None)
+    state["config_fingerprint"] = _version_1_fingerprint(state["config"])
+    for group in state.get("optimizer_state", {}).get("param_groups", []):
+        del group["scale_rule"]
+    return state
+
+
+@pytest.mark.parametrize(
+    "adapter",
+    [{}, {"lora_rank": 2, "lora_alpha": 4.0, "lora_dropout": 0.2, "lora_targets": ("q_proj", "v_proj")}],
+    ids=["full", "lora-dropout"],
+)
+def test_resume_may_change_performance_switches_and_continues_bitwise(tmp_path, monkeypatch, adapter):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)  # device auto resolves to the CPU here
+    config = tiny_config(tmp_path, "uninterrupted", max_steps=3, shuffle=True, gradient_checkpointing=True, **adapter)
+    config.model_config["attention_dropout"] = 0.1  # recomputed forwards must replay the dropout masks
+    uninterrupted = checkpoint(run_training(config))
+    partial = run_training(replace(config, output_dir=str(tmp_path / "partial"), max_steps=2))
+    resumed_config = replace(
+        config, output_dir=str(tmp_path / "resumed"), gradient_checkpointing=False, device="auto", save_every=0
+    )
+    resumed = checkpoint(run_training(resumed_config, resume_from=partial["checkpoint"]))
+    for key in ("model_state", "optimizer_state", "data_state", "rng_state", "parameter_names", "step"):
+        assert_state_equal(uninterrupted[key], resumed[key])
+    assert resumed["config_fingerprint"] == uninterrupted["config_fingerprint"]
+    assert resumed["contract_version"] == contract.CONTRACT_VERSION
+
+
+def test_checkpoint_from_before_projection_scale_rule_resumes_in_place_only_with_the_constant_rule(tmp_path):
+    config = tiny_config(tmp_path, "uninterrupted", max_steps=3, shuffle=True, projection_scale_rule="constant")
+    uninterrupted = checkpoint(run_training(config))
+    partial_config = replace(config, output_dir=str(tmp_path / "partial"), max_steps=2)
+    partial = run_training(partial_config)
+    torch.save(_as_written_by_856bd86c(checkpoint(partial)), partial["checkpoint"])
+    manifest = Path(partial["manifest"])
+    manifest.write_text(json.dumps(_as_written_by_856bd86c(json.loads(manifest.read_text()))))
+    with pytest.raises(ValueError, match=r'projection_scale_rule \(checkpoint "constant", requested "rms"\)'):
+        run_training(
+            replace(partial_config, projection_scale_rule="rms", max_steps=3, output_dir=str(tmp_path / "rms")),
+            resume_from=partial["checkpoint"],
+        )
+    # Resume into the run's own directory: its manifest still has the old form.
+    resumed = run_training(replace(partial_config, max_steps=3, save_every=0), resume_from=partial["checkpoint"])
+    resumed_state = checkpoint(resumed)
+    for key in ("model_state", "optimizer_state", "data_state", "rng_state", "step"):
+        assert_state_equal(uninterrupted[key], resumed_state[key])
+    assert json.loads(manifest.read_text())["contract_version"] == contract.CONTRACT_VERSION
+
+
+def test_a_field_added_at_its_legacy_value_still_resumes_older_checkpoints(tmp_path, monkeypatch):
+    monkeypatch.setattr(contract, "LEGACY_VALUES", {**contract.LEGACY_VALUES, "future_switch": "off"})
+    future = dataclasses.make_dataclass(
+        "FutureTrainConfig", [("future_switch", str, dataclasses.field(default="on"))], bases=(TrainConfig,)
+    )
+    config = tiny_config(tmp_path)
+    written = run_training(config)
+    later = replace(config, max_steps=3, output_dir=str(tmp_path / "later")).to_dict()
+    with pytest.raises(ValueError, match=r'future_switch \(checkpoint "off", requested "on"\)'):
+        run_training(future(**later), resume_from=written["checkpoint"])
+    assert run_training(future(**later, future_switch="off"), resume_from=written["checkpoint"])["step"] == 3
 
 
 def test_does_not_overwrite_artifacts_or_accept_targetless_window(tmp_path):

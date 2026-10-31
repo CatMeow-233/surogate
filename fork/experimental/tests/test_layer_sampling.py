@@ -197,6 +197,29 @@ def test_explicit_path_and_complete_optimizer_candidates_are_required():
     assert all(parameter.requires_grad for parameter in model.parameters())
 
 
+def test_sampler_contract_key_added_later_compares_with_its_legacy_value():
+    optimizer_model = _Model()
+    sampler = LayerSampler(optimizer_model, 1, 1)
+    sampler.on_step(0, torch.optim.AdamW(optimizer_model.parameters()))
+    state = sampler.state_dict()  # written before the key existed
+
+    class LaterSampler(LayerSampler):
+        LEGACY_CONTRACT = {"outside_policy": "train"}
+
+        def __init__(self, *args, outside_policy="train", **kwargs):
+            self.outside_policy = outside_policy
+            super().__init__(*args, **kwargs)
+
+        def _contract(self):
+            return {**super()._contract(), "outside_policy": self.outside_policy}
+
+    LaterSampler(_Model(), 1, 1).load_state_dict(state)
+    with pytest.raises(ValueError, match=r'configuration: outside_policy \(checkpoint "train", requested "freeze"\)'):
+        LaterSampler(_Model(), 1, 1, outside_policy="freeze").load_state_dict(state)
+    with pytest.raises(ValueError, match=r"configuration: interval \(checkpoint 1, requested 2\)$"):
+        LayerSampler(_Model(), 1, 2).load_state_dict(state)
+
+
 def test_checkpoint_rejects_changed_initial_mask_and_invalid_selection():
     model = _Model()
     optimizer = torch.optim.AdamW(model.parameters())
