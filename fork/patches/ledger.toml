@@ -705,6 +705,10 @@ switch = "on by default (defect fixes), each switch read once per process: SUROG
 # cudnn-backend SR kernels (quant_fp4.cu) reuse graph noise too; the standard SR kernels' curand subsequence ignores
 # blockIdx.y (noise repeats every 128 columns, correlation not bias); the dead `no_fp4_stochastic_rounding` doc row
 # (upstream doc).
+# Relies on upstream code outside `files`, whose upstream commits the sync report never groups under T24, so a
+# failing pin is T24's signal (sync.md T24): quant_nvfp4_4o6_sm100.cu, which the fork kernels copied (a digest of
+# its code), the 1536*1536 of compute_fp4_alpha_4o6 (quant_fp4.cu) and its two 4/6 calls in nvfp4_recipe.cpp, and
+# the 1536 of derive_streamed_nvfp4_wt (matmul.cpp, T4's file, whose commits the report lists under T4).
 # Convergence effect unknown (2512.02010 App. A.3: unbiased SR on 4/6 showed no gain); GPU-unverified, the 5090
 # checks are in fork/native/tests/test-fork-nvfp4-4o6.cu and the errata.
 files = [

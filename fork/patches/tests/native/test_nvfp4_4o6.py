@@ -24,8 +24,10 @@ What runs here:
    headers are found: CUDA_HOME, CUDA_PATH or /usr/local/cuda). Skipped without a C++17 compiler.
 3. The header and the emulation compute the same values, request by request.
 4. Source pins: the upstream launchers dispatch to the fork kernels behind the switches, the fork kernels call the
-   checked arithmetic, upstream's kernels (the legacy path the emulation models) are unedited, the standard SR
-   kernels take the graph generation, everything that names a unit's graph counter has internal linkage (with
+   checked arithmetic, upstream's kernels (the legacy path the emulation models) are unedited, the upstream code
+   the fork kernels copied or must agree with is what they copied (a digest of quant_nvfp4_4o6_sm100.cu's code,
+   the 4/6 tensor scale in the GEMM alpha and the streamed-weight path), the standard SR kernels take the graph
+   generation, everything that names a unit's graph counter has internal linkage (with
    nvcc found, also two units compiled at host -O0 that must not share one `advance`), and the documented switch
    names are the built ones.
 
@@ -33,6 +35,7 @@ The GPU behaviour (the kernels compute what the emulation computes, graph replay
 fork/native/tests/test-fork-nvfp4-4o6.cu and fork/docs/upstream-errata.md give the RTX 5090 checks.
 """
 
+import hashlib
 import os
 import re
 import shutil
@@ -610,6 +613,48 @@ def test_upstream_kernels_are_what_the_emulation_models():
     ):
         assert line in text, line
     assert text.count("decode_scale = fminf(fmaxf(decode_scale, 1.0f / 128.0f), 480.0f);") == 2  # RN and SR
+
+
+# Upstream code that fork/native/src/nvfp4_4o6.cu copied or must agree with, in files T24 does not edit. The sync
+# report groups upstream commits by each topic's `files` only, so it never lists commits to these under T24
+# (matmul.cpp's appear under T4): these pins are T24's signal (fork/docs/sync.md, T24).
+SM100 = KERNELS / "quant_nvfp4_4o6_sm100.cu"
+SM100_CODE_AT = "282f9901"  # the upstream commit the digest was taken at (upstream/main 82d42c72 has the same code)
+SM100_CODE_SHA256 = "229e509cb7fcf444afaab57701f99140ba02c2627085861cd7f2954559397525"
+
+
+def code_sha256(path: Path) -> str:
+    """sha256 of the file's code: comments removed, whitespace collapsed (a comment-only change keeps it)."""
+    text = path.read_text(encoding="utf-8")
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    text = re.sub(r"//[^\n]*", " ", text)
+    return hashlib.sha256(collapse(text).encode()).hexdigest()
+
+
+def test_upstream_code_the_fork_kernels_copied_is_unchanged():
+    assert code_sha256(SM100) == SM100_CODE_SHA256, (
+        "upstream changed the code of quant_nvfp4_4o6_sm100.cu, whose tensor scale 1536, thread layout, CUTLASS "
+        "scale layout (cutlass_scale_index), error metrics, PTX conversions and 4-vs-6 selection the fork kernels "
+        f"copied and the emulation models: compare `git diff {SM100_CODE_AT} HEAD -- "
+        "csrc/src/recipes/nvfp4/kernels/quant_nvfp4_4o6_sm100.cu` with fork/native/src/nvfp4_4o6.cu and this "
+        "module's emulation, follow it where needed, then record the new digest and commit here "
+        "(fork/docs/sync.md, T24)"
+    )
+    # The 4/6 tensor scale, three places upstream and one in the fork: the encode (upstream's kernels, the fork's
+    # k4o6TensorScale), the GEMM alpha the recipe uses for 4/6 operands, and the streamed-weight amax un-scaling.
+    assert "constexpr float k4o6TensorScaleFactor = 384.0f * 4.0f;" in collapse(SM100.read_text(encoding="utf-8"))
+    assert "constexpr float k4o6TensorScale = 1536.0f;" in (NATIVE / "src/nvfp4_4o6.cu").read_text(encoding="utf-8")
+    alpha = body(KERNELS / "quant_fp4.cu", r"__global__ void compute_fp4_alpha_4o6_kernel\(")
+    assert "constexpr float factor = 1536.0f * 1536.0f;" in alpha
+    assert "*alpha_out = (amax_a * amax_b) / factor;" in alpha
+    recipe = collapse((REPO / "csrc/src/recipes/nvfp4/nvfp4_recipe.cpp").read_text(encoding="utf-8"))
+    for call in (
+        "compute_fp4_alpha_4o6(alpha.get<float>(), inp_global_amax_ptr, weight_amax_ptr, ctx.stream);",  # forward
+        "compute_fp4_alpha_4o6(alpha.get<float>(), a_amax.get<float>(), b_amax.get<float>(), ctx.stream);",  # wgrad
+    ):
+        assert recipe.count(call) == 1, call
+    derive = body(REPO / "csrc/src/runtime/ops/matmul.cpp", r"void derive_streamed_nvfp4_wt\(")
+    assert "uses_four_over_six ? 1536.0f : 2688.0f," in derive
 
 
 @pytest.mark.parametrize("kernel", ["quantize_nvfp4_stochastic_cutlass_kernel", "quantize_nvfp4_stochastic_cutlass_auto_kernel"])
