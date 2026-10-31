@@ -676,7 +676,10 @@ conflict_history = [
 [[topic]]
 id = "T24"
 title = "NVFP4 Four Over Six: unbiased SR, stored-scale encode, fresh SR noise on graph replays"
-commits = ["af89ae9b", "33b73381"]   # af89ae9b: SR and RN; 33b73381: fresh SR noise on graph replays
+commits = ["af89ae9b", "33b73381", "20f5044a", "32765eed", "25251cc5"]
+# af89ae9b: SR and RN; 33b73381: fresh SR noise on graph replays; review fixes, fork files only: 20f5044a internal
+# linkage of the graph counter's users, 32765eed the graph GPU case under SR_LEGACY and the switch coupling,
+# 25251cc5 pins of the upstream code the fork kernels copied
 switch = "on by default (defect fixes), each switch read once per process: SUROGATE_NVFP4_4O6_SR_LEGACY=1 runs upstream's 4/6 SR kernel, which takes no graph generation, so under graphs the wgrad 4/6 operand reuses the captured noise too; SUROGATE_NVFP4_4O6_RN_LEGACY=1 runs upstream's 4/6 RN kernel; SUROGATE_NVFP4_SR_GRAPH_LEGACY=1 makes graph replays reuse the captured SR noise again in the fork 4/6 SR kernel and the standard SR kernels (for the 4/6 operand it matters only while SR_LEGACY is unset)"
 # Defects (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "NVFP4 随机舍入与 Four Over Six 块比例的缺陷"):
 # (SR) quantize_block_4o6_stochastic (quant_nvfp4_4o6_sm100.cu) adds a fixed (b/256-0.5)*0.5 dither before
