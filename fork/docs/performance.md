@@ -268,9 +268,9 @@ ledger T25，开关 `SUROGATE_GPT_OSS_PREQUANT_SKIP_EXPERT_DGRAD=1`，默认关�
 | 开关 | 取值 | 作用 |
 | --- | --- | --- |
 | `SUROGATE_SHARED_SERVER_QUEUE` | `fifo`（默认）、`reject` | `fifo`：lane 全忙时按到达顺序排队，上限 `max_pending_requests` 加每个 lane 一个，等待超过 `pending_timeout_ms` 回 429；`reject`：上游的接纳方式，不做任何连接检查 |
-| `SUROGATE_SHARED_SERVER_ABORT` | `1`（默认）、`0` | `1`：已接纳的请求在客户端关闭连接后的下一次 token 检查（最多每 50 ms 一次）停止；`0`：照样解码到结束（上游行为）。排队中的请求在客户端离开后总是被跳过，否则批末取消的请求会在打包间隙中拿到 lane |
+| `SUROGATE_SHARED_SERVER_ABORT` | `1`（默认）、`0` | `1`：已接纳的请求在客户端关闭连接后的下一次 token 检查（最多每 50 ms 一次）停止；`0`：照样解码到结束（上游行为）。排队中的请求在客户端离开后总是被跳过，否则批末取消的请求会在打包间隙中拿到 lane。`reject` 下不起作用 |
 
-两个变量在服务构建时读取，取值不合法时构建报错。`max_pending_requests` 与 `pending_timeout_ms` 由 `surogate/grpo/utils/capacity.py` 按本次运行的在途数算出（`native_colocate.py` 传入），也可以在 `infer` 配置中显式设置；`max_pending_requests: 0` 表示不排队。每个阶段写入 `shared_weights.jsonl` 的服务摘要多了累计计数：`admission_refused_capacity`（因 lane 与队列都满回的 429，`reject` 模式下就是全部满载 429）、`admission_refused_timeout`、`admission_refused_training`（训练期间与关闭后的 429）、`admission_queued`、`admission_max_queued`、`admission_disconnected_waiting`（客户端离开、没有被接纳的等待者）和 `admission_aborted_running`（客户端离开后停止的请求）。
+两个变量在服务构建时读取并检查，任一取值不合法时构建报错（`reject` 下 `SUROGATE_SHARED_SERVER_ABORT` 也检查）。`max_pending_requests` 与 `pending_timeout_ms` 由 `surogate/grpo/utils/capacity.py` 按本次运行的在途数算出（至少 16 个等待者，`native_colocate.py` 传入），也可以在 `infer` 配置中显式设置为正数；配置不接受 0，运行中关掉排队只能用 `SUROGATE_SHARED_SERVER_QUEUE=reject`。每个阶段写入 `shared_weights.jsonl` 的服务摘要多了累计计数：`admission_refused_capacity`（因 lane 与队列都满回的 429，`reject` 模式下就是全部满载 429）、`admission_refused_timeout`、`admission_refused_training`（训练期间与关闭后的 429）、`admission_queued`、`admission_max_queued`、`admission_disconnected_waiting`（客户端离开、没有被接纳的等待者）和 `admission_aborted_running`（客户端离开后停止的请求）。
 
 CPU 测量（`fork/patches/bench/grpo_shared_admission.py`，复现参数见 errata；前三行各 2 个种子，SDK 的退避常数与每 token 的时间缩为一半，后两行不缩放、种子 0）：
 

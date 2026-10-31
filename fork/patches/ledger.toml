@@ -840,7 +840,7 @@ conflict_history = [
 id = "T28"
 title = "SharedModelServer queues requests past its lanes and stops rollouts whose client left"
 commits = ["189e7b59"]
-switch = "SUROGATE_SHARED_SERVER_QUEUE=fifo (default, defect fix) | reject (upstream's admission: 429 at capacity, no disconnect checks); SUROGATE_SHARED_SERVER_ABORT=1 (default) | 0 (an admitted request runs to max_tokens after its client leaves; queued ones are still skipped); both read when the server is built"
+switch = "SUROGATE_SHARED_SERVER_QUEUE=fifo (default, defect fix) | reject (upstream's admission: 429 at capacity, no disconnect checks); SUROGATE_SHARED_SERVER_ABORT=1 (default) | 0 (an admitted request runs to max_tokens after its client leaves; queued ones are still skipped; no effect under reject); both read and validated when the server is built, in either mode; a run turns the queue off only with reject (the infer config refuses max_pending_requests: 0)"
 # Defect (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "训练路径的 SharedModelServer 在满载时拒绝 rollout"):
 # SharedModelServer.admit raised Busy (429) whenever max_concurrency lanes were busy, though the colocated run keeps
 # max_inflight_rollouts (batch_size) requests in flight against min(16, batch_size) lanes, and ignored the

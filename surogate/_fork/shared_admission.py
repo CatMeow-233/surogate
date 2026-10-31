@@ -43,14 +43,18 @@ This module gives the server what the native engine has:
   and RULER judge calls that share this server running, because nobody
   cancelled them.
 
-Switches (read when the server is built):
+Switches (read when the server is built; a value outside the listed ones fails
+construction, in either mode):
 
 - ``SUROGATE_SHARED_SERVER_QUEUE=fifo`` (default) or ``reject``: ``reject`` is
-  upstream's admission, unchanged, with no disconnect checks at all.
+  upstream's admission, unchanged, with no disconnect checks at all. It is the
+  only way a run turns the queue off: the infer config refuses
+  ``max_pending_requests: 0``.
 - ``SUROGATE_SHARED_SERVER_ABORT=1`` (default) or ``0``: with ``0``, admitted
   requests run to completion after their client leaves (upstream's behaviour);
   queued waiters are still skipped when their client has left, because the FIFO
-  would otherwise admit them.
+  would otherwise admit them. Under ``reject`` it has no effect, but is still
+  checked, so a misspelled value in an A/B matrix is not taken silently.
 
 Result contract: a request that is admitted runs exactly as before; only who
 gets a lane, and when, changes. A rollout aborted because its client left would
@@ -143,12 +147,15 @@ class Admission:
         environ = os.environ if environ is None else environ
         self.mode = _switch(environ, QUEUE_ENV, "fifo", ("fifo", "reject"))
         self.fifo = self.mode == "fifo"
-        self.abort = self.fifo and _switch(environ, ABORT_ENV, "1", ("0", "1")) == "1"
+        # Parsed in both modes so that an invalid value fails here under reject too.
+        abort = _switch(environ, ABORT_ENV, "1", ("0", "1")) == "1"
+        self.abort = self.fifo and abort
         pending = settings.get("max_pending_requests")
         timeout_ms = settings.get("pending_timeout_ms")
         self.max_pending = DEFAULT_MAX_PENDING if pending is None else int(pending)
         # Waiters past max_pending_requests: one per lane for an answered request that still holds it.
-        # max_pending_requests=0 asks for no queue and gets none.
+        # max_pending_requests=0 asks for no queue and gets none. Only settings passed
+        # directly carry it: GRPOInferenceConfig refuses 0 and capacity.py derives at least 16.
         self.queue_limit = self.max_pending + int(settings["max_concurrency"]) if self.max_pending else 0
         self.pending_timeout_s = (DEFAULT_PENDING_TIMEOUT_MS if timeout_ms is None else int(timeout_ms)) / 1000.0
         if self.max_pending < 0 or self.pending_timeout_s <= 0:

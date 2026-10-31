@@ -207,6 +207,8 @@ def test_the_queue_holds_max_pending_requests_plus_one_per_lane(serve):
 
 
 def test_no_queue_when_max_pending_requests_is_zero(serve):
+    # Only settings passed directly carry 0: the infer config refuses it, so a run
+    # turns the queue off with SUROGATE_SHARED_SERVER_QUEUE=reject.
     service = serve(max_pending_requests=0)
     with concurrent.futures.ThreadPoolExecutor() as pool:
         first = hold(service, 3, pool)
@@ -312,7 +314,15 @@ def test_reject_restores_upstream_admission(serve):
     assert summary["admission_refused_capacity"] == 1 and summary["admission_queued"] == 0
 
 
-@pytest.mark.parametrize("env", [{shared_admission.QUEUE_ENV: "lifo"}, {shared_admission.ABORT_ENV: "yes"}])
+@pytest.mark.parametrize(
+    "env",
+    [
+        {shared_admission.QUEUE_ENV: "lifo"},
+        {shared_admission.ABORT_ENV: "yes"},
+        # ABORT has no effect under reject, but a misspelled value is still refused.
+        {shared_admission.ABORT_ENV: "yes", shared_admission.QUEUE_ENV: "reject"},
+    ],
+)
 def test_unknown_switch_values_are_refused(serve, env):
     with pytest.raises(ValueError, match=next(iter(env))):
         serve(env=env)
