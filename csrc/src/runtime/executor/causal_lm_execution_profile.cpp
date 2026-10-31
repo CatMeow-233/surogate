@@ -223,6 +223,9 @@ bool CausalLMExecutionProfile::apply_doc_masking(IGraphExecutor& executor,
     }
     auto doc_info = compute_doc_masking(pos_ptr, B, T, mrope);
     if (!doc_info) {
+        // fork T17: under a cap-and-pad capture the micro-step is captured varlen with one document per row
+        // instead, so later launches that stage documents into its slice are read.
+        if (executor.set_row_doc_masking_for_capture(B, T, micro_step)) return true;
         executor.clear_doc_masking();
         return false;
     }

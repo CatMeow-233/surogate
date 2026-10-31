@@ -398,3 +398,63 @@ tests = [
 conflict_history = [
     "2026-10-30 reverse replay of the dispatch-PP refusal call sites, conflict blocks at 90/30/14 days: surogate/train/trainer.py 0/0/0, surogate/grpo/trainer.py 0/0/0",
 ]
+
+[[topic]]
+id = "T17"
+title = "graphed packed SFT: per-row documents in the cap-and-pad replay and capture"
+commits = []
+switch = "always on (defect fix)"
+# Defects (upstream 282f9901; errata "打包 SFT 的整步 CUDA graph ..."): after a full-step capture with documents,
+# (1) a step without in-row position resets staged cu_seqlens {0, B*T} (py_train.cpp:1600-1606), one document over
+# all rows: FA2 rows attend to the rows above, mem_eff (Hs > 256) leaves rows 1..B-1 without attention output;
+# (2) a micro-step without resets during the capture went through clear_doc_masking and was captured dense, so later
+# documents in that micro-step attended across each other; (3) the first step with documents after a capture
+# without them recaptured with no eager call before it and cudaMalloc'd mCuSeqlensGpu under the open capture.
+# Fix: train_step_graphed's scan and replay plan are surogate_fork/doc_mask_staging.h (scan_micro_step_documents,
+# plan_captured_step): a boundary-free micro-step stages its per-row list {0, T, ..., B*T}; apply_doc_masking asks
+# IGraphExecutor::set_row_doc_masking_for_capture before clearing, which sets per-row varlen only in pad mode under a
+# capture (eager calls stay dense, as upstream); a capture without documents turns pad mode off
+# (enable_doc_masking_pad_to_max(0, ...)); enable sizes mCuSeqlensGpu before the capture. The CPU test compiles the
+# executor's and the profile's functions from the sources with host CUDA stubs and compares every replayed
+# micro-step's attention pairs with eager for FA2 and mem_eff; kernels are GPU-unverified (5090 checks in the errata).
+files = [
+    "csrc/src/binding/py_train.cpp",                              # shared with T1
+    "csrc/src/runtime/executor/graph_executor.h",                 # shared with T1, T18
+    "csrc/src/runtime/executor/graph_executor.cpp",               # shared with T1, T18
+    "csrc/src/runtime/executor/causal_lm_execution_profile.cpp",
+]
+fork_files = [
+    "fork/native/include/surogate_fork/doc_mask_staging.h",       # shared with T18
+    "fork/native/cmake/fork_native.cmake",   # fork include root for _surogate and dsl-run-state-tests, attaches the C++ test (shared with T3, T5, T10)
+    "fork/native/tests/test-fork-doc-mask-staging.cpp",
+    "fork/patches/tests/native/test_doc_mask_staging.py",         # shared with T18
+]
+tests = [
+    "fork/patches/tests/native/test_doc_mask_staging.py",
+    "fork/native/tests/test-fork-doc-mask-staging.cpp",
+]
+conflict_history = []
+
+[[topic]]
+id = "T18"
+title = "cap-and-pad pad mode: an eager call over the cap runs exact geometry"
+commits = []
+switch = "always on (defect guard)"
+# Defect (latent, upstream 282f9901; errata "整步 graph 的 pad 模式不会关闭 ..."): pad mode stays on after a capture
+# with documents, and an eager set_doc_masking (validate, a warmup after a shape change) with more documents than the
+# cap copied only cap+1 offsets (graph_executor.cpp:2280) with num_docs = cap: tokens past cu[cap] got no attention
+# output. Unreachable from shipped pipelines (eval rows are padded, position ids arange); R12 (packed eval) needs it.
+# Guard: set_doc_masking routes by surogate_fork::doc_mask::pad_mode_route; over the cap outside a capture it runs
+# exact geometry through mForkExactCuSeqlensCpu/Gpu, leaving the slices and mCuSeqlensGpu that captured graphs hold
+# untouched; over the cap under a capture (train_step_graphed never does it) it reports once and keeps upstream's
+# truncation; stage_cu_seqlens_for_micro_step throws on an over-cap list outside a capture.
+files = [
+    "csrc/src/runtime/executor/graph_executor.h",                 # shared with T1, T17
+    "csrc/src/runtime/executor/graph_executor.cpp",               # shared with T1, T17
+]
+fork_files = [
+    "fork/native/include/surogate_fork/doc_mask_staging.h",       # shared with T17
+    "fork/patches/tests/native/test_doc_mask_staging.py",         # shared with T17
+]
+tests = ["fork/patches/tests/native/test_doc_mask_staging.py"]
+conflict_history = []

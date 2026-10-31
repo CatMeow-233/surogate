@@ -18,6 +18,7 @@
 #include "runtime/executor/graph_executor_internal.h"
 #include "runtime/executor/graph_executor_tensors.h"
 #include "runtime/executor/graph_executor_utils.h"
+#include "surogate_fork/doc_mask_staging.h"  // fork T17, T18
 
 #include <algorithm>
 #include <cctype>
@@ -636,6 +637,10 @@ GraphExecutor::~GraphExecutor() {
     if (mCuSeqlensGpu) {
         cudaFree(mCuSeqlensGpu);
         mCuSeqlensGpu = nullptr;
+    }
+    if (mForkExactCuSeqlensGpu) {  // fork T18
+        cudaFree(mForkExactCuSeqlensGpu);
+        mForkExactCuSeqlensGpu = nullptr;
     }
 }
 
@@ -2238,9 +2243,29 @@ ExecutionResult GraphExecutor::execute_backward(const ExecutionRequest& request,
 // ============================================================================
 
 void GraphExecutor::enable_doc_masking_pad_to_max(int max_num_docs, int num_micro_steps) {
-    if (max_num_docs <= 0 || num_micro_steps <= 0) return;
+    if (max_num_docs <= 0) {
+        // fork T17: off. mCuSeqlensCpu keeps its storage; train_step_graphed calls this before a capture
+        // without documents, after the graph whose copies read the slices was destroyed.
+        mDocMaskingPadMaxDocs = 0;
+        mDocMaskingPadMicroSteps = 1;
+        return;
+    }
+    if (num_micro_steps <= 0) return;
     mDocMaskingPadMaxDocs = max_num_docs;
     mDocMaskingPadMicroSteps = num_micro_steps;
+    // fork T17: size the device buffer for a padded slice now. The capture follows, and set_doc_masking
+    // would otherwise cudaMalloc it under the open capture when no eager call allocated it first (the
+    // first step with documents comes after a capture without them, so no warmup runs). Growing here is
+    // what set_doc_masking would do; the graph that held the old buffer has been destroyed.
+    if (!mCuSeqlensGpu || mCuSeqlensCount < max_num_docs + 1) {
+        if (mCuSeqlensGpu) {
+            CUDA_CHECK(cudaFree(mCuSeqlensGpu));
+            mCuSeqlensGpu = nullptr;
+        }
+        const int cap_count = std::max(max_num_docs + 1, mCuSeqlensCount);
+        CUDA_CHECK(cudaMalloc(&mCuSeqlensGpu, static_cast<std::size_t>(cap_count) * sizeof(std::int32_t)));
+        mCuSeqlensCount = cap_count;
+    }
     // mCuSeqlensCpu is laid out as num_micro_steps slices, each of
     // (max_num_docs+1) int32 entries. Each slice has a stable host
     // address (no realloc once reserved), so captured H2D memcpys
@@ -2276,6 +2301,13 @@ void GraphExecutor::stage_cu_seqlens_for_micro_step(int micro_step,
     const std::size_t slice_count = static_cast<std::size_t>(mDocMaskingPadMaxDocs + 1);
     const std::size_t slice_offset = static_cast<std::size_t>(micro_step) * slice_count;
     if (slice_offset + slice_count > mCuSeqlensCpu.size()) return;
+    // fork T18: a slice holds at most cap+1 offsets; more would drop the tail documents' queries.
+    // train_step_graphed recaptures before staging more, so outside a capture this is a caller bug.
+    if (count > mDocMaskingPadMaxDocs + 1 && !stream_is_capturing(mRunState.MainStream)) {
+        throw std::runtime_error("stage_cu_seqlens_for_micro_step: " + std::to_string(count - 1) +
+                                 " documents exceed the captured cap of " + std::to_string(mDocMaskingPadMaxDocs) +
+                                 " (micro-step " + std::to_string(micro_step) + ")");
+    }
     // Copy actual cu_seqlens entries.
     const int copy_count = std::min(count, mDocMaskingPadMaxDocs + 1);
     for (int i = 0; i < copy_count; ++i) {
@@ -2305,6 +2337,26 @@ void GraphExecutor::set_doc_masking(const std::int32_t* cu_seqlens_cpu,
     // captured graph crashes. Source the memcpy from the stable member
     // buffer instead.
     const bool pad_to_max = mDocMaskingPadMaxDocs > 0;
+    // fork T18: pad mode stays on after a capture with documents. An eager call (validate, a warmup
+    // after a shape change) with more than cap documents would keep only the first cap of them, leaving
+    // the rest of the tokens with no attention output; it runs exact geometry instead.
+    switch (surogate_fork::doc_mask::pad_mode_route(count, mDocMaskingPadMaxDocs,
+                                                    stream_is_capturing(mRunState.MainStream))) {
+        case surogate_fork::doc_mask::PadRoute::ExactEager:
+            set_doc_masking_exact_outside_capture(cu_seqlens_cpu, num_docs, max_seqlen, total_q);
+            return;
+        case surogate_fork::doc_mask::PadRoute::OverflowInCapture: {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                std::cerr << "[cu_seqlens] ERROR: " << num_docs << " documents exceed the captured cap of "
+                          << mDocMaskingPadMaxDocs << " during a CUDA graph capture; documents past the cap get "
+                          << "no attention output in this graph\n";
+            }
+            break;
+        }
+        default: break;
+    }
     int memcpy_count = count;
     int slice_offset = 0;
     if (pad_to_max) {
@@ -2450,6 +2502,53 @@ void GraphExecutor::clear_doc_masking() {
     mDocMaskingMaxSeqlen = 0;
     mDocMaskingTotalQ = 0;
     // Keep GPU buffer allocated for reuse (freed in destructor)
+}
+
+// fork T18: exact geometry for an eager call that overflows the captured cap, through buffers of its
+// own: captured graphs hold mCuSeqlensCpu's slices and mCuSeqlensGpu, so neither is touched or resized.
+// Only eager calls use these (never under a capture), so they may grow.
+void GraphExecutor::set_doc_masking_exact_outside_capture(const std::int32_t* cu_seqlens_cpu,
+                                                          int num_docs,
+                                                          int max_seqlen,
+                                                          int total_q) {
+    const int count = num_docs + 1;
+    if (!mForkExactCuSeqlensGpu || mForkExactCuSeqlensCount < count) {
+        if (mForkExactCuSeqlensGpu) {
+            CUDA_CHECK(cudaFree(mForkExactCuSeqlensGpu));
+            mForkExactCuSeqlensGpu = nullptr;
+        }
+        const int cap_count = std::max(count, total_q + 1);
+        CUDA_CHECK(cudaMalloc(&mForkExactCuSeqlensGpu, static_cast<std::size_t>(cap_count) * sizeof(std::int32_t)));
+        mForkExactCuSeqlensCount = cap_count;
+    }
+    mForkExactCuSeqlensCpu.assign(cu_seqlens_cpu, cu_seqlens_cpu + count);
+    CUDA_CHECK(cudaMemcpyAsync(mForkExactCuSeqlensGpu,
+                               mForkExactCuSeqlensCpu.data(),
+                               static_cast<std::size_t>(count) * sizeof(std::int32_t),
+                               cudaMemcpyHostToDevice,
+                               mRunState.MainStream));
+    mDocMaskingNumDocs = num_docs;
+    mDocMaskingMaxSeqlen = max_seqlen;
+    mDocMaskingTotalQ = total_q;
+    if (mCompiledExecutor) {
+        mCompiledExecutor->set_doc_masking_context(mForkExactCuSeqlensGpu,
+                                                   mForkExactCuSeqlensCpu.data(),
+                                                   num_docs,
+                                                   max_seqlen,
+                                                   total_q);
+    }
+}
+
+// fork T17: see IGraphExecutor::set_row_doc_masking_for_capture.
+bool GraphExecutor::set_row_doc_masking_for_capture(int B, int T, int micro_step) {
+    if (!surogate_fork::doc_mask::rows_stay_varlen_in_capture(mDocMaskingPadMaxDocs,
+                                                              stream_is_capturing(mRunState.MainStream),
+                                                              B)) {
+        return false;
+    }
+    const auto cu = surogate_fork::doc_mask::per_row_cu_seqlens(B, T);
+    set_doc_masking(cu.data(), B, T, B * T, micro_step);
+    return true;
 }
 
 // ---- Debug-only dispatch-PP sub-range parity helpers ----------------------

@@ -43,6 +43,7 @@
 #include "runtime/executor/graph_executor.h"
 #include "runtime/optimizers/normuon.h"
 #include "serve/core/unified_memory.h"
+#include "surogate_fork/doc_mask_staging.h"  // fork T17
 
 namespace {
 bool env_enabled(const char* name) {
@@ -1244,24 +1245,12 @@ std::pair<float, float> MultiGPUPyTrainer::train_step_graphed(const std::int32_t
         if (mOptions.DocMasking) {
             for (int j = 0; j < micro_steps; ++j) {
                 const auto* pos = reinterpret_cast<const std::int32_t*>(gs.position_ids[j].Data);
+                // fork T17: the scan is surogate_fork::doc_mask::scan_micro_step_documents (CPU-tested). Every
+                // row closes its last document, so each list holds >= B+1 offsets: {0, T, ..., B*T} without resets.
+                auto docs = surogate_fork::doc_mask::scan_micro_step_documents(pos, B, T_step);
+                has_doc_boundaries = has_doc_boundaries || docs.has_in_row_boundaries;
                 auto& cu = per_ms_cu_seqlens[j];
-                cu.clear();
-                cu.push_back(0);
-                for (int b = 0; b < B; ++b) {
-                    const int row_base = b * T_step;
-                    int doc_start = row_base;
-                    for (int t = 1; t < T_step; ++t) {
-                        const int idx = row_base + t;
-                        if (pos[idx] - pos[idx - 1] != 1) {
-                            const int doc_len = idx - doc_start;
-                            if (doc_len > 0) cu.push_back(cu.back() + doc_len);
-                            doc_start = idx;
-                            has_doc_boundaries = true;
-                        }
-                    }
-                    const int last_len = (b + 1) * T_step - doc_start;
-                    if (last_len > 0) cu.push_back(cu.back() + last_len);
-                }
+                cu = std::move(docs.cu_seqlens);
                 per_ms_total_q[j] = static_cast<int>(B * T_step);
                 current_max_num_docs = std::max(current_max_num_docs, std::max(0, static_cast<int>(cu.size()) - 1));
             }
@@ -1595,15 +1584,15 @@ std::pair<float, float> MultiGPUPyTrainer::train_step_graphed(const std::int32_t
             }
         }
         if (gs.captured) {
-            if (has_doc_boundaries && (gs.captured_doc_cap <= 0 || current_max_num_docs > gs.captured_doc_cap)) {
+            // fork T17: a graph captured with documents replays every step that fits its cap, and a step without
+            // in-row resets stages its per-row lists ({0, T, ..., B*T}, what eager runs) -- upstream staged
+            // {0, B*T}, one document across all rows. The plan is surogate_fork::doc_mask::plan_captured_step.
+            const auto doc_plan = surogate_fork::doc_mask::plan_captured_step(
+                gs.captured_doc_cap, has_doc_boundaries, current_max_num_docs);
+            if (doc_plan.recapture) {
                 gs.reset_capture();
-            } else if (!has_doc_boundaries && gs.captured_doc_cap > 0) {
-                has_doc_boundaries = true;
-                current_max_num_docs = 1;
-                const int total_q = static_cast<int>(B * T);
-                for (auto& cu : per_ms_cu_seqlens) {
-                    cu.assign({0, total_q});
-                }
+            } else {
+                has_doc_boundaries = doc_plan.stage_slices;
             }
         }
 
@@ -1636,16 +1625,17 @@ std::pair<float, float> MultiGPUPyTrainer::train_step_graphed(const std::int32_t
                 gs.captured_doc_cap = capture_doc_cap;
                 // Stage warmup-step cu_seqlens for each ms so the captured
                 // forward sees consistent shapes during capture.
+                // fork T17: a micro-step without in-row resets keeps its per-row list here, and its forward is
+                // captured varlen with that list (GraphExecutor::set_row_doc_masking_for_capture), not dense.
                 const int total_q = static_cast<int>(B * T);
                 for (int j = 0; j < micro_steps; ++j) {
                     auto& cu = per_ms_cu_seqlens[j];
-                    if (cu.size() <= 1) {
-                        // No boundaries this ms — synthesize a single
-                        // doc covering the full B*T span.
-                        cu.assign({0, total_q});
-                    }
                     dsl_model->stage_cu_seqlens_for_micro_step(j, cu.data(), static_cast<int>(cu.size()), total_q);
                 }
+            } else {
+                // fork T17: this graph reads no slice, so pad mode (left on by an earlier capture with
+                // documents) goes off; its captured micro-steps then stay dense, as eager runs them.
+                dsl_model->enable_doc_masking_pad_to_max(0, micro_steps);
             }
             // Ensure the main stream is idle before beginning capture (no external dependencies).
             CUDA_CHECK(cudaStreamSynchronize(rs.MainStream));
@@ -1740,10 +1730,7 @@ std::pair<float, float> MultiGPUPyTrainer::train_step_graphed(const std::int32_t
         if (has_doc_boundaries) {
             const int total_q = static_cast<int>(B * T);
             for (int j = 0; j < micro_steps; ++j) {
-                auto& cu = per_ms_cu_seqlens[j];
-                if (cu.size() <= 1) {
-                    cu.assign({0, total_q});
-                }
+                auto& cu = per_ms_cu_seqlens[j];  // fork T17: per-row list when the micro-step has no in-row reset
                 dsl_model->stage_cu_seqlens_for_micro_step(j, cu.data(), static_cast<int>(cu.size()), total_q);
             }
         }

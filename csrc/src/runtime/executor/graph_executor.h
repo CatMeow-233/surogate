@@ -166,6 +166,13 @@ public:
     }
     virtual void clear_doc_masking() {
     }
+    /// fork T17: while a full-step graph is captured in cap-and-pad mode, set one document per row
+    /// ({0, T, ..., B*T}) for a micro-step whose position ids have no in-row reset, so its attention is
+    /// captured varlen and reads the slice each launch stages. Returns false (the caller then clears
+    /// doc masking, as upstream does) outside such a capture.
+    virtual bool set_row_doc_masking_for_capture(int /*B*/, int /*T*/, int /*micro_step*/) {
+        return false;
+    }
 
     /// Cap-and-pad: enable padding mode for outer-capture safety. Once on,
     /// set_doc_masking pads cu_seqlens to (max_num_docs+1) entries with
@@ -174,6 +181,8 @@ public:
     /// and scalar args bake in worst-case dims. Per-ms cu_seqlens are kept
     /// in distinct slices of mCuSeqlensCpu so each captured H2D memcpy
     /// reads from a stable per-ms host address.
+    /// fork T17: max_num_docs <= 0 turns the mode off without touching the slices' storage (called
+    /// before a capture without documents, once the graph that read the slices is gone).
     virtual void enable_doc_masking_pad_to_max(int /*max_num_docs*/, int /*num_micro_steps*/) {
     }
 
@@ -356,6 +365,7 @@ public:
                          int total_q,
                          int micro_step = 0) override;
     void clear_doc_masking() override;
+    bool set_row_doc_masking_for_capture(int B, int T, int micro_step) override;  // fork T17
     void enable_doc_masking_pad_to_max(int max_num_docs, int num_micro_steps) override;
     void stage_cu_seqlens_for_micro_step(int micro_step,
                                          const std::int32_t* cu_seqlens_cpu,
@@ -479,6 +489,15 @@ private:
     // memcpys.
     int mDocMaskingPadMaxDocs = 0;
     int mDocMaskingPadMicroSteps = 1;
+    // fork T18: an eager call in pad mode with more documents than the cap runs exact geometry through
+    // these buffers; mCuSeqlensCpu's slices and mCuSeqlensGpu, which captured graphs hold, are not touched.
+    std::vector<std::int32_t> mForkExactCuSeqlensCpu;
+    std::int32_t* mForkExactCuSeqlensGpu = nullptr;
+    int mForkExactCuSeqlensCount = 0;
+    void set_doc_masking_exact_outside_capture(const std::int32_t* cu_seqlens_cpu,
+                                               int num_docs,
+                                               int max_seqlen,
+                                               int total_q);
 
     // Layer-to-weight-names map for prefetching
     std::vector<std::vector<std::string>> mLayerWeightNames;
