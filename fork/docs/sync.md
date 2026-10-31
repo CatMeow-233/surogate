@@ -87,7 +87,7 @@ fork CI（`.github/workflows/fork-ci.yml`）在每个分支的每次推送时运
 | 8. 检查 | `fork/dev check`；不带 `--fast` 时还运行 `fork/dev test patches`、`fork/dev test experimental`、`fork/dev test tlc`、`fork/dev test tools` 和 `fork/dev test cpu`，它们需要准备好的 `.venv`（或 `FORK_PY`）、uv，以及 download.pytorch.org（无法访问时设 `FORK_TORCH_INDEX=pypi`），见 [fork/README.md 的“首次准备环境”](../README.md#首次准备环境)。 | 退出码 4 |
 | 9. 发布 | `git push -u origin <同步分支>`；PR 还没有打开时 `gh pr create -R CatMeow-233/surogate --base main`，正文（`.git/fork-sync-pr.md`）是第 3 步的报告加上同步分支的提交列表；PR 已经打开时（例如 `--continue` 之后）推送就更新了它，不再新建。`--local` 跳过此步。 | 退出码 1 |
 | 10. 完成 | PR 的检查通过后运行 `fork/dev sync --finish`。它先 `git fetch origin main <同步分支>`，要求本地 `HEAD` 等于 `origin/<同步分支>` 和 PR 的 head（`gh pr view --json headRefOid`），并且包含 `origin/main`；再用 `gh api .../commits/<HEAD>/check-runs` 确认 `check`、`experimental`、`fork-tests`、`openmp-contract` 在这个提交上都已通过（同名检查重跑过时以最新一次为准）；然后 `git switch main`、`git merge --ff-only <HEAD>`、`git push origin <HEAD>:refs/heads/main`。推送的总是检查过的那个提交：本地还没推送的提交、比 PR head 旧的本地分支都不会进入 `main`。 | 任一条件不满足时退出码 4，列出原因或未通过的 job，`main` 不变 |
-| 11. GPU 复测 | 报告中出现 T1–T5、T6–T8 或 T10 的上游提交时，在 GPU 主机上运行 `fork/dev test gpu`，并在该 topic 的 `conflict_history` 末尾记一行（日期、上游 sha、结果）。出现 T17–T19 的上游提交时，再做 [errata](upstream-errata.md) 中对应一节的 GPU 检查；出现 T20 的，再做 [performance.md](performance.md#不能捕获的整步只预热一次) 中的检查。出现 T22 的上游提交时，再做 [errata](upstream-errata.md#cudnn-注意力忽略-softmax_scalegemma3-27b-的全局层按-1sqrt128-训练fork-已修复ledger-t22) 中 T22 一节的 GPU 检查。出现 T23 的上游提交时，再做 errata 中 T23 两节（[交叉熵](upstream-errata.md#交叉熵-kernel-按-int-计算行偏移一个-lm-head-分块超过-231-个-logits-时越界读写fork-已修复ledger-t23)、[量化](upstream-errata.md#fp8-abs_max-与量化-kernel-的循环下标是-int一次处理约-231-个元素时越界读写fork-已修复ledger-t23)）的 GPU 检查，结果同样记在 T23 的 `conflict_history` 中。出现 T24 的上游提交、第 8 步中 T24 的上游 pin 失败过，或第 3 步之后的 `git log`（见 [T24](#t24-nvfp4-four-over-six-的-sr存储比例编码与图重放的-sr-噪声)）列出了上游对 fork kernel 所依赖代码的改动时，再做 [errata](upstream-errata.md#nvfp4-随机舍入与-four-over-six-块比例的缺陷fork-已修复ledger-t24) 中 T24 一节的 GPU 检查。出现 T25 的上游提交时，再做 [errata](upstream-errata.md#gpt-oss-预量化-checkpoint-的-lora-训练跳过冻结专家的输入梯度fork-已修复ledger-t25) 中 T25 一节的 GPU 检查。 | — |
+| 11. GPU 复测 | 报告中出现 T1–T5、T6–T8 或 T10 的上游提交时，在 GPU 主机上运行 `fork/dev test gpu`，并在该 topic 的 `conflict_history` 末尾记一行（日期、上游 sha、结果）。出现 T17–T19 的上游提交时，再做 [errata](upstream-errata.md) 中对应一节的 GPU 检查；出现 T20 的，再做 [performance.md](performance.md#不能捕获的整步只预热一次) 中的检查。出现 T22 的上游提交时，再做 [errata](upstream-errata.md#cudnn-注意力忽略-softmax_scalegemma3-27b-的全局层按-1sqrt128-训练fork-已修复ledger-t22) 中 T22 一节的 GPU 检查。出现 T23 的上游提交时，再做 errata 中 T23 两节（[交叉熵](upstream-errata.md#交叉熵-kernel-按-int-计算行偏移一个-lm-head-分块超过-231-个-logits-时越界读写fork-已修复ledger-t23)、[量化](upstream-errata.md#fp8-abs_max-与量化-kernel-的循环下标是-int一次处理约-231-个元素时越界读写fork-已修复ledger-t23)）的 GPU 检查，结果同样记在 T23 的 `conflict_history` 中。出现 T24 的上游提交、第 8 步中 T24 的上游 pin 失败过，或第 3 步之后的 `git log`（见 [T24](#t24-nvfp4-four-over-six-的-sr存储比例编码与图重放的-sr-噪声)）列出了上游对 fork kernel 所依赖代码的改动时，再做 [errata](upstream-errata.md#nvfp4-随机舍入与-four-over-six-块比例的缺陷fork-已修复ledger-t24) 中 T24 一节的 GPU 检查。出现 T25、T26 的上游提交时，再做 [errata](upstream-errata.md) 中对应一节的 GPU 检查（[T25](upstream-errata.md#gpt-oss-预量化-checkpoint-的-lora-训练跳过冻结专家的输入梯度fork-已修复ledger-t25)、[T26](upstream-errata.md#moe-的-fp8-权重缓存不拒绝可训练的专家权重fork-已修复ledger-t26)）。 | — |
 
 `--continue` 在同步分支上重新执行第 6–9 步，已经完成的部分会跳过，所以修复之后可以反复运行。它按分支名 `sync/<日期>-<sha 前 8 位>` 找同步合并：同步分支第一父链上第二父提交以这 8 位开头、并且是 `upstream/main` 祖先的最新合并；找不到（例如 `git merge --abort` 之后）或该提交不在上游历史中时停下，不会把别的合并当作同步合并。
 
@@ -233,6 +233,13 @@ git log --oneline HEAD..MERGE_HEAD -- <文件>                # 上游改了什�
 - 反向回放：见 ledger 中 T25 的 `conflict_history`。
 - 解决：以上游为准，再把条件末尾的开关调用和 `#include` 放回。上游改写这两个反向函数时，确认冻结专家的 dgrad 在 LoRA + 预量化 + GPT-OSS 时仍然执行（探针会提取 `skip_base_backward` 的定义；变量改名或不再只控制清零分支时测试失败，按新代码调整）。上游自己去掉这个跳过时，删去 T25 和开关头文件。
 - 测试：`fork/patches/tests/native/test_gpt_oss_prequant_dgrad.py`（`fork/dev test patches`，不需要 GPU）；GPU 检查见 errata。
+
+### T26 MoE 的 FP8 权重缓存拒绝可训练的专家权重
+
+- 文件：`csrc/src/runtime/executor/compiled_ops.cpp`（`CompiledExecutor::attach_moe_fp8_cache` 中环境变量与形状检查之后、查找缓存之前的 `if (mWeights.is_trainable(weight_name)) return;` 及两行注释）。缺陷与证据见 [upstream-errata.md](upstream-errata.md#moe-的-fp8-权重缓存不拒绝可训练的专家权重fork-已修复ledger-t26)。
+- 反向回放：见 ledger 中 T26 的 `conflict_history`。
+- 解决：以上游为准，再把这个 guard 放回查找与分配之前。上游给缓存加上优化器步之后的失效（或自己拒绝可训练权重）时，删去 T26。上游让通用 `moe_grouped_gemm` 产生权重梯度（errata 中未修复的那一处）时，T26 必须保留。
+- 测试：`fork/patches/tests/native/test_moe_fp8_cache_trainable.py`（`fork/dev test patches`，不需要 GPU；探针按源码原样编译函数体，函数改名或用到新的成员时它在编译时失败，按新代码补桩）；GPU 检查见 errata。
 
 ### 移动过的上游笔记与删除的文件
 

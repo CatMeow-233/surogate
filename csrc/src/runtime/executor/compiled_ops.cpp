@@ -931,6 +931,11 @@ void CompiledExecutor::attach_moe_fp8_cache(modules::MoeMatmulContext& ctx, cons
         ctx.N <= 0 || ctx.K <= 0) {
         return;
     }
+    // Quantized once and reset only by a QLoRA refresh: an expert weight the optimizer updates would keep its
+    // first FP8 image (fork ledger T26). The dense FP8/FP4 caches refuse trainable weights the same way.
+    if (mWeights.is_trainable(weight_name)) {
+        return;
+    }
     auto it = mMoEFP8Cache->find(weight_name);
     if (it == mMoEFP8Cache->end()) {
         if (!mMoEFP8CacheBudgetBytes.has_value()) {

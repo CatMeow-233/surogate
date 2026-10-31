@@ -771,3 +771,31 @@ fork_files = [
 ]
 tests = ["fork/patches/tests/native/test_gpt_oss_prequant_dgrad.py"]
 conflict_history = []
+
+[[topic]]
+id = "T26"
+title = "the MoE FP8 weight cache refuses trainable expert weights"
+commits = []
+switch = "always on (defect fix) under the opt-in SUROGATE_FP8_MOE_WEIGHT_CACHE; frozen experts (LoRA/QLoRA) keep the cache, so results there are unchanged"
+# Defect (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "MoE 的 FP8 权重缓存不拒绝可训练的专家权重"):
+# CompiledExecutor::attach_moe_fp8_cache (compiled_ops.cpp:928-972) checked only the env, the budget and the shape. The
+# entry is filled once by FP8HybridRecipe (fp8_hybrid_recipe.cpp:644-645, 699-706, 818-825) and reset only after a QLoRA
+# selective refresh (invalidate_moe_fp8_cache: moe_grouped_gemm.cpp:260/800, gate_up.cpp:214/1035, down.cpp:894), so a
+# weight the optimizer updates kept its first FP8 image. The dense caches refuse trainable weights
+# (graph_executor_weight_cache.cpp:247, 310, 569, 799). Reach today: only the generic moe_grouped_gemm sets inp_quant and
+# dout_quant and so fills or reads the cache (moe_grouped_gemm.cpp:320-333, 842-856); gate_up/down attach entries that
+# stay unfilled. The
+# generic op is Nemotron-H's experts_up (surogate/dsl/modules/moe.py:1450), which gets no weight gradient (see below),
+# so in full training the stale image differed from the master only by decoupled weight decay ((1-lr*wd)^t; default
+# weight_decay 0). Fix: return before the lookup when mWeights.is_trainable(weight_name). work_is_transient is not
+# refused: unlike the dense caches, which are primed ahead of use, this one is filled on the op's stream right where the
+# BF16 GEMM would read the same resolved buffer, and it is keyed per layer.
+# Related, not fixed here: the generic moe_grouped_gemm emits no weight gradient (its autodiff rule returns only
+# d_inputs[0], moe_grouped_gemm.cpp:1202-1219, and dispatch_moe_grouped_gemm_backward never calls
+# backward_moe_base_weights), so Nemotron-H full fine-tuning leaves experts_up untrained; T26 must stay in place if that
+# is fixed. The CPU test compiles attach_moe_fp8_cache from the source against host stubs; it fails on upstream's
+# sources. Compiled with the sm_120a configure; GPU-unverified (5090 check in the errata).
+files = ["csrc/src/runtime/executor/compiled_ops.cpp"]
+fork_files = ["fork/patches/tests/native/test_moe_fp8_cache_trainable.py"]
+tests = ["fork/patches/tests/native/test_moe_fp8_cache_trainable.py"]
+conflict_history = []

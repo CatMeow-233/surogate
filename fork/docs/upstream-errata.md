@@ -353,3 +353,19 @@ GPU 检查（未做）：在 5090 上（`ep_size: 1`）用 transformers 构建�
 1. 预量化模型、开关未设置：每层专家 gate_up LoRA 的 B 梯度范数不为 0；所有 LoRA 梯度与 BF16 checkpoint 的结果（以及 HF + PEFT 在反量化权重上的结果）的余弦大于 0.99。
 2. 同一模型设 `SUROGATE_GPT_OSS_PREQUANT_SKIP_EXPERT_DGRAD=1`：第一步专家 gate_up LoRA 的 B 梯度为 0，stderr 有一行开关说明（这是修复前的行为）。
 3. 运行 `tests/test_prequant_mxfp4_gpt_oss.py`，记录开关 0/1 时 `gptoss-lora-mxfp4.yaml` 的步时间；EP 大于 1 时的权重指针准备在 GPT-OSS 上没有跑过 dgrad，另外用 `ep_size: 2` 重复第 1 步。结果记在 T25 的 `conflict_history` 中。
+
+## MoE 的 FP8 权重缓存不拒绝可训练的专家权重（fork 已修复：ledger T26）
+
+本节同样是例外：fork 修改了上游文件。行号对应上游 `282f9901`；`compiled_ops.cpp` 在 `488e5f00` 与上游 `82d42c72` 中相同。
+
+缺陷：设置 `SUROGATE_FP8_MOE_WEIGHT_CACHE` 后，`CompiledExecutor::attach_moe_fp8_cache`（`csrc/src/runtime/executor/compiled_ops.cpp:928-972`）为 MoE 分组 GEMM 的权重建一份 FP8 E4M3 副本（每个专家一个 scale，预算 `SUROGATE_FP8_MOE_CACHE_BUDGET_MB`，默认 1 GiB）。`FP8HybridRecipe` 第一次用到时量化并置 `initialized`（`fp8_hybrid_recipe.cpp:644-645`、`699-706`，反向 `818-825`），之后一直复用；只有 QLoRA 的选择性刷新之后才会重置（`invalidate_moe_fp8_cache`：`moe_grouped_gemm.cpp:260`、`800`，`moe_grouped_gemm_gate_up.cpp:214`、`1035`，`moe_grouped_gemm_down.cpp:894`）。它只检查环境变量、预算和形状，不像稠密的 FP8/FP4 缓存那样拒绝可训练的权重（`graph_executor_weight_cache.cpp:247`、`310`、`569`、`799`）：优化器更新过的专家权重会一直按第一次的 FP8 副本参与计算。
+
+目前能走到的范围很窄：只有通用的 `moe_grouped_gemm` 设置 `inp_quant`/`dout_quant`（`moe_grouped_gemm.cpp:320-333`、`842-856`），从而走 recipe 中读写缓存的分支；`moe_grouped_gemm_gate_up`/`down`（Qwen3-MoE、GPT-OSS 等的专家）也调用 `attach_moe_fp8_cache` 分配条目，但走 BF16 分支，条目从未被填写。通用 op 只用于 Nemotron-H 的 `experts_up`（`surogate/dsl/modules/moe.py:1450`），而这个权重拿不到梯度（见下文），所以全量训练时缓存与 master 的差别只来自解耦的 weight decay：master 按 (1-lr·wd)^t 缩小，缓存仍是初始值（默认 `weight_decay` 为 0，`sft_config.py:423`；文档字符串 `:243` 写的 0.1 是错的）。上游的 Nemotron 示例都用 LoRA，专家冻结，不受影响。CPU 上按每专家 E4M3、JIT amax 的模拟：只有 decay 时 FP8 码完全不变，缓存的误差就是缩放因子，lr 2e-5、wd 0.01、1000 步时相对误差 2.0e-4，lr 1e-4、wd 0.1、1000 步时 1.0e-2；若专家真有梯度，lr 2e-5 的类 Adam 步 1000 步后缓存与新值的差（4.6e-2）已大于 FP8 量化误差本身（2.6e-2）。
+
+修复（T26，始终开启，只在设置了这个环境变量时起作用）：`attach_moe_fp8_cache` 在查找缓存之前，遇到 `mWeights.is_trainable(weight_name)` 就返回，op 改用 recipe 的逐次量化或 BF16 路径。LoRA/QLoRA 下专家冻结，缓存照常使用，结果不变。没有像稠密缓存那样也拒绝 `work_is_transient` 的权重：稠密缓存会提前预热（预热时流式缓冲中可能还不是该权重），这个缓存只在 op 自己的流上、在 BF16 GEMM 本来要读同一块已解析缓冲的位置填写，并按层的权重名分开存放。同样没有处理：gate_up/down 分配了却从不填写的条目仍占用预算内的显存（属于优化，不是缺陷）。
+
+相关的另一处缺陷（未修复，只读代码，GPU 上未确认）：通用 `moe_grouped_gemm` 不产生权重梯度。它的 autodiff 规则只输出 `d_inputs[0]`（`moe_grouped_gemm.cpp:1202-1219`；gate_up 的规则输出 `ctx.needs_grad(1) ? ctx.d_inputs[1]`），`dispatch_moe_grouped_gemm_backward` 也不调用 `backward_moe_base_weights`，`autodiff.cpp` 只把 `grad_map` 中有的参数作为反向输出。`experts_up` 却登记为可训练参数，`docs/guides/moe.md` 也写明全量训练会训练专家，所以 Nemotron-H 的全量训练静默地不训练 `experts_up`（`experts_down` 正常）。修复方向：规则中按 `needs_grad(1)` 输出 `d_inputs[1]`，反向中调用 `backward_moe_base_weights`（布局与 `moe_base_weight_grad` 的 [E,N,K] = dout^T·inp 一致）。那之后 `experts_up` 会真正变化，T26 必须保留。
+
+验证（没有 GPU）：`fork/patches/tests/native/test_moe_fp8_cache_trainable.py`（`fork/dev test patches`）把 `attach_moe_fp8_cache` 的函数体、`parse_mib_env`、`moe_fp8_cache_entry_bytes` 与 `MoEFP8WeightCacheEntry` 按源码原样编译，`Tensor`、分配器与 `DslParamStore` 用主机桩代替：可训练的专家权重不分配也不挂接缓存；冻结的权重分配一次（三个张量）并在反向复用；参数存储中没有的名字与上游相同；不设环境变量或设为 `0` 时不缓存；guard 位于查找与分配之前。用上游源码（`488e5f00`）运行时，可训练权重的 3 个测试和顺序测试失败。`compiled_ops.cpp` 按 sm_120a 配置的编译命令编译通过。
+
+GPU 检查（未做）：在 5090 上用一个小的随机 Nemotron-H（结构取 `tests/fixtures/onboarding_configs/nemotron_h.json`，层数减到含 2 个 MoE 层），`recipe: fp8-hybrid`、`lora: false`、`weight_decay: 0.1`、`learning_rate: 1e-3`，同一 seed 与数据跑 3 步，分别不设和设置 `SUROGATE_FP8_MOE_WEIGHT_CACHE=1`。期望：修复后两次运行每一步的 loss 与梯度范数逐位相同（可训练的 `experts_up` 不再走缓存，与不设环境变量时是同一条路径）；修复前设置缓存的运行从第 2 步起与不设时不同，但差别只来自 weight decay，很小，不适合作为判据。再用 `lora: true` 各跑一次：两次的 loss 在 FP8 噪声内相同，且设置缓存时显存占用多出约 E·N·K 字节（缓存仍在使用）。同时记录 `experts_up` 的梯度范数（预期为 0，即上面未修复的缺陷）与 `experts_down` 的梯度范数（非 0）。结果记在 T26 的 `conflict_history` 中。
