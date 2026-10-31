@@ -13,9 +13,14 @@ close are unchanged); it only stops waiting for steps that cannot arrive,
 except a step from a session created during the wait, which joins the next
 round.
 
-Off by default: rounds form at different times, so rounds and their batch
-composition differ, and batched decode kernels need not give bitwise-equal
-results for different batches. The scheduler reads the switch once, when it is
+Off by default. Its effect on results is the kind T11 has on this path: rounds
+form at different times, so rounds and their batch composition differ, and
+batched decode kernels need not give bitwise-equal results for different
+batches; upstream's round composition already depends on timing. The difference
+is what changes: T11 only removes host work whose result is discarded, and its
+timing effect is that of any host speedup, whereas this switch changes the rule
+that decides when a round starts, a scheduling change that stays opt-in until it
+is measured on the target GPU. The scheduler reads the switch once, when it is
 constructed.
 """
 

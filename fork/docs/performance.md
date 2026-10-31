@@ -431,7 +431,9 @@ dense Qwen3/Qwen3.5 的 `grpo-colocate` 用原生 SharedServer。每步进入训
 
 每个请求读取一次该变量，非法值使请求以 400 失败。流式请求（有回调）始终走上游循环。
 
-`final` 默认开启，因为它只去掉结果被丢弃的工作：对上游能完成的每个请求，token、文本、message、logprobs 和 finish reason 都与上游相同。唯一的差别出现在失败的情况：如果某个 tokenizer 的 `decode` 对 completion 的某个前缀抛异常、对完整的 completion 不抛，上游会在那一步失败，这里不会。HF fast tokenizer 不会出现这种情况：未知 id 被丢弃，非法 UTF-8 被替换。
+`final` 默认开启，因为它只去掉结果被丢弃的主机工作：对同一个 token 序列，上游能完成的每个请求得到的文本、message、logprobs 和 finish reason 都与上游相同。唯一的差别出现在失败的情况：如果某个 tokenizer 的 `decode` 对 completion 的某个前缀抛异常、对完整的 completion 不抛，上游会在那一步失败，这里不会。HF fast tokenizer 不会出现这种情况：未知 id 被丢弃，非法 UTF-8 被替换。
+
+这个等价是对单个请求、给定的 token 序列而言的，并不是说 GPU 收到的调用不变。trainer 没有 `decode_batch_logits` 时没有调度器，请求在 `compute_lock` 下逐个执行，GPU 收到的调用与上游相同。有调度器时（连续批处理；`binding.cpp` 总是为 `SurogateTrainer` 绑定这个方法，所以用当前原生扩展的训练路径都走这里），每一步经 `DecodeScheduler.step` 与其他 session 的步合成一轮，交给 `decode_batch_sample` 或 `decode_batch_logits`，哪些 session 同处一轮取决于各 session 交出下一步的时刻。T11 缩短了一个 session 拿到这一步的结果到交出下一步之间的主机时间（下文每个 token 143–626 µs 降到约 7 µs），因此与任何主机加速（更快的 CPU、更低的负载）一样，改变了轮次的数目、大小和组成：下文 rollout 模拟中 2.8 ms、等长的一行，`per_token` 为 1176 轮、平均每轮 13.93 个 session，`final` 为 1074 轮、15.26 个（`grpo_rollout_host.py rollout` 输出的 `rounds` 与 `mean_batch`）。批量 decode kernel 对不同 batch 不保证逐位相同的结果（上游 `tests/grpo/test_batched_decode_gpu.py` 比较批量与逐个 decode 时，GLM 以外的模型只要求 `atol=0.1`），所以并发高于 1 时，采样出的 token 只在上游自身的时序不确定性范围内与上游一致，不能逐位比较。上游的轮次组成本来就取决于主机时序，同样的配置跑两次也可能不同；T11 没有引入新的不确定来源，这是它默认开启的依据。
 
 `incremental` 的结果等于上游的依据（tokenizers 0.23.3 的 Rust 源码与 transformers 5.21，推导写在 `_ByteLevelTail` 的 docstring 中）：`decode` 把每个 id 映射成 token 字符串后交给 decoder；ByteLevel decoder 把每个 token 各自转成字节，对整串字节做一次 `from_utf8_lossy`；一段字节的 lossy 解码若不以 U+FFFD 结尾，就停在完整字符的边界上，之后的字节与它无关。因此已提交部分的文本是之后每一步文本的前缀，而上一步文本中没有停止字符串，新出现的匹配只能从已提交文本的最后 `len(stop) - 1` 个字符或更晚处开始。窗口文本以 U+FFFD 结尾时（字符还没写完）继续累积 token；超过 16 个 token（一个不完整字符最多 4 个字节 token，只有连续的非法字节会到这里）时，这个请求改用全文检查。是否使用窗口由 `byte_level_backend()` 判断：类上与实例上都没有覆盖 `decode`/`_decode`，decoder 的类型恰好是 `tokenizers.decoders.ByteLevel`，transformers 不会对全文做 `clean_up_tokenization`，并用一段包含全部清理模式的探针文本确认 `tokenizer.decode` 与后端 `decode` 一致。这个论证依赖已安装的 tokenizers 与 transformers 的内部实现，而检查只看类和探针、看不到 Rust 代码，所以 `incremental` 默认关闭。
 
@@ -439,7 +441,7 @@ dense Qwen3/Qwen3.5 的 `grpo-colocate` 用原生 SharedServer。每步进入训
 
 `DecodeScheduler._run` 最多等 1 ms，直到有 `max_batch` 个待执行的步。存活的 session 少于 `max_batch` 时（每个 rollout 阶段的尾部，或 `max_concurrency` 高于实际并发时）这个数永远凑不够，每一轮都等满 1 ms。session 从 `new_session` 到 `release` 之间是存活的，每个 session 同时最多有一个待执行的步。`SUROGATE_GRPO_LIVE_DISPATCH=1` 时，所有存活 session 都交了一步（`min(max_batch, 存活数)`，至少 1）就开始一轮；截止时间以及遇到 release 或关闭时提前结束等待的规则不变，所以一轮等待的时间不会比上游长。等待期间新建的 session 交的步进入下一轮。
 
-该开关默认关闭，调度器在构造时读取一次：轮次形成的时刻不同，各轮的 batch 组成也就不同，而批量 decode kernel 对不同 batch 不保证逐位相同的结果。上游的轮次组成本来就取决于时序，同样的配置跑两次也可能不同。
+该开关默认关闭，调度器在构造时读取一次。它对结果的影响与 T11 在连续批处理路径上的影响属于同一类：轮次形成的时刻不同，各轮的 batch 组成也就不同，而批量 decode kernel 对不同 batch 不保证逐位相同的结果；上游的轮次组成本来就取决于时序，同样的配置跑两次也可能不同。两者的区别在改动的性质：T11 只去掉结果被丢弃的工作，轮次时刻的变化是任何主机加速都有的副作用；T12 改的是调度器决定一轮何时开始的规则本身，这样的调度策略改动在 5090 上测出收益之前不默认开启。
 
 ### 测量
 
@@ -468,7 +470,10 @@ dense Qwen3/Qwen3.5 的 `grpo-colocate` 用原生 SharedServer。每步进入训
 
 ### 在 RTX 5090 上尚未验证
 
-以上吞吐量都来自 CPU 模拟。T11 不改变 GPU 收到的任何调用：token 序列是采样器的输出，改动只影响两步之间主机做什么，因此等价性完全由 CPU 测试覆盖（`fork/patches/tests/grpo/test_shared_model_detok.py` 用随机生成的 completion 逐字段比较三种模式，包括拆开的多字节字符、非法 UTF-8、U+FFFD、特殊 token、跨 token 的停止字符串、`min_tokens`、停止 token、工具调用与 Harmony，并覆盖 SentencePiece 风格、WordPiece 和强制清理的 tokenizer）。需要在 5090 上测的是收益：
+以上吞吐量都来自 CPU 模拟。对给定的 token 序列，每个请求的响应与上游相同，这一点由 CPU 测试覆盖（`fork/patches/tests/grpo/test_shared_model_detok.py` 用随机生成的 completion 逐字段比较三种模式，包括拆开的多字节字符、非法 UTF-8、U+FFFD、特殊 token、跨 token 的停止字符串、`min_tokens`、停止 token、工具调用与 Harmony，并覆盖 SentencePiece 风格、WordPiece 和强制清理的 tokenizer）。token 序列本身在连续批处理路径上随轮次组成变化（见 T11 一节），CPU 测试不覆盖这部分：并发为 1 时每轮只有一个 session，轮次组成与主机耗时无关，GPU 上应与上游逐位相同；并发高于 1 时只能比较分布。下面各项都没有在 5090 上运行过：
 
 1. 在一个走训练路径的模型上（例如约 10B 总参数的 qwen3_moe LoRA，`max_tokens` 1536，16 个 prompt × 8 个 rollout），用同一份配置运行 `surogate grpo-colocate --train <train.yaml> --infer <infer.yaml> --orch <orch.yaml>` 至少 50 步三次：一次设 `SUROGATE_GRPO_DETOK=per_token`，一次不设，一次不设并设 `SUROGATE_GRPO_LIVE_DISPATCH=1`。比较 `train/pack_duration_ms`（colocate 下主要是等 rollout）和 `train/cycle_duration_ms` 的中位数，以及有效 batch：每步生成的 completion token 数除以 `<output_dir>/shared_weights.jsonl` 中相邻两条 `rollouts` 记录的 `decode_rounds` 之差（含 prefill 轮次）。预期 MoE 的 rollout 至少快 1.15 倍、尾部的有效 batch 接近 `min(16, 存活数)`；1B 左右的非 Qwen 稠密模型至少快 1.5 倍。
 2. rollout 期间对服务进程运行 `py-spy dump --native --pid <pid>`：默认模式下处理线程的栈中不应出现 `tokenizer.decode` 解码整个 completion 或 `parse_output`。
+3. 第 1 项的三次运行中 orchestrator 的请求不固定 seed，token 不可逐位比较，比较分布：每步 reward 均值和 completion 长度在三次之间应无系统差异。
+4. 并发为 1 时与上游逐位相同：用一个走训练路径的真实 checkpoint（例如 qwen3_moe）和它的 tokenizer，按 `tests/grpo/test_shared_model_gpu.py` 中 `_check_policy` 的方式建 trainer 和 `SharedModelServer`，但 `max_concurrency=1`；对同一组 prompt（至少 8 个，`max_tokens` 不少于 256，其中一半带 `stop` 和 `tools`）用固定的 `seed`、`temperature=1`、`logprobs=True`、`top_logprobs=5` 逐个请求 `/v1/chat/completions`，一次设 `SUROGATE_GRPO_DETOK=per_token`、一次不设（模式按请求读取，可以在同一个进程中两次请求之间切换），要求 `token_ids`、`logprobs`、`message` 和 `finish_reason` 完全相同。
+5. 默认模式（不设 `SUROGATE_GRPO_DETOK`）下运行经过 `SharedModelServer` 的上游 GPU 测试：`SUROGATE_SHARED_CASES=all .venv/bin/python -m pytest -q --slow tests/grpo/test_shared_model_gpu.py tests/grpo/test_tool_protocol_gpu.py tests/grpo/test_routing_capture_gpu.py`，再设 `SUROGATE_GRPO_LIVE_DISPATCH=1` 运行一次 `tests/grpo/test_shared_model_gpu.py`。其中 `_check_policy` 要求两个并发的生成与单独一次生成的 `token_ids` 相同、`max_decode_batch >= 2`，并且 rollout 的 logprobs 与打包打分一致。这些测试标记为 `slow`，`fork/dev test gpu` 中的 `make test-py` 不带 `--slow`，不会运行它们。

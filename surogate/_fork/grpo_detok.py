@@ -25,8 +25,9 @@ Modes, from `SUROGATE_GRPO_DETOK` (read per request):
 
 - `final` (default): stop strings are checked on a full decode, as upstream,
   on each step from `minimum - 1` on; without stop strings a step costs nothing
-  here. Same tokens, text, message, logprobs and finish reason as upstream for
-  every request upstream completes. One difference in failure cases only:
+  here. For a given token stream, the same text, message, logprobs and finish
+  reason as upstream for every request upstream completes (see below for the
+  token stream itself). One difference in failure cases only:
   a tokenizer whose `decode` raises on some prefix of a completion but not on
   the whole of it fails upstream at that step and here not at all (HF fast
   tokenizers never raise there: unknown ids are dropped, invalid UTF-8 is
@@ -40,6 +41,17 @@ Modes, from `SUROGATE_GRPO_DETOK` (read per request):
 
 Streaming requests (a callback) always take upstream's loop. No state outlives
 a request; nothing here is saved in checkpoints.
+
+The equivalence is per request, for the tokens the sampler returns; it does not
+mean the GPU receives upstream's calls. Without a decode scheduler requests run
+one at a time under `compute_lock` and it does. With one (continuous batching,
+whenever the trainer has `decode_batch_logits`), each step joins a round with
+whatever other sessions have submitted, and skipping the text work shortens the
+host time between a step's result and the next submission, as any host speedup
+does. Steps then reach the scheduler at different times, so the number, size
+and membership of rounds differ, and batched decode need not be bitwise equal
+across batches: above concurrency 1 the sampled tokens match upstream only up
+to upstream's own timing nondeterminism, which already decides how rounds form.
 """
 
 from __future__ import annotations
