@@ -736,3 +736,38 @@ tests = [
 conflict_history = [
     "2026-10-31 reverse replay of af89ae9b and 33b73381 onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: quant_nvfp4_4o6.cu 1/0/0 (the 90-day point predates 9f7d3705, which added quantize_nvfp4_4o6_cutlass_from_amax, where one RN dispatch sits), quant_nvfp4_cutlass.cu 0/0/0",
 ]
+
+[[topic]]
+id = "T25"
+title = "GPT-OSS prequantized LoRA computes the frozen-expert input gradient"
+commits = []
+switch = "always on (defect fix): the base dgrad runs by default; SUROGATE_GPT_OSS_PREQUANT_SKIP_EXPERT_DGRAD=1 restores upstream's skip (approximate gradients, two grouped GEMMs fewer per MoE layer)"
+# Defect (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "GPT-OSS 预量化 checkpoint 的 LoRA 训练跳过冻结专家的
+# 输入梯度"): dispatch_moe_grouped_gemm_gate_up_backward and dispatch_moe_grouped_gemm_down_backward set
+# skip_base_backward for lora_enabled && is_lora_only_mode() && is_prequantized() && Architecture == GPT_OSS
+# (moe_grouped_gemm_gate_up.cpp:1043-1056, moe_grouped_gemm_down.cpp:902-914), zeroed d_input and added only the grouped
+# LoRA dX. is_lora_only_mode() is lora_enabled() (dsl_model_execution.cpp:419-426), so every LoRA run on a prequantized
+# GPT-OSS checkpoint took it, examples/sft/gpt-oss/gptoss-lora-mxfp4.yaml included. down's d_input is d_act, from which
+# gpt_oss_moe_act's backward forms d_gate_up: the expert gate_up LoRA gradient came from the down-LoRA term alone (exactly
+# zero while the down LoRA B is at its zero init, lora_weights_manager.cpp:383-389), and the MoE branch passed only that
+# term to the attention LoRA and the earlier layers. 7a8d5fee (2026-02-12) added the skip with SUROGATE_PREQUANT_BASE_GRAD=1
+# as the way back; 1181c715 (2026-03-31, "stability improvements", which dropped several debug variables) removed it.
+# No doc or test explains the skip; the dequantized BF16 experts are resolved in both backward ops anyway, and every other
+# architecture (and GPT-OSS on BF16 checkpoints) runs the same dgrad on the same buffers.
+# Fix: the condition also requires surogate_fork::gpt_oss_prequant_skip_expert_dgrad_requested()
+# (fork/native/include/surogate_fork/gpt_oss_prequant_dgrad.h), false unless the switch is set, read once per process.
+# The non-skip branch, including the EP/LLEP weight-pointer staging before it, is the one other prequantized MoE models run.
+# The CPU test compiles both statements from the sources and emulates one expert in float64 against autograd; it fails
+# on upstream's sources. Compiled with the sm_120a configure; GPU-unverified (5090 check in the errata). Expected cost:
+# two BF16 grouped dgrad GEMMs per MoE layer (unmeasured); docs/reference/benchmarks.md's gpt-oss-20B row was measured
+# with the skip.
+files = [
+    "csrc/src/runtime/ops/moe_grouped_gemm_gate_up.cpp",
+    "csrc/src/runtime/ops/moe_grouped_gemm_down.cpp",
+]
+fork_files = [
+    "fork/native/include/surogate_fork/gpt_oss_prequant_dgrad.h",
+    "fork/patches/tests/native/test_gpt_oss_prequant_dgrad.py",
+]
+tests = ["fork/patches/tests/native/test_gpt_oss_prequant_dgrad.py"]
+conflict_history = []

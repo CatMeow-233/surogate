@@ -10,6 +10,7 @@
 | [LoRA 融合输入梯度](#lora-融合输入梯度) | T2 |
 | [GRPO 周期计时](#grpo-周期计时) | T6 |
 | [cpu_training 的 AdamW 状态 checkpoint](#cpu_training-的-adamw-状态-checkpoint) | T21 |
+| [GPT-OSS 预量化 LoRA 的专家输入梯度](#gpt-oss-预量化-lora-的专家输入梯度) | T25 |
 
 优化应针对完整的训练迭代，包括输入获取和通信。孤立的 kernel 改进只有在缩短关键路径时才有帮助。比较改动时，保持模型、recipe、序列长度、batch、硬件拓扑和质量目标不变。
 
@@ -251,3 +252,12 @@ GRPO 在现有训练指标之外，还记录获取和发布的耗时。trainer �
 4. `cpu_adamw.format` 不是 1 时总是拒绝。
 5. 数据并行的各 rank 持有相同的矩，每个本地 rank 写、读自己的一份（N 个本地 rank 占 N 倍磁盘），与权重 shard 相同；shard 数由 `checkpoint.json` 的 `world` 检查。只有第一个节点写文件。
 6. 以后的格式（例如路线图 #9 的 8-bit CPU 状态）用新的名字或新的版本号，并转换（量化）或拒绝 v1 文件。如果它改用 `adamw8bit.*` 名字，必须与 `init_state` 的槽位布局一致（每个槽位按 32 对齐的 `state_offset`，int8 softsign 的 m，uint8 sqrt 的 v，每 32 个元素一个 FP16 scale），并保留同样的完整性检查：`require_complete` 只检查 T21 的容器。
+
+## GPT-OSS 预量化 LoRA 的专家输入梯度
+
+ledger T25，开关 `SUROGATE_GPT_OSS_PREQUANT_SKIP_EXPERT_DGRAD=1`，默认关闭。
+
+这是缺陷修复，不是优化：上游在预量化的 GPT-OSS checkpoint 上做 LoRA 训练时省掉 MoE 专家 gate_up 与 down 的输入梯度（dgrad）GEMM，梯度因此是错的（见 [upstream-errata.md](upstream-errata.md#gpt-oss-预量化-checkpoint-的-lora-训练跳过冻结专家的输入梯度fork-已修复ledger-t25)）。fork 默认计算它；开关打开时恢复上游的做法，每个 MoE 层少两个 BF16 分组 GEMM，但专家 gate_up LoRA 和更早的层得到的梯度是错的，只适合复现上游的吞吐或对照实验。开关每个进程只读一次，打开时 stderr 有一行说明。
+
+代价没有在 GPU 上测量。按路线图的估计（GPT-OSS-20B 前向加重放的专家时间 10.9 ms/层），多出的 dgrad 约 +5 ms/层；`docs/reference/benchmarks.md` 中 gpt-oss-20B 的吞吐是带着跳过测的，与 fork 的默认设置不可直接比较。测量方法：在 5090 上用 `examples/sft/gpt-oss/gptoss-lora-mxfp4.yaml`（改为单卡，`ep_size: 1`）分别不设和设置开关，各跑 20 步，比较稳定后的步时间，并用 nsys 统计每层分组 GEMM 的个数与耗时（开关打开时每个 MoE 层少两个）。
+

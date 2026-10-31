@@ -329,3 +329,27 @@ GPU 检查（未做；5090，`fork/dev test native` 之后运行 `csrc/build/int
 3. 图：把 4/6 SR 与标准 SR 的量化捕获进一个图，重放 3 次，每次的 FP4 码都与上一次不同，块比例相同；同一种子的两次 eager 调用结果相同。设 `SUROGATE_NVFP4_SR_GRAPH_LEGACY=1` 时期望重放结果相同；设 `SUROGATE_NVFP4_4O6_SR_LEGACY=1` 时 4/6 的码在重放之间相同（上游 kernel），标准 SR 的码仍按图开关变化。Debug 构建上也运行一次（`make build-tests BUILD_TYPE=Debug BUILD_DIR=csrc/build-debug`，然后 `csrc/build-debug/integration-tests '[sr-graph]'`）：上面的链接问题只在主机代码不内联时出现，Release 构建看不到。
 4. 训练 A/B：Qwen3-0.6B NVFP4 全量训练 500 步，比较默认、`SUROGATE_NVFP4_4O6_SR_LEGACY=1 SUROGATE_NVFP4_4O6_RN_LEGACY=1 SUROGATE_NVFP4_SR_GRAPH_LEGACY=1`、`fp4_four_over_six: false` 与 bf16 的 loss 曲线；单独看 4/6 SR kernel 的修复时，用 `use_cuda_graphs: false` 比较默认与只设 `SUROGATE_NVFP4_4O6_SR_LEGACY=1`（eager 时图开关不起作用；图模式下只设它还会去掉 wgrad 操作数上的图修复，见上）。再对 LoRA（只受 RN 与图两项影响）做同样的比较，并用 nsys 记录 SR 量化 kernel 与新增单线程 kernel 的耗时。结果记在 T24 的 `conflict_history` 中。
 5. 端到端的图噪声：33b73381 的提交说明中写的检查（Qwen3-0.6B NVFP4 LoRA，第 2 步与第 3 步用同一批数据，比较 dout_fp4 的哈希，修复前相同）不能说明缺陷：LoRA 的适配器在两步之间被优化器更新，基础 matmul 的 dout 与它的 FP4 码即使噪声固定也不同。改为只让噪声可能不同：`learning_rate: 0`（参数不变）、每步同一个序列、`use_cuda_graphs: true`，在第 2 步与第 3 步（两次重放）记录反向中第一个用 SR 量化的 dgrad 操作数（如最后一个 decoder 层 `down_proj` 的 dout）的 BF16 输入与 FP4 码的哈希（临时在 `nvfp4_recipe.cpp` 的 `backward_matmul_cutlass` 中把两者复制到步后读取的缓冲区）。BF16 输入两步必须相同（不同时说明还有别的不确定性，检查无效）；FP4 码在默认设置下不同，设 `SUROGATE_NVFP4_SR_GRAPH_LEGACY=1` 时相同。全量训练再对 wgrad 的 4/6 操作数（dout^T 的 FP4 码）做同样的比较，LoRA 不量化它（`skip_weight_grad`）。
+
+## GPT-OSS 预量化 checkpoint 的 LoRA 训练跳过冻结专家的输入梯度（fork 已修复：ledger T25）
+
+本节同样是例外：fork 修改了上游文件。行号对应上游 `282f9901`；这两个文件在 `488e5f00` 与上游 `82d42c72` 中相同。
+
+缺陷：`dispatch_moe_grouped_gemm_gate_up_backward`（`csrc/src/runtime/ops/moe_grouped_gemm_gate_up.cpp:1043-1056`）与 `dispatch_moe_grouped_gemm_down_backward`（`moe_grouped_gemm_down.cpp:902-914`）在 `lora_enabled && is_lora_only_mode() && is_prequantized() && Architecture == GPT_OSS` 时设 `skip_base_backward`：不做冻结专家的 dgrad GEMM，把 `d_input` 清零，之后只加上分组 LoRA 的 dX。`is_lora_only_mode()` 就是 `lora_enabled()`（`dsl_model_execution.cpp:419-426`），所以在预量化的 GPT-OSS checkpoint 上做任何 LoRA 训练都会走到这里，上游示例 `examples/sft/gpt-oss/gptoss-lora-mxfp4.yaml`（`openai/gpt-oss-20b`，MXFP4）也在其中。GPT-OSS 专家的计算顺序是 gate_up → bias → `gpt_oss_moe_act` → down → bias（`surogate/dsl/modules/moe.py` 的 `GptOssMoEExperts`）。down 反向的 `d_input` 就是 `d_act`，激活的反向由它算出 `d_gate_up`，因此：
+
+- 同一层专家 gate_up 的 LoRA 梯度只来自 down LoRA 一项。down LoRA 的 B 初始为 0（`lora_weights_manager.cpp:383-389`），第一步时这一项恰好为 0，之后与正确梯度也几乎正交。
+- MoE 分支向注意力层的 LoRA 和更早的层只传回这一项，冻结专家的雅可比完全缺失；残差流照常传回。
+- 只有最后一个 MoE 层的 down LoRA 梯度是精确的。
+
+来历：`7a8d5fee`（2026-02-12，GPT-OSS 支持）加入这个跳过，同时提供 `SUROGATE_PREQUANT_BASE_GRAD=1` 恢复 dgrad，说明当时知道它是近似。`1181c715`（2026-03-31，“stability improvements”，同一提交还删掉了几个调试用的环境变量）删去了这个变量，跳过从此无条件生效，提交说明、文档和测试都没有解释。这不是实现上的限制：两个反向 op 照样解析反量化后的 BF16 专家权重（`resolve_tensor(op.inputs[2])`，预量化的 MXFP4 已经是 DSL 布局，见 `dsl_qlora_pipeline.cpp:1954-1957`），其他架构的预量化 MoE 和 BF16 checkpoint 上的 GPT-OSS 都在同样的缓冲上做同样的 dgrad。上游的 `tests/test_prequant_mxfp4_gpt_oss.py` 只检查 loss 下降；`tests/test_onboarding_gpt_oss_moe.py` 与 HF 的梯度比较用的不是预量化模型。`docs/reference/benchmarks.md` 中 gpt-oss-20B 的吞吐是带着这个跳过测的。
+
+影响的估计（CPU 上 float64 的模拟，真实权重下的幅度未知）：一个 GPT-OSS 专家，T=256、C=512、M=256、r=16，B=0 时 gate_up LoRA 的 B 梯度与输入梯度都恰好为 0（正确值不为 0）；|B| 约 2e-4 与 1e-2 时 gate_up LoRA 的 A、B 梯度与正确值的余弦在 -0.01 到 0.09 之间；经过 MoE 分支的输入梯度相对误差为 1.0；down LoRA 的梯度余弦为 1.0。两层、8 个专家取 top-2、注意力投影与每个专家的 gate_up/down 都挂 LoRA 时，第一步两层专家 gate_up LoRA 的梯度都为 0，注意力 LoRA 的余弦为 0.70 / 0.80，第一层专家 down LoRA 为 0.86；B 不为 0 时第一层注意力 LoRA 的余弦为 -0.15，专家 gate_up LoRA 为 0.51 / 0.65。
+
+修复（T25，始终开启）：两处条件再要求 `surogate_fork::gpt_oss_prequant_skip_expert_dgrad_requested()`（`fork/native/include/surogate_fork/gpt_oss_prequant_dgrad.h`），未设置开关时为 false，所以默认计算冻结专家的 dgrad，走的是其他预量化 MoE 模型已经在用的分支（包括其前面 EP/LLEP 的权重指针准备）。`SUROGATE_GPT_OSS_PREQUANT_SKIP_EXPERT_DGRAD` 设为空串和 `0` 以外的值时恢复上游的跳过（约定与原来的 `SUROGATE_PREQUANT_BASE_GRAD` 相同），每个进程只读一次，打开时在 stderr 打印一行说明梯度是近似的。代价（未在 GPU 上测量）：每个 MoE 层多两个 BF16 分组 dgrad GEMM，约为前向专家 FLOP 的一半；路线图按 GPT-OSS-20B 前向加重放的专家时间 10.9 ms/层估计约 +5 ms/层，这也改变路线图 #27 中 W-C 方案的上界。
+
+验证（没有 GPU）：`fork/patches/tests/native/test_gpt_oss_prequant_dgrad.py`（`fork/dev test patches`）从两个源文件中截取 `skip_base_backward` 的定义原文，与开关头文件和真实的 `PretrainedConfig::ArchitectureId` 一起编译成探针，对全部输入组合和开关取值运行：开关未设置、为空或为 `0` 时从不跳过，打开时只在四个条件都成立时跳过；另外检查这个变量只用于选择清零还是 dgrad 的那个分支。最后一个测试用 float64 模拟一个挂 gate_up 与 down LoRA 的 GPT-OSS 专家，按探针为“LoRA + 预量化 + GPT-OSS、开关未设置”选出的分支计算梯度，与 torch autograd 比较。用上游源码（`488e5f00`）运行时探针选择跳过，默认分支的测试失败，模拟的 gate_up LoRA B 梯度与输入梯度相对误差为 1。两个翻译单元按 sm_120a 配置的编译命令编译通过。
+
+GPU 检查（未做）：在 5090 上（`ep_size: 1`）用 transformers 构建一个随机权重的两层 GPT-OSS（例如 `GptOssConfig(hidden_size=512, intermediate_size=256, num_hidden_layers=2, num_attention_heads=8, num_key_value_heads=2, head_dim=64, num_local_experts=8, num_experts_per_tok=2, vocab_size=4096)`），专家导出为 MXFP4（与 `tests/test_prequant_mxfp4_gpt_oss.py` 的做法相同），再把同一组权重反量化后另存一份 BF16 checkpoint。LoRA 设置同 `gptoss-lora-mxfp4.yaml`（q/k/v/o 与 gate_up_proj/down_proj，rank 16），同一个 seed，同一批数据，各做一次反向，读 `get_lora_gradients`。
+
+1. 预量化模型、开关未设置：每层专家 gate_up LoRA 的 B 梯度范数不为 0；所有 LoRA 梯度与 BF16 checkpoint 的结果（以及 HF + PEFT 在反量化权重上的结果）的余弦大于 0.99。
+2. 同一模型设 `SUROGATE_GPT_OSS_PREQUANT_SKIP_EXPERT_DGRAD=1`：第一步专家 gate_up LoRA 的 B 梯度为 0，stderr 有一行开关说明（这是修复前的行为）。
+3. 运行 `tests/test_prequant_mxfp4_gpt_oss.py`，记录开关 0/1 时 `gptoss-lora-mxfp4.yaml` 的步时间；EP 大于 1 时的权重指针准备在 GPT-OSS 上没有跑过 dgrad，另外用 `ep_size: 2` 重复第 1 步。结果记在 T25 的 `conflict_history` 中。

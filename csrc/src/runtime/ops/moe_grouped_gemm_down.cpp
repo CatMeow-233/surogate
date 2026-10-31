@@ -20,6 +20,7 @@
 #include "runtime/lora/lora_run_state.h"
 #include "runtime/lora/lora_weights_manager.h"
 #include "utilities/tensor.h"
+#include "surogate_fork/gpt_oss_prequant_dgrad.h"
 
 namespace dsl {
 namespace {
@@ -900,7 +901,8 @@ void CompiledExecutor::dispatch_moe_grouped_gemm_down_backward(const CompiledOp&
                               mLoRAWeights->enabled() && layer_idx >= 0;
     backward_moe_base_weights(op, d_output, inp, host_offsets_ptr, num_experts);
     const bool skip_base_backward = lora_enabled && mRunState.is_lora_only_mode() && mRunState.is_prequantized() &&
-                                    mConfig.Architecture == PretrainedConfig::GPT_OSS;
+                                    mConfig.Architecture == PretrainedConfig::GPT_OSS &&
+                                    surogate_fork::gpt_oss_prequant_skip_expert_dgrad_requested();
 
     auto zero_d_input = [&]() {
         if (!d_input_ptr->Data || d_input_ptr->bytes() == 0) return;
