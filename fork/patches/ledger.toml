@@ -839,7 +839,7 @@ conflict_history = [
 [[topic]]
 id = "T28"
 title = "SharedModelServer queues requests past its lanes and stops rollouts whose client left"
-commits = []
+commits = ["189e7b59"]
 switch = "SUROGATE_SHARED_SERVER_QUEUE=fifo (default, defect fix) | reject (upstream's admission: 429 at capacity, no disconnect checks); SUROGATE_SHARED_SERVER_ABORT=1 (default) | 0 (an admitted request runs to max_tokens after its client leaves; queued ones are still skipped); both read when the server is built"
 # Defect (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "训练路径的 SharedModelServer 在满载时拒绝 rollout"):
 # SharedModelServer.admit raised Busy (429) whenever max_concurrency lanes were busy, though the colocated run keeps
@@ -866,12 +866,14 @@ fork_files = [
     "fork/patches/bench/grpo_shared_admission.py",   # CPU emulation of one batch: reject vs fifo
 ]
 tests = ["fork/patches/tests/grpo/test_shared_admission.py"]
-conflict_history = []
+conflict_history = [
+    "2026-10-31 reverse replay of 189e7b59 onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: shared_model.py did not exist 90 days back (added 2026-09-09), 0/0 at 30/14 days",
+]
 
 [[topic]]
 id = "T29"
 title = "the native GRPO SharedServer evicts retained KV before it sleeps"
-commits = []
+commits = ["cf7fc7ba"]
 switch = "always on (removes dead work, identical results); SUROGATE_SHARED_SLEEP_KEEP_KV=1 restores upstream's order for A/B runs (read once per process)"
 # generation_service.cpp keeps one hunk in GenerationService::begin_shared_training: after the drain loop and inside
 # the try, a static `keep_kv` read from SUROGATE_SHARED_SLEEP_KEEP_KV and `if (!keep_kv) { engine_->shrink_kv(); }`
@@ -884,4 +886,6 @@ switch = "always on (removes dead work, identical results); SUROGATE_SHARED_SLEE
 files = ["csrc/src/serve/serve/generation_service.cpp"]
 fork_files = ["fork/patches/tests/native/test_shared_sleep_kv.py"]
 tests = ["fork/patches/tests/native/test_shared_sleep_kv.py"]
-conflict_history = []
+conflict_history = [
+    "2026-10-31 reverse replay of cf7fc7ba onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: generation_service.cpp 0/0/0",
+]
