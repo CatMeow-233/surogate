@@ -164,7 +164,7 @@ vendored 代码位于 `csrc/src/third_party/`，但两处排除项仍写作旧�
 
 分块训练（`sequence_chunks > 1`）即使 `recompute: false` 也重复计数。它只能 eager 运行，允许 MoE（`sft_config.py:1122-1132` 只要求 batch 为 1、`lora_dropout: 0`，并关掉 graph）。`train_step_graphed` 的分块调度对每个微步 j 先做阶段 A（KV sweep：按块从左到右前向，序号 `micro_base + c`，`py_train.cpp:1402`、`1413`），再做阶段 B（从右到左对同一块重新前向，然后反向，序号 `micro_base + (eff_chunks - 1 - c)`，`1421`、`1431`）。两次前向都执行 MoETopK，统计只在序号为 0 的前向（`begin_step`）中清零。j = 0 时阶段 B 的第一次前向序号为 0，清掉阶段 A 累加的值；j ≥ 1 时两次前向的序号都大于 0，每个块计两次。于是 `aux_loss`、`z_loss` 与 slot 4 的层数一起偏大；平均值不再是各块等权的平均，第一个微步的权重只有其余微步的一半（各微步路由相同时数值不变）。`recompute: true` 时回放再加一次：上游中 j = 0 的每块计 2 次，j ≥ 1 的每块计 3 次。上游已经用 `ChunkPackMeta::kv_sweep` 标记阶段 A，并在其中跳过损失 op（`fused_lm_head_loss.cpp:243`、`cross_entropy_loss.cpp:27`），`model.h:75-78` 的注释写的就是同样的重复计数；统计块没有判断这个标记。`step()` 的分块调度 `step_chunked`（`py_train.cpp:687-752`，多模态训练循环经 `step()` 进入，`surogate/train/trainer.py:1128`）阶段 A 调用 `forward_no_save`，pack 由 `chunk_pack_meta_from_positions` 生成，不设 `kv_sweep`（`py_train.cpp:719-727`），重复计数的方式相同。
 
-roadmap 还说整步 warmup 也会重复计数，这不对：微步 0 的前向调用 `begin_step()`（`graph_executor.cpp:1962-1963`），它最后调用 `reset_moe_stats()`，warmup 累加的值在 Python 读取统计之前就被清掉。因此 T20 去掉 warmup 不改变任何报告的统计值。
+roadmap 还说整步 warmup 也会重复计数，这不对：微步 0 的前向调用 `begin_step()`（`graph_executor.cpp:1957-1958`），它最后调用 `reset_moe_stats()`，warmup 累加的值在 Python 读取统计之前就被清掉。因此 T20 去掉 warmup 不改变任何报告的统计值。
 
 修复：回放中，以及 `train_step_graphed` 分块调度的阶段 A 中，跳过统计块（`(mInReplay || sequence_chunk_kv_sweep()) ? nullptr : mRunState.moe_stats_device()`）。阶段 B 对同一块的路由与阶段 A 相同（上游的 `reuse_ep` 依赖这一点，`model.h:71-74`），所以每个块在每个微步计一次。这也省去回放与阶段 A 中每个 MoE 层一次单 CTA 的统计 kernel。
 

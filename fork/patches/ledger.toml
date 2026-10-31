@@ -466,7 +466,7 @@ conflict_history = [
 [[topic]]
 id = "T19"
 title = "MoE routing statistics are not accumulated in the recompute replay or the chunked KV sweep"
-commits = ["402f7add"]
+commits = ["402f7add", "4a165106"]
 switch = "always on (defect fix; removes one stats kernel per MoE layer per replayed layer and per KV-sweep chunk)"
 # Defects (upstream 282f9901; errata "MoE 路由统计在重计算回放和分块训练的 KV sweep 中重复累加"): (1) with recompute on,
 # replay_layer_forward re-runs MoETopK and its stats block (moe_topk.cpp:158-192) added every layer again: aux_loss
@@ -482,6 +482,7 @@ fork_files = ["fork/patches/tests/native/test_moe_stats_replay.py"]
 tests = ["fork/patches/tests/native/test_moe_stats_replay.py"]
 conflict_history = [
     "2026-10-31 reverse replay of 402f7add onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: moe_topk.cpp 0/0/0",
+    "2026-10-31 reverse replay of moe_topk.cpp's whole T19 diff (402f7add + 4a165106) onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: moe_topk.cpp 0/0/0",
 ]
 
 [[topic]]
