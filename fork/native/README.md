@@ -32,7 +32,7 @@ surogate_fork_configure_common(surogate-common)
 - `surogate_fork_configure_common(<target>)` 为目标启用训练用的 OpenMP，把 `fork/native/include` 加为 PRIVATE 头文件目录，并把 `src/` 中的源文件加入目标。头文件目录不是 PUBLIC，因此链接 `surogate-common` 的其他目标看不到它。
 - `_surogate_fork_attach_tests()` 通过 `cmake_language(DEFER)` 在 `csrc` 目录处理完毕时运行，因为测试目标定义在挂接点之后。它为 `integration-tests` 和 `dsl-run-state-tests` 加上同一个头文件目录，并用 `target_sources()` 把 `tests/` 中的源文件加入这两个目标；每个目标都先用 `if(TARGET ...)` 判断，未开启 `BUILD_TESTS` 时 configure 不受影响。
 - `_surogate_fork_attach_binding()` 同样延迟运行，为训练扩展模块 `_surogate`（`PYTHON_BINDING` 构建）加上 PRIVATE 的 fork 头文件目录：`py_train.cpp` 包含两个只有头文件的 fork 文件（T17 的 `doc_mask_staging.h`、T20 的 `full_step_warmup.h`）。
-- `_surogate_fork_attach_serve()` 同样通过 `cmake_language(DEFER)` 运行，只在服务端构建中存在 `sinfer_ops` 时生效：把 `serve/` 中的解码单元加入 `sinfer_ops`，并为它加上同一个 PRIVATE 头文件目录（T16 的 wrapper 与 prompt launcher 包含 `surogate_fork/gqa_fork_shapes.h`）；开启服务端测试时，它还按 `sinfer_gqa_attention_test` 的设置构建 `sinfer_gqa_fork_shapes_test`，加入 `serve-tests`，并登记开关为 0 和 1 的 ctest 条目。
+- `_surogate_fork_attach_serve()` 同样通过 `cmake_language(DEFER)` 运行，只在服务端构建中存在 `sinfer_ops` 时生效：把 `serve/` 中的解码单元加入 `sinfer_ops`，并为它加上同一个 PRIVATE 头文件目录（T16 的 wrapper 与 prompt launcher 包含 `surogate_fork/gqa_fork_shapes.h`）；开启服务端测试时，它也为上游的 `sinfer_gqa_attention_test` 加上这个头文件目录（其注册契约检查包含同一个头文件），再按 `sinfer_gqa_attention_test` 的设置构建 `sinfer_gqa_fork_shapes_test`，加入 `serve-tests`，并登记开关为 0 和 1 的 ctest 条目。
 - 训练和服务端的头文件根目录中都没有名为 `surogate_fork` 的目录，所以 fork 头文件不会遮蔽上游头文件，上游头文件也不会遮蔽 fork 头文件。
 - 原生构建因此依赖 `csrc/` 之外的 `fork/native/`：只复制 `csrc/` 的构建方式会在 configure 时找不到 `fork_native.cmake` 而失败。
 
@@ -55,9 +55,11 @@ surogate_fork_configure_common(surogate-common)
 
 ## 运行 fork 的 C++ 测试
 
-`tests/` 中的用例原先追加在上游测试文件里，现在单独成文件，但仍编译进同一个测试可执行文件，所以测试名和 ctest 条目都没有变化。辅助函数（例如 `require_cuda`、`DeviceTensor`）是上游测试文件中同名函数的副本，放在匿名命名空间里，避免与上游副本冲突。
+训练侧的用例（T1–T4、T10）原先追加在上游测试文件里，现在单独成文件，但仍编译进同一个测试可执行文件（`dsl-run-state-tests`、`integration-tests`），所以测试名和 ctest 条目都没有变化。辅助函数（例如 `require_cuda`、`DeviceTensor`）是上游测试文件中同名函数的副本，放在匿名命名空间里，避免与上游副本冲突。
 
 这些测试需要 CUDA 构建环境，涉及 GPU 的用例在没有 GPU 时跳过。在 GPU 主机上运行 `fork/dev test native`：它沿用 `make configure` 的参数（CUDA、NCCL 等）并加上 `-DBUILD_TESTS=ON` 配置 `csrc/build`，再构建并用 ctest 运行这两个可执行文件（以及 `dsl-weight-loader-tests`）。
+
+T16 的 `test-fork-gqa-shapes.cpp` 不同：它是服务端构建（`csrc/build-serve`）中单独的可执行文件 `sinfer_gqa_fork_shapes_test`。fork 登记了三个新的 ctest 条目：`sinfer_gqa_fork_shapes_test` 与 `sinfer_gqa_fork_shapes_on_test` 以开关 0 和 1 运行它，`sinfer_gqa_attention_fork_shapes_on_test` 以开关 1 运行上游的 `sinfer_gqa_attention_test`。`fork/dev test native` 不构建也不运行它们。用 `make serve-test-build` 构建，再 `cd csrc/build-serve && ctest -R '^sinfer_gqa_(attention|fork_shapes)'` 运行；`fork/dev test gpu` 的 `make serve-check` 也会运行它们。
 
 之后只运行 fork 的用例（这些标签只出现在 fork 的测试中）：
 

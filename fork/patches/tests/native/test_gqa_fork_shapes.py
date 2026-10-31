@@ -344,6 +344,38 @@ def test_the_three_routing_points_read_the_fork_switch():
     assert prefill.count("gqa_shape_is_registered(") == 1, "the prompt launcher gained a registry check: route it too"
 
 
+#: Every use of the registry's predicates and dispatchers in csrc/src outside the registry header, per file. With the
+#: switch off a fork shape must route and be accepted as before it was registered, so a site upstream adds (a new
+#: route keyed on registration, a new acceptance check) can silently send it down the registered route. A changed
+#: count fails here: read the new site, gate it with gqa_fork_shape_keeps_generic_route or gqa_fork_kv_pair_withheld
+#: if it decides a route or acceptance, then update this table (fork/docs/sync.md, T16).
+REGISTRY_SITES = {
+    "csrc/src/serve/ops/launcher/gqa_attention_decode.cu": {"SINFER_GQA_FOR_EACH_GEOMETRY": 1, "gqa_dispatch_geometry": 5},
+    "csrc/src/serve/ops/launcher/gqa_attention_prefill.cu": {
+        "gqa_dispatch_geometry": 1,
+        "gqa_dispatch_kv_geometry": 3,
+        "gqa_shape_is_registered": 1,
+    },
+    "csrc/src/serve/ops/wrapper/gqa_attention.cpp": {"gqa_kv_shape_is_registered": 4, "gqa_shape_is_registered": 2},
+    "csrc/src/testing/serve/ops/test_gqa_attention.cpp": {"SINFER_GQA_FOR_EACH_GEOMETRY": 1},
+}
+
+
+def test_no_registry_site_was_added_or_removed_upstream():
+    pattern = re.compile(
+        r"\b(gqa_shape_is_registered|gqa_kv_shape_is_registered|gqa_dispatch_geometry|gqa_dispatch_kv_geometry|"
+        r"gqa_registered_kv_heads|SINFER_GQA_FOR_EACH_GEOMETRY)\("
+    )
+    found: dict[str, dict[str, int]] = {}
+    for path in sorted((REPO / "csrc/src").rglob("*")):
+        if path.suffix not in {".cpp", ".cu", ".cuh", ".h", ".hpp"} or path == GEOMETRY or not path.is_file():
+            continue
+        for name in pattern.findall(path.read_text(encoding="utf-8", errors="replace")):
+            counts = found.setdefault(str(path.relative_to(REPO)), {})
+            counts[name] = counts.get(name, 0) + 1
+    assert found == REGISTRY_SITES, "registry call sites changed: check each new one routes the fork shapes as before"
+
+
 def test_every_kv_acceptance_check_withholds_the_fork_pair():
     """The wrapper's four KV acceptance checks each pair the registry's answer with the fork's withholding."""
     wrapper = " ".join(WRAPPER.read_text(encoding="utf-8").split())
