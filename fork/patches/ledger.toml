@@ -799,3 +799,33 @@ files = ["csrc/src/runtime/executor/compiled_ops.cpp"]
 fork_files = ["fork/patches/tests/native/test_moe_fp8_cache_trainable.py"]
 tests = ["fork/patches/tests/native/test_moe_fp8_cache_trainable.py"]
 conflict_history = []
+
+[[topic]]
+id = "T27"
+title = "FP8 producer pre-quantization computes the amax it quantizes with"
+commits = []
+switch = "always on (latent-defect guard): the blocks it changes are unreachable in every current configuration, so current runs are bit-identical"
+# Defect (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "FP8 的生产者侧预量化使用没有计算过的 amax"):
+# the co-located pre-quantization blocks of dispatch_fused_residual_rmsnorm (fused_residual_rmsnorm.cpp:292-321, LN1/LN2),
+# dispatch_swiglu (swiglu.cpp:57-75) and dispatch_matmul_swiglu (matmul_swiglu.cpp:286-303) quantize the producer's output
+# into the shared FP8 forward buffer with quantize_with_abs_max(buf, buf.scale(), x, buf.abs_max(), ...) and mark it
+# ready, so the consumer matmul skips its own quantization (consume_fp8_buffer_ready, then inp_quant_ready in
+# FP8HybridRecipe::forward_matmul, fp8_hybrid_recipe.cpp:122). The producer kernels run with abs_max_ptr == nullptr, and
+# the buffers are shared by all layers, so the amax used was another layer's value or the slot's initial contents
+# (zero: scale 448/1e-10, output ~0). Unreachable today: the gate is has_fp8_forward() && !has_fp8_delayed_scaling(), and
+# under DslRunState both are transformer_quant_state && is_fp8_hybrid() (dsl_run_state.h:324-333,
+# runtime_options.h:224-231), because fp8-hybrid always creates the FP8 scaling state (dsl_run_state.cpp:980-985,
+# whatever fp8_amax_history_len is). Fix: each block calls abs_max(buf.abs_max(), x, n, ...) right before
+# quantize_with_abs_max, the recipe's own JIT sequence (abs_max memsets the slot first, so it is capture-safe), so an
+# opened gate (roadmap #29) yields the bytes and scale the consumer would have produced. Not changed: the dead headers
+# recipes/fp8_hybrid/fp8_matmul.h and recipes/bf16/bf16_matmul.h, whose JIT branches have the same gap; no TU includes
+# them, and the test pins that. The CPU test compiles the three blocks from the sources with the gate forced open; it
+# fails on upstream's sources. Compiled with the sm_120a configure; GPU-unverified (5090 check in the errata).
+files = [
+    "csrc/src/runtime/ops/fused_residual_rmsnorm.cpp",
+    "csrc/src/runtime/ops/swiglu.cpp",
+    "csrc/src/runtime/ops/matmul_swiglu.cpp",
+]
+fork_files = ["fork/patches/tests/native/test_fp8_prequant_amax.py"]
+tests = ["fork/patches/tests/native/test_fp8_prequant_amax.py"]
+conflict_history = []

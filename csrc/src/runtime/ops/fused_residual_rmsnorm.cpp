@@ -309,6 +309,9 @@ void CompiledExecutor::dispatch_fused_residual_rmsnorm(const CompiledOp& op) {
         if (fp8_buf && fp8_buf->Data && fp8_buf->abs_max() && fp8_buf->scale()) {
             const long num_elements = mB * mT * mConfig.HiddenSize;
             Tensor y_flat = view_tensor(y, {mB * mT, static_cast<long>(mConfig.HiddenSize)});
+            // The producer kernel above ran with abs_max_ptr == nullptr, so nothing has computed this tensor's
+            // amax: compute it here, as FP8HybridRecipe's JIT path does (fork ledger T27).
+            abs_max(fp8_buf->abs_max(), y_flat, num_elements, mRunState.DeviceProp, mRunState.MainStream);
             quantize_with_abs_max(*fp8_buf,
                                   fp8_buf->scale(),
                                   y_flat,

@@ -63,6 +63,9 @@ void CompiledExecutor::dispatch_swiglu(const CompiledOp& op) {
             if (fp8_buf.Data && fp8_buf.abs_max() && fp8_buf.scale()) {
                 const long num_elements = B * T * D;
                 Tensor out_flat = view_tensor(out, {B * T, D});
+                // The producer kernel above ran with abs_max_ptr == nullptr, so nothing has computed this tensor's
+                // amax: compute it here, as FP8HybridRecipe's JIT path does (fork ledger T27).
+                abs_max(fp8_buf.abs_max(), out_flat, num_elements, mRunState.DeviceProp, mRunState.MainStream);
                 quantize_with_abs_max(fp8_buf,
                                       fp8_buf.scale(),
                                       out_flat,
