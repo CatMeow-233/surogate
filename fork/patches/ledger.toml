@@ -406,7 +406,7 @@ conflict_history = [
 [[topic]]
 id = "T13"
 title = "cpu_training: no step-start memset of the host gradients"
-commits = []
+commits = ["49f42a6d"]
 switch = "always on (removes dead work; the host gradients are bit-identical)"
 # DslGradStore::start_micro_step(0) memset every host gradient (mCpuGrads) on the rank thread before micro-step 0's
 # backward: 16.4 GB for Qwen3-8B (about 0.55-0.8 s on one desktop core; 1.9 s at the 8.6 GB/s this VM's memset
@@ -444,7 +444,7 @@ conflict_history = [
 [[topic]]
 id = "T14"
 title = "cpu_training: opt-in parallel host gradient accumulation off the prefetch stream"
-commits = []
+commits = ["f43d459e"]   # shared with T15
 switch = "SUROGATE_FORK_HOST_GRAD_ACCUM=1 and SUROGATE_FORK_GRAD_D2H_STREAM=1 (each default off, read once per process)"
 # On micro-steps after the first, every layer's staged BF16 gradients are added into the host gradients by
 # DslGradStore::accumulate_staged_layer, a single-threaded scalar loop in a cudaLaunchHostFunc on the copy stream
@@ -499,7 +499,7 @@ conflict_history = [
 [[topic]]
 id = "T15"
 title = "cpu_training: opt-in vectorized CPU AdamW"
-commits = []
+commits = ["f43d459e"]   # shared with T14
 switch = "SUROGATE_FORK_CPU_ADAMW_SIMD=1 (default off, read once per process)"
 # cpu_adamw.cpp's three element-wise steps (cpu_adamw_step, cpu_adamw_step_bf16, cpu_adamw_step_bf16_param, which
 # step_cpu_streaming calls per parameter) do not vectorize: std::sqrt keeps errno, and the BF16-master loop's host
