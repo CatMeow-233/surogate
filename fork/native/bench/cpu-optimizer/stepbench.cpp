@@ -17,7 +17,9 @@
 //                   it with SUROGATE_FORK_CPU_ADAMW_SIMD unset and =1 and compares the hashes (T15)
 //          group    a step's host work in order: the callback thread adds three micro-steps of staged layers
 //                   (host_grad_add_bf16), then the rank thread runs AdamW (adamw_step_bf16_param), each on an
-//                   OmpTeam team; once with the rank's serial group (T14) and once without, reporting team sizes
+//                   OmpTeam team; with and without the rank's serial group (T14), and with the rank thread
+//                   blocked while the additions run or spinning (as it does in backward: it enqueues kernels,
+//                   and CUDA's default schedule spin-waits), reporting team sizes
 //          exhaust  every pair of BF16 values through the upstream loop and host_grad_add_bf16: counts
 //                   mismatching results (SHAPE and PIN are ignored)
 //   SHAPE  llama:L:H:I:V  embedding, L layers (q/o H*H, k/v H*H/4, gate/up/down H*I, two norms), final norm,
@@ -39,6 +41,7 @@
 #include <semaphore>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <cuda_bf16.h>
@@ -332,7 +335,7 @@ void mode_group(const std::vector<Param>& params, int pin_cpus, int reps) {
     std::vector<float> m(total, 0.0f), v(total, 0.0f);
     const surogate_fork::AdamWStep s{1e-4f, 0.9f, 0.999f, 0.1f, 0.001f, 1e-8f, 1.0f - 1e-6f, 1.0f / 4096.0f};
     static int store = 0;  // the DslGradStore whose address is the serial group key
-    for (const bool grouped : {false, true}) {
+    for (const auto [grouped, spin] : {std::pair{false, false}, {false, true}, {true, false}, {true, true}}) {
         const void* key = grouped ? &store : nullptr;
         std::vector<double> accum_ms, adamw_ms;
         int accum_team = 0, adamw_team = 0;
@@ -363,7 +366,13 @@ void mode_group(const std::vector<Param>& params, int pin_cpus, int reps) {
             });
             for (int r = 0; r <= reps; ++r) {
                 go.release();
-                done.acquire();  // wait_all_offloads
+                // Up to wait_all_offloads the rank thread either sleeps or keeps one CPU busy.
+                if (spin) {
+                    while (!done.try_acquire()) {
+                    }
+                } else {
+                    done.acquire();
+                }
                 const auto t0 = std::chrono::steady_clock::now();
                 for (std::size_t off = 0; off < total;) {  // per-tensor regions, as step_cpu_streaming
                     const std::size_t n = std::min<std::size_t>(total - off, 1u << 24);
@@ -384,9 +393,10 @@ void mode_group(const std::vector<Param>& params, int pin_cpus, int reps) {
             go.release();
             callback.join();
         }).join();
-        std::printf("group=%s: callback adds (3 micro-steps) %.1f ms on a team of %d, rank AdamW %.1f ms on a team "
-                    "of %d\n",
+        std::printf("group=%s rank=%s: callback adds (3 micro-steps) %.1f ms on a team of %d, rank AdamW %.1f ms "
+                    "on a team of %d\n",
                     grouped ? "rank" : "none",
+                    spin ? "spins" : "waits",
                     median(accum_ms),
                     accum_team,
                     median(adamw_ms),

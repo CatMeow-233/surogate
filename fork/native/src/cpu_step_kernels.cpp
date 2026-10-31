@@ -203,13 +203,13 @@ bool cpu_adamw_simd_enabled() {
 int host_grad_add_bf16(void* dst, const void* src, std::size_t n, const void* serial_group) {
     auto* d = static_cast<std::uint16_t*>(dst);
     const auto* s = static_cast<const std::uint16_t*>(src);
-    const OmpTeam team(n, serial_group);
+    const OmpTeam team(n, OmpHostFunction{serial_group});
     run_chunks(n, team.threads, [&](std::size_t b, std::size_t e) { add_bf16_serial(d + b, s + b, e - b); });
     return team.threads;
 }
 
 int host_grad_add_f32(float* dst, const float* src, std::size_t n, const void* serial_group) {
-    const OmpTeam team(n, serial_group);
+    const OmpTeam team(n, OmpHostFunction{serial_group});
     run_chunks(n, team.threads, [&](std::size_t b, std::size_t e) { add_f32_serial(dst + b, src + b, e - b); });
     return team.threads;
 }

@@ -168,7 +168,7 @@ grad store 在排队每次写入主机梯度的拷贝之前，调用 `fork/nativ
 GA>1 时，从 micro-step 1 起，每层梯度先 D2H 到所有层共用的暂存缓冲，再由 `cudaLaunchHostFunc` 排队的主机函数 `accumulate_staged_layer` 加到主机梯度上。上游是单线程的标量循环，在执行器传入的 copy stream（`side_stream`）上占住这条 stream 直到返回；同一条 stream 还承载 `gather_block` 的权重预取和残差的取回。GPU 梯度槽只有 2 个，所以反向大约每层要等一次主机加法加一次 H2D。
 
 - `SUROGATE_FORK_HOST_GRAD_ACCUM=1`：主机函数改为调用 `fork/native/src/cpu_step_kernels.cpp` 的 `host_grad_add_bf16`/`host_grad_add_f32`：表达式与上游相同，BF16 舍入改为不含分支的位运算（就近舍入到偶数，NaN 一律为 `0x7fff`，与 `cuda_bf16.hpp` 的主机实现相同），循环向量化（`target_clones`：x86-64-v4、AVX2、基线），每个张量一个 `OmpTeam` 并行区（少于 65536 个元素时串行）。
-- 线程数：主机函数在 CUDA 的回调线程上运行，与 rank 线程是两个调用线程。按上节的规则，它们在共享窗口内互相计入，各自只得到一半 CPU，而它们从不同时运行（rank 线程在 `wait_all_offloads` 等完所有主机函数之后才执行优化器）。`omp_team.h` 因此增加了 serial group：开关打开时，`start_micro_step` 用 `set_omp_serial_group(this)` 把 rank 线程放进以 grad store 地址为键的组，每个 `HostAccumTask` 带着同一个键，主机函数用 `OmpTeam(n, key)`。同组的调用线程互不计入；组外的调用线程（例如另一个 rank）把整个组算作一个。team 线程继承回调线程的 CPU 掩码，team 大小按回调线程自己的掩码计算；回调线程的掩码由 CUDA 驱动决定，没有验证。
+- 线程数：主机函数在 CUDA 的回调线程上运行，与 rank 线程是两个调用线程。按上节的规则，它们在共享窗口内互相计入，各自只得到一半 CPU，而它们的并行区从不同时运行（rank 线程在 `wait_all_offloads` 等完所有主机函数之后才执行优化器）。`omp_team.h` 因此增加了 serial group：开关打开时，`start_micro_step` 用 `set_omp_serial_group(this)` 把 rank 线程放进以 grad store 地址为键的组，每个 `HostAccumTask` 带着同一个键，主机函数用 `OmpTeam(n, OmpHostFunction{key})`。同组的调用线程互不计入；组外的调用线程（例如另一个 rank）把整个组算作一个。但主机函数运行时 rank 线程并不空闲，只是不在并行区里：它在排队反向的 kernel，等 GPU 时 CUDA 默认的调度方式（`cudaDeviceScheduleAuto`；`csrc/src` 中训练部分没有调用 `cudaSetDeviceFlags`）在进程的 CUDA 上下文数不超过 CPU 数时自旋。所以分组的主机函数给 rank 线程留一个 CPU：team 是组分到的 CPU 数减 1，至少为 1（rank 线程自己的并行区不减）。team 线程继承回调线程的 CPU 掩码，team 大小按回调线程自己的掩码计算；回调线程的掩码由 CUDA 驱动决定，没有验证。
 - `SUROGATE_FORK_GRAD_D2H_STREAM=1`：`create_streaming_events` 另建一条 stream（与 `side_stream` 一样用 `cudaStreamCreate`），`offload_layer_grads` 把块梯度的 D2H、`d2h_done`、主机函数和 `accum_done` 都排在这条 stream 上，不再排在调用方传入的 copy stream 上，权重预取和残差取回不再排在主机函数之后。顺序仍由事件保证（`compute_done`、`reduce_done`、`d2h_done`，以及 `wait_all_offloads` 等待的事件）；一步中所有拷贝与加法仍在同一条 stream 上，`start_micro_step` 每个 micro-step 清空待等事件列表依赖这一点。只换 stream 不够：`prepare_layer_grads(L)` 等第 L+2 层的 `d2h_done`，它排在第 L+3 层的主机函数之后，所以两个开关应一起打开。这条 stream 与槽的事件一样不会销毁（`DslGradStore` 没有析构函数）。
 - 没有做：把前向的残差写回（`compiled_ops.cpp`）也移到这条 stream（先要确认 5090 的 `asyncEngineCount`）；K 个暂存槽加专用累加线程（python-rl R2 的第二步）；GPU 上逐层的梯度范数（只在 GA=1 时成立）。主机加法每个元素至少 6 字节的内存流量（读两个 BF16、写一个），GA>1 时这一项不会消失；能用 GA=1 和更大 micro-batch 的配置（train-native #2）完全不走这条路径。
 
@@ -220,14 +220,20 @@ CPU AdamW 一整步（T15，`SUROGATE_FORK_CPU_ADAMW_SIMD=1`），小模型的�
 
 内存流量按每个元素的字节数计：加法 6 B（读两个 BF16、写一个），AdamW 的 BF16 master 22 B、FP32 master 28 B（读写 master、m、v，读梯度）。
 
-线程数与 serial group（`stepbench group`，PIN=0，即进程的全部 4 个 CPU）：一个常驻线程模拟 CUDA 回调线程，每步先做 3 个 micro-step 的主机加法（小模型的全部块梯度），rank 线程等它做完，再对全部参数运行一次 AdamW（BF16 master，T15 的 `adamw_step_bf16_param`，每 2^24 个元素一个并行区）；两者都按 `OmpTeam` 确定线程数。
+线程数与 serial group（`stepbench group`，PIN=0，即进程的全部 4 个 CPU）：一个常驻线程模拟 CUDA 回调线程，每步先做 3 个 micro-step 的主机加法；这期间 rank 线程或者阻塞等待，或者自旋（模拟反向期间的 rank 线程：它在排队 kernel，等 GPU 时按 CUDA 默认的调度方式自旋）；然后 rank 线程对全部参数运行一次 AdamW（BF16 master，T15 的 `adamw_step_bf16_param`，每 2^24 个元素一个并行区）。两者都按 `OmpTeam` 确定线程数。“之前”是这一项修正之前的规则（`28fc5941`：分组的主机函数得到整个份额），用同一个 `stepbench.cpp` 与那一版的 `omp_team.h`、`cpu_step_kernels.cpp` 构建；“现在”给 rank 线程留一个 CPU。这里的 8B 层是一个 Qwen3-8B 块（`llama:1:4096:12288:0`，1.93 亿个元素），不是上面两张表的两个块。每格是 3 轮的中位数；AdamW 一列取自“现在”的构建，两种构建的 rank 线程 team 相同。
 
-| serial group | 回调线程的 team | 3 个 micro-step 的加法 | rank 线程的 team | AdamW |
-|---|---:|---:|---:|---:|
-| 无 | 2 | 104.5 ms | 2 | 124.6 ms |
-| 有（以 grad store 为键） | 4 | 75.7 ms | 4 | 82.8 ms |
+| 负载 | serial group | rank 线程 | 回调线程的 team（之前 → 现在） | 3 个 micro-step 的加法：之前 | 现在 | rank 线程的 team | AdamW |
+|---|---|---|---:|---:|---:|---:|---:|
+| 小模型 | 无 | 阻塞 | 2 → 2 | 94.5 ms | 95.7 ms | 2 | 115.8 ms |
+| 小模型 | 无 | 自旋 | 2 → 2 | 99.1 ms | 98.3 ms | 2 | 113.9 ms |
+| 小模型 | 有 | 阻塞 | 4 → 3 | 67.0 ms | 72.0 ms | 4 | 64.2 ms |
+| 小模型 | 有 | 自旋 | 4 → 3 | 104.3 ms | 78.6 ms | 4 | 63.0 ms |
+| 8B 层 | 无 | 阻塞 | 2 → 2 | 150.9 ms | 154.9 ms | 2 | 123.7 ms |
+| 8B 层 | 无 | 自旋 | 2 → 2 | 153.3 ms | 152.1 ms | 2 | 125.8 ms |
+| 8B 层 | 有 | 阻塞 | 4 → 3 | 83.8 ms | 112.0 ms | 4 | 72.1 ms |
+| 8B 层 | 有 | 自旋 | 4 → 3 | 143.8 ms | 117.5 ms | 4 | 75.7 ms |
 
-没有 serial group 时，按上节的共享规则，两个从不同时运行的调用线程互相计入，各自只得到 2 个线程；有了它，两者都得到 4 个。
+没有 serial group 时，按上节的共享规则，两个并行区从不同时运行的调用线程互相计入，各自只得到 2 个线程；有了它，rank 线程的 AdamW 得到 4 个。rank 线程自旋时，主机函数用整个份额（4 个线程）反而比留一个 CPU（3 个）慢 1.2–1.3 倍，8B 层上与不分组的 2 个线程差不多（144 对 153 ms）：team 按 static 分块，与 rank 线程共用一个 CPU 的那个线程拖住整个并行区。rank 线程阻塞时，留出的 CPU 闲着，加法慢 1.07–1.34 倍（8B 层 84 对 112 ms）。反向期间 rank 线程在排队 kernel，等 GPU 时按 `cudaDeviceScheduleAuto` 自旋，所以按自旋的情形取掩码减 1。CPU 更多的主机上，留一个 CPU 的代价约为掩码大小分之一（16 个 CPU 时约 6%）。5090 主机上主机函数运行期间 rank 线程是否一直占着 CPU，没有验证（下文第 2 项检查）。
 
 逐位检查（`step.sh` 的最后一段）：带克隆的构建以及基线（`-march=x86-64`）、AVX2（`-mavx2`）、x86-64-v4（`-march=x86-64-v4`）三份不带克隆的构建（只有 `cpu_step_kernels.cpp` 按该 ISA 编译，`cpu_adamw.cpp` 仍是基线构建，所以这三份定义 `SUROGATE_FORK_UPSTREAM_FMA=0`，不按自身 ISA 的 FMA 拒绝开关），全部 4294967296 个 BF16 操作数对的加法结果都与上游的循环相同；AdamW 在小模型上开与不开 `SUROGATE_FORK_CPU_ADAMW_SIMD` 的哈希在四份构建中都相同。
 
@@ -242,7 +248,7 @@ CPU AdamW 一整步（T15，`SUROGATE_FORK_CPU_ADAMW_SIMD=1`），小模型的�
 没有 GPU：GPU 上的行为由代码阅读确定；`dsl_grad_store.cpp`、`graph_executor.cpp`、`py_train.cpp`、`adamw_8bit_optimizer.cpp`、`cpu_adamw.cpp` 与 `cpu_step_kernels.cpp` 只按 sm_120a 构建的编译命令编译检查过。在 RTX 5090 主机上依次检查下列各项，配置都是 `examples/training/cpu-offload.yaml` 改为 `model: Qwen/Qwen3-8B`、`max_steps: 20`（下称 C8），用 `surogate sft C8` 运行：
 
 1. T13：在 T13 的提交与它的父提交 `488e5f00` 上各运行一次 C8。每步记录的 loss 与梯度范数应逐位相同（先在父提交上连跑两次，确认这个配置本身可复现）；`step_seconds` 应减少，至多减少 memset 的时间（16.4 GB 除以主机单核的 memset 带宽），实际减少量取决于已排队的前向遮住了多少。
-2. T14 的加法：C8 分别不设与设置 `SUROGATE_FORK_HOST_GRAD_ACCUM=1`。两者每步的梯度范数与 loss 应逐位相同（主机梯度逐位相同）。用 `nsys profile -t cuda,osrt -o t14 surogate sft C8` 比较 micro-step 1–3 与 micro-step 0 的每层反向耗时（目标：不超过 1.3 倍）和回调线程上主机函数的时长；训练时用 `grep -H Cpus_allowed_list /proc/<pid>/task/*/status` 记下回调线程与它的 team 线程的掩码。
+2. T14 的加法：C8 分别不设与设置 `SUROGATE_FORK_HOST_GRAD_ACCUM=1`。两者每步的梯度范数与 loss 应逐位相同（主机梯度逐位相同）。训练时先用 `grep -H Cpus_allowed_list /proc/<pid>/task/*/status` 记下 rank 线程、回调线程和 team 线程的掩码（主机函数的 team 应是回调线程掩码中的 CPU 数减 1，`OMP_NUM_THREADS` 更小时取它）。再用 `nsys profile -t cuda,osrt -s cpu -o t14 surogate sft C8` 比较 micro-step 1–3 与 micro-step 0 的每层反向耗时（目标：不超过 1.3 倍）和回调线程上主机函数的时长，并看主机函数运行期间 rank 线程是否占着一个 CPU（CPU 采样，或训练时 `top -H -p <pid>`）。然后按 team 大小比较 micro-step 1–3 的每层反向耗时：默认（掩码减 1）、`OMP_NUM_THREADS` 设为掩码的一半，以及本项修正之前的 `28fc5941`（主机函数得到整个掩码）。默认应不慢于另外两种；如果整个掩码更快（rank 线程这时并不占 CPU），把三组数字记在 ledger T14 的 `conflict_history` 中，再决定是否去掉这一个 CPU 的预留。
 3. T14 的 stream：再加 `SUROGATE_FORK_GRAD_D2H_STREAM=1`。nsys 中块梯度的 D2H 应出现在一条与权重预取的 H2D 不同的 stream 上，权重预取不再排在主机函数之后；梯度范数与 loss 与第 2 项逐位相同。先用 `deviceQuery` 记下 `asyncEngineCount`（为 2 时 D2H 与 H2D 可以同时进行）。有两张卡时加 `world_size: 2` 再跑一次，检查 NCCL 归约（`reduce_done`）之后的 D2H。
 4. T15：C8 改为 `max_steps: 5`、`save_steps: 5`，分别不设与设置 `SUROGATE_FORK_CPU_ADAMW_SIMD=1`。5090 主机是 x86-64：用 fork 的 x86-64 wheel，或不在 CXXFLAGS 中选 FMA 的本地构建；第二次的日志中不应出现 `SUROGATE_FORK_CPU_ADAMW_SIMD=1 is ignored`。两次的 loss 应逐位相同，checkpoint 中权重分片的 sha256 应相同；nsys 中最后一个反向 kernel 到下一步第一个前向 kernel 之间的空隙（CPU 优化器步）应缩短。
 5. `fork/dev test gpu` 照常通过（fork 的 C++ 用例不经过这些路径）。

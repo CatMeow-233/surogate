@@ -12,7 +12,7 @@
 //      baseline ISA has no fused multiply-add; where it has one, SUROGATE_FORK_CPU_ADAMW_SIMD=1 is refused.
 //   In 2 and 3 a NaN in an FP32 result may carry another NaN's payload (same_floats explains why).
 //   4. the host-function team and the rank thread's team do not halve each other when they share a serial group
-//      (T14), and do without it.
+//      (T14), and do without it; the grouped host function leaves one CPU to the rank thread.
 // The reference loops below are the upstream expressions. The checker is built without OpenMP (as team_check.cpp)
 // but at -O3 and with the compiler's default contraction, as surogate-common's Release build compiles
 // cpu_adamw.cpp, so that on a baseline ISA with FMA the references fuse multiply-adds as upstream's loops do there.
@@ -522,6 +522,7 @@ void check_serial_group_teams(const std::vector<int>& cpus) {
                                   cpus.begin() + static_cast<long>(std::min<std::size_t>(cpus.size(), 4)));
     const int full = std::min(static_cast<int>(shared.size()), fork_omp_max_threads());
     const int half = std::max(1, std::min(static_cast<int>(shared.size()) / 2, fork_omp_max_threads()));
+    const int all_but_one = std::max(1, std::min(static_cast<int>(shared.size()) - 1, fork_omp_max_threads()));
     const std::size_t n = 4 * 65536;
     std::vector<float> p(n, 1.0f), g(n, 0.5f), m(n, 0.0f), v(n, 0.0f);
     std::vector<std::uint16_t> dst(n, 0x3f80), src(n, 0x3f80);
@@ -543,7 +544,10 @@ void check_serial_group_teams(const std::vector<int>& cpus) {
         rank.join();
         expect(rank_first == full, "the rank thread alone gets its CPUs", rank_first, full);
         if (grouped) {
-            expect(callback == full, "a host function in the rank's serial group keeps the full team", callback, full);
+            expect(callback == all_but_one,
+                   "a host function in the rank's serial group is not halved and leaves the rank thread one CPU",
+                   callback,
+                   all_but_one);
             expect(rank_second == full, "and the rank thread's next team stays full", rank_second, full);
         } else {
             // Exited threads stop counting, so each call above saw only callers still alive.

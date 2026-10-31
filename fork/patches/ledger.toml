@@ -464,16 +464,24 @@ switch = "SUROGATE_FORK_HOST_GRAD_ACCUM=1 and SUROGATE_FORK_GRAD_D2H_STREAM=1 (e
 # -fno-math-errno -ffp-contract=off by fork/native/cmake/cpu_step_kernels.cmake) on an OmpTeam team, one region per
 # tensor. Same bits as upstream's loop: BF16 for all 2^32 operand pairs (step.sh, per ISA), FP32 up to the payload
 # of a NaN. The team is in the rank's serial group (omp_team.h; start_micro_step sets it on the rank thread, each
-# HostAccumTask carries its store), so the host function and the CPU optimizer on the rank thread, which never
-# overlap, do not halve each other's teams (T5's sharing rule would; cpu-step-contract and stepbench's group mode
-# show both). SUROGATE_FORK_GRAD_D2H_STREAM=1: create_streaming_events creates a stream of the store's own
+# HostAccumTask carries its store), so the host function and the CPU optimizer on the rank thread, whose regions
+# never overlap, do not halve each other's teams (T5's sharing rule would; cpu-step-contract and stepbench's group
+# mode show both). The rank thread still runs while a host function does, outside any region: it enqueues the
+# backward kernels, and CUDA's default schedule (cudaDeviceScheduleAuto; the trainer sets no flag) spin-waits. So
+# the host function's team, OmpTeam(n, OmpHostFunction{store}), is the group's share minus one CPU, at least 1.
+# The first version (f43d459e) gave it the whole share, oversubscribing the mask by the rank thread; on the VM
+# (stepbench group, 4 CPUs, medians of 3) three micro-steps of additions with a spinning rank thread took 104.3 ->
+# 78.6 ms (small model) and 143.8 -> 117.5 ms (one Qwen3-8B block) with the reservation, and with the rank thread
+# asleep 67.0 -> 72.0 and 83.8 -> 112.0 ms. Whether the rank thread is busy then on a 5090 host is unverified
+# (performance.md check 2). SUROGATE_FORK_GRAD_D2H_STREAM=1: create_streaming_events creates a stream of the store's own
 # (cudaStreamCreate, as the side stream) and offload_layer_grads issues the block-gradient D2H, d2h_done, the host
 # function and accum_done there instead of on the caller's copy stream; ordering stays event-based (compute_done,
 # reduce_done, d2h_done, mPendingD2HEvents) and all of a step's copies and additions stay on one stream, which the
 # per-micro-step reset of mPendingD2HEvents relies on. The stream is never destroyed, like the slot events
 # (DslGradStore has no destructor). Measured on the 4-vCPU VM (step.sh, medians of 3 rounds): one Qwen3-8B layer
-# 242 -> 29 ms with 4 threads (8.3x), 250 -> 96 ms on one (2.6x); in stepbench's group mode both teams keep 4
-# threads with the serial group and get 2 each without. GPU-unverified: dsl_grad_store.cpp is compile-checked for
+# 242 -> 29 ms with 4 threads (8.3x), 250 -> 96 ms on one (2.6x); in stepbench's group mode the serial group gives
+# the rank thread's AdamW 4 threads and the host function 3 (2 each without). The source pin covers the whole
+# upstream body of accumulate_staged_layer after the fork's return (dtype dispatch and both loops). GPU-unverified: dsl_grad_store.cpp is compile-checked for
 # sm_120a only; the 5090 checks are in fork/docs/performance.md ("cpu_training 主机端步"). Not done here: moving
 # the forward residual put (compiled_ops.cpp) to the D2H stream, a K-slab worker (R2 step 2), the GPU per-layer
 # norm (#7, GA=1 only).

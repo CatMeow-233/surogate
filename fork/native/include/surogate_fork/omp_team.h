@@ -25,12 +25,19 @@
 // teams for the rest of the process. The registry's mutex is held only for that bookkeeping; a forked child that
 // never runs the optimizer is unaffected.
 //
-// A serial group (ledger T14) is a set of callers whose regions never overlap in time: a rank thread and the CUDA
-// host functions it enqueues, which it joins (wait_all_offloads) before its own next region. The rank thread names
-// its group with set_omp_serial_group(key); a host function passes the same key to OmpTeam(n, key). The members of
-// a group count once, together, when a caller counts its sharers, so the host function's regions and the rank
-// thread's optimizer regions do not halve each other's teams, while a caller outside the group still sees the
-// group as one sharer. Without a key (the default) every caller counts alone.
+// A serial group (ledger T14) is a rank thread and the CUDA host functions it enqueues. Their regions never overlap
+// in time: the rank thread joins the host functions (wait_all_offloads) before its own next region. The rank thread
+// names its group with set_omp_serial_group(key); a host function passes the same key as OmpHostFunction{key}. The
+// members of a group count once, together, when a caller counts its sharers, so the host function's regions and
+// the rank thread's optimizer regions do not halve each other's teams, while a caller outside the group still sees
+// the group as one sharer. The rank thread does keep running while a host function's region runs, outside any
+// region: it enqueues the backward kernels, and when it waits for the GPU the CUDA runtime's default schedule
+// (cudaDeviceScheduleAuto, which the trainer does not change) spins unless the process has more contexts than the
+// system has CPUs. A grouped host function's team therefore leaves one CPU of the group's share to the rank thread:
+// its team is the share minus one, at least 1. On the 4-vCPU VM, three micro-steps of additions with a spinning
+// rank thread took 104-144 ms on a team of 4 and 79-118 ms on a team of 3; with the rank thread asleep the team of
+// 4 is the faster one (67-84 against 72-112 ms) (fork/docs/performance.md, "cpu_training 主机端步"). Without a key
+// (the default) every caller counts alone and leaves nothing.
 //
 // ordered_block_sum() is the reduction the gradient norm uses. Each kOrderedSumBlock-element block is summed in
 // index order and the block sums are added in block order, so the result is the same for every team size: it
@@ -114,8 +121,10 @@ public:
     }
 
     // Registers a region on `mask` that starts at `now_ns`, in serial group `group` (nullptr: none), and returns
-    // its team size.
-    int enter(const cpu_set_t& mask, std::int64_t now_ns, int max_threads, const void* group = nullptr) {
+    // its team size: its share of the mask minus `reserved` CPUs (left to another member of its group that keeps
+    // running), at least 1 and at most max_threads.
+    int
+    enter(const cpu_set_t& mask, std::int64_t now_ns, int max_threads, const void* group = nullptr, int reserved = 0) {
         auto& callers = omp_callers();
         std::lock_guard<std::mutex> lock(callers.mu);
         if (!mCaller) {
@@ -145,7 +154,7 @@ public:
                 counted = callers.live[j]->group == other->group && shares(callers.live[j]);
             if (!counted) ++sharers;
         }
-        return std::clamp(CPU_COUNT(&mask) / sharers, 1, std::max(1, max_threads));
+        return std::clamp(CPU_COUNT(&mask) / sharers - reserved, 1, std::max(1, max_threads));
     }
 
     void leave(std::int64_t now_ns) {
@@ -178,29 +187,24 @@ inline void set_omp_serial_group(const void* group) {
     detail::omp_thread_serial_group() = group;
 }
 
+// A region run by a CUDA host function that the rank thread of serial group `group` enqueued (see the top of this
+// file); nullptr: a host function in no group, which counts alone and leaves nothing.
+struct OmpHostFunction {
+    const void* group;
+};
+
 // The team for one region over `n` elements; keep it alive until the region has finished.
 class OmpTeam {
 public:
+    // A region of the calling thread, in the serial group set_omp_serial_group() gave it.
     explicit OmpTeam(std::size_t n)
-        : OmpTeam(n, detail::omp_thread_serial_group()) {
+        : OmpTeam(n, detail::omp_thread_serial_group(), 0) {
     }
 
-    // A region in serial group `group` (nullptr: none), whatever group the calling thread is in.
-    OmpTeam(std::size_t n, const void* group) {
-#ifdef _OPENMP
-        if (n < kOmpMinParallelElems) return;
-        cpu_set_t mask;
-        if (pthread_getaffinity_np(pthread_self(), sizeof(mask), &mask) != 0) {
-            threads = omp_get_max_threads();  // a mask wider than cpu_set_t: libgomp's default team
-            return;
-        }
-        thread_local detail::OmpCallerSlot slot;
-        mSlot = &slot;
-        threads = slot.enter(mask, detail::omp_now_ns(), omp_get_max_threads(), group);
-#else
-        (void)n;
-        (void)group;
-#endif
+    // A host function's region in serial group `caller.group`, whatever group the calling thread is in. With a
+    // group it leaves one CPU of the group's share to the rank thread.
+    OmpTeam(std::size_t n, OmpHostFunction caller)
+        : OmpTeam(n, caller.group, caller.group ? 1 : 0) {
     }
 
     ~OmpTeam() {
@@ -215,6 +219,24 @@ public:
     int threads = 1;
 
 private:
+    OmpTeam(std::size_t n, const void* group, int reserved) {
+#ifdef _OPENMP
+        if (n < kOmpMinParallelElems) return;
+        cpu_set_t mask;
+        if (pthread_getaffinity_np(pthread_self(), sizeof(mask), &mask) != 0) {
+            threads = omp_get_max_threads();  // a mask wider than cpu_set_t: libgomp's default team
+            return;
+        }
+        thread_local detail::OmpCallerSlot slot;
+        mSlot = &slot;
+        threads = slot.enter(mask, detail::omp_now_ns(), omp_get_max_threads(), group, reserved);
+#else
+        (void)n;
+        (void)group;
+        (void)reserved;
+#endif
+    }
+
 #ifdef _OPENMP
     detail::OmpCallerSlot* mSlot = nullptr;
 #endif

@@ -11,7 +11,8 @@
 //   4. ordered_block_sum gives the same bits for every team size, equal to the serial block order, and equal to
 //      the plain left-to-right sum up to one block;
 //   5. the members of a serial group (a rank thread and the host functions it enqueues, ledger T14) do not count
-//      each other as sharers, and count once, together, for a caller outside the group.
+//      each other as sharers, and count once, together, for a caller outside the group; a grouped host function
+//      leaves one CPU of the group's share to the rank thread, which keeps running meanwhile.
 // Checks that need more CPUs than the process may use are reported as skipped, and the others still run.
 
 #include <algorithm>
@@ -229,7 +230,8 @@ void check_sharing_window() {
 }
 
 // Serial groups with synthetic masks and clocks: slots 20/21 are a rank thread and its host-function thread
-// (group A), 22 another rank's thread (group B, two members 22/23), 24 a caller in no group.
+// (group A), 22 another rank's thread and 23 its host-function thread (group B), 24 a caller in no group. A host
+// function's region passes reserved = 1 (OmpHostFunction with a group); the rank threads' regions pass 0.
 void check_serial_groups() {
     const cpu_set_t low = mask_of({0, 1, 2, 3});
     const long long t = 3'000'000'000'000;
@@ -237,8 +239,8 @@ void check_serial_groups() {
     int got = fork_slot_enter(20, low, t, 64, &group_a);  // the rank thread's optimizer region
     expect(got == 4, "a group member alone gets its mask", got, 4);
     fork_slot_leave(20, t + 1);
-    got = fork_slot_enter(21, low, t + 2, 64, &group_a);  // its host function, right after
-    expect(got == 4, "a member of the same serial group does not halve the team", got, 4);
+    got = fork_slot_enter(21, low, t + 2, 64, &group_a, 1);  // its host function, during the next backward
+    expect(got == 3, "a host function of the same group is not halved and leaves the rank thread one CPU", got, 3);
     fork_slot_leave(21, t + 3);
     got = fork_slot_enter(20, low, t + 4, 64, &group_a);
     expect(got == 4, "nor does the host function halve the rank thread's next team", got, 4);
@@ -246,18 +248,27 @@ void check_serial_groups() {
     got = fork_slot_enter(21, low, t + 6, 64, nullptr);  // the same thread outside the group counts again
     expect(got == 2, "without the group key the two count as two callers", got, 2);
     fork_slot_leave(21, t + 7);
-    got = fork_slot_enter(21, low, t + 8, 64, &group_a);
-    expect(got == 4, "the key is the region's, not the thread's", got, 4);
+    got = fork_slot_enter(21, low, t + 8, 64, &group_a, 1);
+    expect(got == 3, "the key is the region's, not the thread's", got, 3);
     fork_slot_leave(21, t + 9);
-    got = fork_slot_enter(22, low, t + 10, 64, &group_b);
+    got = fork_slot_enter(21, low, t + 10, 2, &group_a, 1);
+    expect(got == 2, "OMP_NUM_THREADS still caps the host function's team", got, 2);
+    fork_slot_leave(21, t + 11);
+    got = fork_slot_enter(22, low, t + 12, 64, &group_b);
     expect(got == 2, "another group's caller counts group A once", got, 2);
-    fork_slot_leave(22, t + 11);
-    got = fork_slot_enter(23, low, t + 12, 64, &group_b);
+    fork_slot_leave(22, t + 13);
+    got = fork_slot_enter(23, low, t + 14, 64, &group_b);
     expect(got == 2, "two groups of two members split the CPUs in two", got, 2);
-    fork_slot_leave(23, t + 13);
-    got = fork_slot_enter(24, low, t + 14, 64, nullptr);
+    fork_slot_leave(23, t + 15);
+    got = fork_slot_enter(23, low, t + 16, 64, &group_b, 1);
+    expect(got == 1, "a host function leaves one CPU of its group's half", got, 1);
+    fork_slot_leave(23, t + 17);
+    got = fork_slot_enter(24, low, t + 18, 64, nullptr);
     expect(got == 1, "a caller in no group counts each group once and itself", got, 1);
-    fork_slot_leave(24, t + 15);
+    fork_slot_leave(24, t + 19);
+    got = fork_slot_enter(21, mask_of({0}), t + 20, 64, &group_a, 1);
+    expect(got == 1, "a host function on one CPU still gets a team of 1", got, 1);
+    fork_slot_leave(21, t + 21);
     for (int id : {20, 21, 22, 23, 24})
         fork_slot_destroy(id);
 }

@@ -119,14 +119,40 @@ UPSTREAM_BF16_ADD = (
     "for (std::size_t i = 0; i < task.nelem; ++i) { float val = static_cast<float>(dst[i]) + "
     "static_cast<float>(src[i]); dst[i] = static_cast<nv_bfloat16>(val); }"
 )
+# The whole upstream body of accumulate_staged_layer after the fork's dispatch: the dtype dispatch (FP32, BF16 and
+# nothing else) and both loops. host_grad_add_f32/bf16 reproduce these loops; a new dtype or a changed loop must be
+# reflected in the fork branch, which ends in `return;` and would otherwise skip or diverge from it.
+UPSTREAM_ACCUMULATE = (
+    "for (const auto& task : *static_cast<const std::vector<HostAccumTask>*>(tasks)) { "
+    "if (task.dtype == ETensorDType::FP32) { auto* dst = static_cast<float*>(task.dst); "
+    "const auto* src = static_cast<const float*>(task.src); "
+    "for (std::size_t i = 0; i < task.nelem; ++i) { dst[i] += src[i]; } "
+    "} else if (task.dtype == ETensorDType::BF16) { auto* dst = static_cast<nv_bfloat16*>(task.dst); "
+    "const auto* src = static_cast<const nv_bfloat16*>(task.src); " + UPSTREAM_BF16_ADD + " } }"
+)
+FORK_DISPATCH = "if (surogate_fork::host_grad_accum_enabled()) {"
 
 
 def test_the_host_function_dispatches_before_the_upstream_loop():
     code = body(GRAD_STORE, r"void DslGradStore::accumulate_staged_layer\(")
-    fork = block_after(code, "if (surogate_fork::host_grad_accum_enabled()) {")
+    assert code.startswith("if (surogate_fork::host_grad_accum_enabled()) {")
+    fork = block_after(code, FORK_DISPATCH)
     assert "surogate_fork::host_grad_add_f32(" in fork and "surogate_fork::host_grad_add_bf16(" in fork
     assert fork.count("task.serial_group") == 2 and fork.endswith("return;")
-    assert code.index("host_grad_accum_enabled()") < code.index(UPSTREAM_BF16_ADD), "upstream's loop changed"
+    upstream = code[code.index(fork) + len(fork) :].removeprefix(" }").strip()
+    assert upstream == UPSTREAM_ACCUMULATE, "upstream's accumulate_staged_layer changed: update the fork branch"
+    # The fork branch handles the dtypes upstream handles, in the same order.
+    assert re.findall(r"task\.dtype == ETensorDType::(\w+)", fork) == ["FP32", "BF16"]
+    assert re.findall(r"task\.dtype == ETensorDType::(\w+)", upstream) == ["FP32", "BF16"]
+
+
+def test_the_fork_additions_compute_the_upstream_loops():
+    """The fork kernels' loop bodies, against the upstream loops pinned above (BF16 conversions by bits)."""
+    assert body(KERNELS, r"void add_f32_serial\(") == "for (std::size_t i = 0; i < n; ++i) dst[i] += src[i];"
+    assert body(KERNELS, r"void add_bf16_serial\(") == (
+        "for (std::size_t i = 0; i < n; ++i) dst[i] = f32_to_bf16(bf16_to_f32(dst[i]) + bf16_to_f32(src[i]));"
+    )
+    assert "for (std::size_t i = 0; i < task.nelem; ++i) { dst[i] += src[i]; }" in UPSTREAM_ACCUMULATE
 
 
 def test_the_benchmark_times_upstreams_loop():

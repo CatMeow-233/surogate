@@ -48,8 +48,9 @@ bool cpu_adamw_simd_enabled();
 bool cpu_adamw_simd_supported();
 
 // dst[i] = bf16(float(dst[i]) + float(src[i])) for BF16 `dst` and `src`, as accumulate_staged_layer computes it.
-// The team is OmpTeam(n, serial_group): the CUDA host function passes its DslGradStore, the key its rank thread
-// set with set_omp_serial_group (omp_team.h), so the two do not halve each other's teams. Returns the team size.
+// The team is OmpTeam(n, OmpHostFunction{serial_group}): the CUDA host function passes its DslGradStore, the key
+// its rank thread set with set_omp_serial_group (omp_team.h), so the two do not halve each other's teams, and the
+// team leaves one CPU to the rank thread, which keeps running meanwhile. Returns the team size.
 int host_grad_add_bf16(void* dst, const void* src, std::size_t n, const void* serial_group);
 // dst[i] += src[i] for FP32 `dst` and `src`. Returns the team size.
 int host_grad_add_f32(float* dst, const float* src, std::size_t n, const void* serial_group);
