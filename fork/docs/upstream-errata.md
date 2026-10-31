@@ -417,7 +417,7 @@ docs/reference/config.md:592                lora_dropout 默认值写 `0.05`    
 
 来历：上游 `e07fc6fd`（2026-04-26，“speed & mem improvements”）把 `lora_dropout` 的默认值从 0.05 改为 0，没有更新这两处文档。配置不写这个键时保留类默认值（`sft_config.py:603`），C++ 侧的默认值也是 0（`csrc/src/runtime/lora/lora_config.h:52`），所以这只是文档错误，运行行为不受影响。`docs/reference/config.md:765` 的完整示例显式设置 `lora_dropout: 0.05`，这是合法的设置，不是默认值说明。
 
-影响：相信文档的用户以为 LoRA 默认带 0.05 的 dropout，实际没有；需要 dropout 时要显式设置。`sequence_chunks`（`sft_config.py:1128`）、`row_packing`（`sft_config.py:1155`）、`long_context`（`csrc/src/runtime/dsl/dsl_model_execution.cpp:297`）和原生 GRPO colocate（`surogate/grpo/native_colocate.py:61`）都要求 `lora_dropout: 0`，默认配置已经满足。重新核对（docstring、类默认值、选项表）：
+影响：相信文档的用户以为 LoRA 默认带 0.05 的 dropout，实际没有；需要 dropout 时要显式设置。`sequence_chunks`（`sft_config.py:1128`）、`long_context`（`csrc/src/runtime/dsl/dsl_model_execution.cpp:297`）和原生 GRPO colocate（`surogate/grpo/native_colocate.py:61`）要求 `lora_dropout: 0`，否则报错，默认配置已经满足；`row_packing`（`sft_config.py:1155`）不要求，`lora_dropout > 0` 时只记一条警告：dropout 掩码按缓冲区位置抽取，打包训练与不打包训练因此不能逐行对照。重新核对（docstring、类默认值、选项表）：
 
 ```bash
 grep -nE '^ +lora_[a-z_]+ ?\(' surogate/core/config/sft_config.py
@@ -429,7 +429,7 @@ grep -n '^| `lora_' docs/reference/config.md
 
 `csrc/src/runtime/optimizers/async_optimizer.h:4` 和 `:71-72`（“the dispatch-PP CPU-master optimizer path”）以及 nanobind 绑定的 docstring（`csrc/src/binding/binding.cpp:1244`）把 `AsyncStaleAdamW` 说成 dispatch-PP 的 CPU master 优化器路径。实际上没有运行时代码构造它。除了它自己的两个源文件，只有 `binding.cpp:22`（include）和 `binding.cpp:1241-1270`（绑定；docstring 末尾自称 “Debug/validation surface”）引用它。唯一的使用者是 Python 测试 `tests/train/dispatch_pp/test_phase3_async_optimizer.py`。加入它的上游提交 `e0019c03`（2026-06-21）在说明中写着 “Remaining: wire the worker into a fused multi-GPU dispatch step()”，此后没有接入。
 
-dispatch-PP 自己的一步滞后模式也不使用这个类：`dispatch_pp_train_step_multigpu` 的 `stale` 参数默认为 false（`binding.cpp:1714`），设为 true 时把本步梯度留到下一次调用，在那次调用里经 `dispatch_pp_apply_grads_` 同步应用（`csrc/src/binding/py_train.cpp:3145-3160`），既没有工作线程，也不与计算重叠。另外，这个类按值接收 `std::vector<float>` 形式的 master 和每一步的梯度（`async_optimizer.h:77`、`:88`），不能直接作用于 `cpu_training` 的 pinned master。
+dispatch-PP 自己的一步滞后模式也不使用这个类：`dispatch_pp_train_step_multigpu` 的 `stale` 参数默认为 false（`binding.cpp:1714`），设为 true 时把本步梯度留到下一次调用，在那次调用里经 `dispatch_pp_apply_grads_` 同步应用（`csrc/src/binding/py_train.cpp:3155-3170`；fork 的 T1 改动了这个文件，fork 中的行号小 10，可用 `grep -n 'if (stale) {' csrc/src/binding/py_train.cpp` 定位），既没有工作线程，也不与计算重叠。另外，这个类按值接收 `std::vector<float>` 形式的 master 和每一步的梯度（`async_optimizer.h:77`、`:88`），不能直接作用于 `cpu_training` 的 pinned master。
 
 因此，估算 CPU 优化器与计算的重叠收益时，不能把它算作已有的重叠；做这种重叠是新工作，能复用的只有通用的 `AsyncOptimizer` 队列。fork 不修改这些注释：只改注释也要一个 ledger topic，还会成为同步冲突的来源。重新核对（输出只应有 `binding.cpp` 和上面的测试）：
 
