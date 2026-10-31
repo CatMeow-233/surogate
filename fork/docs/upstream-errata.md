@@ -197,11 +197,13 @@ roadmap 还说整步 warmup 也会重复计数，这不对：微步 0 的前向�
 
 验证：`fork/patches/tests/native/test_cpu_adamw_checkpoint.py`（`fork/dev test patches`）用主机编译器从生产源码（`utilities/safetensors.cpp`、`cu_file_fallback.cpp`、`cu_file_common.cpp`、`tensor.cpp`、`dtype.cpp`、`utils.cpp`）和 `fork/native/src/cpu_adamw_checkpoint.cpp` 构建 `fork/native/tests/host/cpu_adamw_checkpoint.cpp`，链接 libcudart，不用 GPU：带 tied 别名的布局与上游的步顺序一致；保存、恢复后矩逐字节相同；只有文件头的旧文件和只有 8-bit 状态的文件被拒绝，开关打开后以零恢复；参数集不同、格式版本不同、形状或 dtype 不同时拒绝；保存开关关闭时不写矩但恢复仍读。需要 CUDA 工具包（`CUDA_HOME`）以及 fmt 与 nlohmann_json 的头文件（`FORK_FC_DEPS` 或 `csrc/build/_deps`），没有时跳过并说明原因（fork CI 中跳过，只运行源码 pin）。同一程序换成上游的 `safetensors.cpp` 时，写入在 `:518` 以 `cudaErrorInsufficientDriver` 失败。三个上游文件和 fork 源文件都按 sm_120a 的编译命令编译通过。
 
-GPU 上未确认，在 RTX 5090 上这样检查（`fork/dev build train` 之后）：
+GPU 上未确认，在 RTX 5090 上这样检查（`fork/dev build train` 之后）。第 1-4 步的运行都以 `examples/training/cpu-offload.yaml` 为底，设 `model: Qwen/Qwen3-8B`、`max_steps: 30`、`save_steps: 10`，各用一个新的 `output_dir`（`checkpoint_dir` 默认与它相同）。warmup（`warmup_ratio: 0.15`）与默认的线性衰减都按 `max_steps` 计算（`surogate/train/trainer.py:606-620`），所以恢复用的 checkpoint 必须来自同样 `max_steps: 30` 的运行：`max_steps: 12` 的运行只有 1 步 warmup，第 0-9 步的学习率之和是 30 步运行的 0.83 倍，第 10 步时权重与矩已经不同，不论矩是否恢复，接着跑都会偏离不中断的运行。trainer 只在 `step > start_step` 且 `step % save_steps == 0` 时保存（`trainer.py:1463`），没有结束时的 checkpoint。每个带矩的 checkpoint 约 98 GB（矩 65.5 GB，权重 shard 与导出约 32.8 GB），四次运行共约 460 GB。
 
-1. 以 `examples/training/cpu-offload.yaml` 为底，`model: Qwen/Qwen3-8B`，`max_steps: 12`，`save_steps: 10`。`step_00000010/adam.m.shard_000_of_001.safetensors` 的文件头应列出 `cpu_adamw.format` 和每个 master 一个 `cpu_adamw.m.*`，文件约 32.8 GB，`adam.v` 同样（修复前这两个文件只有约 60 字节的文件头）。
-2. 同一配置改 `max_steps: 30`、`resume_from_checkpoint: true`、`debug_memory_breakdown: true` 再运行：分配器的分项中没有 `AdamW8bit_OptState`（修复前约 16.2 GiB），`nvidia-smi` 的峰值与不中断的运行相同，日志中没有 `[surogate fork T21]` 警告。
-3. 再做一次 `max_steps: 30` 的不中断运行，以及一次重复的不中断运行作为噪声基线：恢复运行第 11-30 步的 loss 与 grad norm 应与不中断运行一致，差别不超过两次不中断运行之间的差别（修复前从第 11 步起明显偏离）。
-4. 用修复前的构建写出的 checkpoint 恢复：报错并提到 `SUROGATE_FORK_CPU_ADAMW_ALLOW_MISSING_STATE`；设为 1 后恢复并打印警告。
-5. 在 GPU 主机上运行 `fork/dev test patches -k cpu_adamw_checkpoint`（设 `CUDA_HOME`，构建过 `csrc/build` 时自动找到 `_deps`）：这时 `is_pageable_host` 走 `cudaPointerGetAttributes` 成功的分支。
-6. 可选：`Qwen/Qwen3-14B` 重复第 1、2 步，修复前在恢复时 OOM，修复后不分配设备状态。
+1. 参考运行 R，不中断。`R/step_00000010/adam.m.shard_000_of_001.safetensors` 的文件头应列出 `cpu_adamw.format` 和每个 master 一个 `cpu_adamw.m.*`，文件约 32.8 GB，`adam.v` 同样（修复前这两个文件只有约 60 字节的文件头）。
+2. 噪声基线 N：同样的配置再运行一次，另设环境变量 `SUROGATE_FORK_CPU_ADAMW_SAVE_STATE=0`。这个变量只决定 checkpoint 写不写矩，训练与 R 相同；`N/step_00000010` 的 `adam.m`/`adam.v` 只有文件头。
+3. 恢复运行 C（修复）：新建一个空目录，用 `cp -al R/step_00000010 <目录>/` 放进 R 的第 10 步 checkpoint（硬链接，不占磁盘；恢复只读这些文件），以这个目录为 `output_dir`，设 `resume_from_checkpoint: true`、`debug_memory_breakdown: true` 运行。日志写明从第 10 步恢复；分配器的分项中没有 `AdamW8bit_OptState`（修复前约 16.2 GiB），`nvidia-smi` 的峰值与 R 相同，日志中没有 `[surogate fork T21]` 警告。
+4. 阳性对照 P：按第 3 步再建一个目录，放进 `N/step_00000010`（没有矩）。不设开关时恢复报错，信息中提到 `SUROGATE_FORK_CPU_ADAMW_ALLOW_MISSING_STATE`；设为 1 后打印 `[surogate fork T21] WARNING` 并恢复，矩从零开始，偏差校正的步数仍从 11 算起（trainer 传入 `step + 1`），这正是修复前恢复的行为（只是不再分配设备状态）。
+5. 以 R 为准比较 C、P 与 N：第 10-29 步的 loss 与 grad norm；`step_00000020/weights.shard_000_of_001.safetensors` 的权重；C 与 P 的 `step_00000020/adam.v.shard_000_of_001.safetensors` 中全部 `cpu_adamw.v.*` 的相对 L2 差 ‖X−R‖/‖R‖（N 没有写矩）。期望：C 与 R 的差别不超过 N 与 R 的差别，P 与 R 的差别明显更大。按 `cpu_adamw_step` 的 FP32 运算在这条学习率路径上模拟（两边梯度相同，第 10 步把一边的矩清零）：第 20 步 P 的 v 与 R 相差约 50%（只累积了 10 步，不是 20 步），m 相差 26-33%，权重之差是 R 在这 20 步中离开初始权重的距离的 8-41%；C 的 v 差应比 P 小至少一个数量级。P 与 R 的差别不大于 N 与 R 的差别时，这个检查在该硬件上分辨不出修复，记下数字，不算通过。R 与 N 逐位相同而 C 与 R 不同时，恢复还丢了矩以外的状态，记下差别和 P 的数字。
+6. 用修复前的构建写出的 checkpoint 恢复：报错并提到 `SUROGATE_FORK_CPU_ADAMW_ALLOW_MISSING_STATE`；设为 1 后恢复并打印警告。
+7. 在 GPU 主机上运行 `fork/dev test patches -k cpu_adamw_checkpoint`（设 `CUDA_HOME`，构建过 `csrc/build` 时自动找到 `_deps`）：这时 `is_pageable_host` 走 `cudaPointerGetAttributes` 成功的分支。
+8. 可选：`Qwen/Qwen3-14B` 重复第 1、3 步，修复前在恢复时 OOM，修复后不分配设备状态。
