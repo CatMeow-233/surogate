@@ -425,7 +425,7 @@ files = [
 ]
 fork_files = [
     "fork/native/include/surogate_fork/doc_mask_staging.h",       # shared with T18
-    "fork/native/cmake/fork_native.cmake",   # fork include root for _surogate and dsl-run-state-tests, attaches the C++ test (shared with T3, T5, T10)
+    "fork/native/cmake/fork_native.cmake",   # fork include root for _surogate and dsl-run-state-tests, attaches the C++ test (shared with T3, T5, T10, T20)
     "fork/native/tests/test-fork-doc-mask-staging.cpp",
     "fork/patches/tests/native/test_doc_mask_staging.py",         # shared with T18
 ]
@@ -502,6 +502,7 @@ files = [
 ]
 fork_files = [
     "fork/native/include/surogate_fork/full_step_warmup.h",
+    "fork/native/cmake/fork_native.cmake",   # _surogate_fork_attach_binding: fork include root for _surogate (shared with T17)
     "fork/patches/tests/native/test_full_step_warmup.py",
 ]
 tests = ["fork/patches/tests/native/test_full_step_warmup.py"]
