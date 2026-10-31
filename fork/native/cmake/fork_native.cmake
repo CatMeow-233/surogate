@@ -6,12 +6,14 @@ include("${CMAKE_CURRENT_LIST_DIR}/training_openmp.cmake")
 
 # The fork include root stays PRIVATE so that consumers of surogate-common do
 # not pick it up; only targets that compile fork code get it. Fork sources that
-# upstream code calls (T3's expert weight gradients) are compiled into the
-# library, so the fork tests link against the code production runs.
+# upstream code calls (T3's expert weight gradients, T21's CPU AdamW checkpoint
+# state) are compiled into the library, so the fork tests link against the code
+# production runs.
 function(surogate_fork_configure_common target)
     surogate_enable_training_openmp(${target})
     target_include_directories(${target} PRIVATE "${SUROGATE_FORK_NATIVE_DIR}/include")
     target_sources(${target} PRIVATE "${SUROGATE_FORK_NATIVE_DIR}/src/moe_weight_grad.cpp")
+    target_sources(${target} PRIVATE "${SUROGATE_FORK_NATIVE_DIR}/src/cpu_adamw_checkpoint.cpp")
 endfunction()
 
 # The test targets are defined after the hook, so they are attached once the

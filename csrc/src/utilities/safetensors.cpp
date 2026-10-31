@@ -24,6 +24,7 @@
 #include "comm.h"
 #include "cu_file.h"
 #include "tensor.h"
+#include "surogate_fork/pageable_host.h"  // fork ledger T21
 
 /**
  * @brief Parsed SafeTensors header data.
@@ -514,6 +515,12 @@ void SafeTensorWriter::write_tensor(const std::string& name, const TensorShard& 
     }
 
     long shard_begin = found->second.Begin + mHeaderSize + tensor.ShardIndex * tensor.bytes();
+    // fork ledger T21: pageable host memory (the cpu_training AdamW moments) is not a cudaMemcpy source.
+    if (surogate_fork::is_pageable_host(tensor.Data, tensor.Device)) {
+        std::memcpy(mMappedFile + shard_begin, tensor.Data, tensor.bytes());
+        found->second.Done = true;
+        return;
+    }
     std::vector<std::byte> data(tensor.bytes());
     CUDA_CHECK(cudaMemcpy(data.data(), tensor.Data, tensor.bytes(), cudaMemcpyDeviceToHost));
     std::memcpy(mMappedFile + shard_begin, data.data(), tensor.bytes());
@@ -561,6 +568,11 @@ void SafeTensorWriter::write_raw(const std::string& name,
     std::ptrdiff_t write_start = found->second.Begin + mHeaderSize + offset * get_dtype_size(dtype);
     std::ptrdiff_t write_size = elements * get_dtype_size(dtype);
 
+    // fork ledger T21: as in write_tensor.
+    if (surogate_fork::is_pageable_host(tensor.Data, tensor.Device)) {
+        std::memcpy(mMappedFile + write_start, tensor.Data, write_size);
+        return;
+    }
     std::vector<std::byte> host_data(write_size);
     CUDA_CHECK(cudaMemcpy(host_data.data(), tensor.Data, write_size, cudaMemcpyDeviceToHost));
     std::memcpy(mMappedFile + write_start, host_data.data(), write_size);

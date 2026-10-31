@@ -32,6 +32,7 @@
 #include "utilities/comm.h"
 #include "utilities/tensor.h"
 #include "utilities/tensor_container.h"
+#include "surogate_fork/cpu_adamw_checkpoint.h"  // fork ledger T21
 
 namespace optimizers {
 
@@ -160,6 +161,23 @@ struct AdamW8BitOptimizer::Impl {
 
     // CPU FP32 AdamW state for the CPU-streaming path
     CPUAdamWState cpu_state;
+    // Its layout and checkpoint containers (fork ledger T21)
+    surogate_fork::cpu_adamw_checkpoint::CpuAdamWCheckpoint cpu_checkpoint;
+
+    /// Lays out and allocates the CPU step's moments over the masters it updates (fork ledger T21; a tied
+    /// lm_head's master is the embedding's, T10, and is stepped once). The first CPU step and a resume both start
+    /// here, so a checkpoint's moments land where the step reads them.
+    void ensure_cpu_streaming_state(dsl::DslModel& model) {
+        if (cpu_checkpoint.active()) return;
+        if (!model.mWeightManager) {
+            throw std::logic_error("AdamW8BitOptimizer: the CPU-streaming step needs the weight manager");
+        }
+        std::vector<surogate_fork::cpu_adamw_checkpoint::Param> params;
+        for (const auto& name : model.mGrads->param_names()) {
+            params.push_back({name, &model.mWeightManager->get_master(name)});
+        }
+        cpu_checkpoint.initialize(cpu_state, params);
+    }
 
     ~Impl() {
         if (gather_done) {
@@ -195,10 +213,13 @@ AdamW8BitOptimizer::AdamW8BitOptimizer()
 AdamW8BitOptimizer::~AdamW8BitOptimizer() = default;
 
 ITensorContainer* AdamW8BitOptimizer::momentum_container() {
+    // fork ledger T21: under cpu_training the moments are the CPU step's FP32 host state.
+    if (mImpl->cpu_checkpoint.active()) return mImpl->cpu_checkpoint.momentum();
     return &mImpl->momentum_container;
 }
 
 ITensorContainer* AdamW8BitOptimizer::variance_container() {
+    if (mImpl->cpu_checkpoint.active()) return mImpl->cpu_checkpoint.variance();  // fork ledger T21
     return &mImpl->variance_container;
 }
 
@@ -303,6 +324,10 @@ void AdamW8BitOptimizer::init_state(dsl::DslModel& model, cudaStream_t stream) {
 }
 
 void AdamW8BitOptimizer::on_restore_checkpoint(dsl::DslModel& /*model*/) {
+    if (mImpl->cpu_checkpoint.active()) {  // fork ledger T21
+        mImpl->cpu_checkpoint.finish_load();
+        return;
+    }
     if (mImpl->state && mImpl->state->state1.Data) {
         mImpl->state->initialized = true;
         mImpl->momentum_container.update_pointers(&mImpl->state->state1, &mImpl->state->scales1);
@@ -312,6 +337,13 @@ void AdamW8BitOptimizer::on_restore_checkpoint(dsl::DslModel& /*model*/) {
 
 void AdamW8BitOptimizer::prepare_for_checkpoint_load(dsl::DslModel& model) {
     mImpl->ensure_state();
+    // fork ledger T21: cpu_training resumes into the CPU step's host moments; the 8-bit device state that
+    // init_state allocates would never be used.
+    if (model.mGrads && model.mGrads->is_streaming_grads()) {
+        mImpl->ensure_cpu_streaming_state(model);
+        mImpl->cpu_checkpoint.begin_load();
+        return;
+    }
     cudaStream_t stream = model.mRunState ? model.mRunState->MainStream : cudaStreamDefault;
     if (!mImpl->state->initialized) {
         init_state(model, stream);
@@ -718,35 +750,23 @@ void AdamW8BitOptimizer::step_cpu_streaming(dsl::DslModel& model,
     }
     CUDA_CHECK(cudaEventRecord(rs.NormDone, stream));
 
-    // A tied lm_head's master is the embedding's (fork ledger T10): each master takes one step, with the gradient
-    // both names share.
-    std::vector<std::string> names;
-    std::unordered_set<const std::byte*> stepped;
-    for (const auto& name : model.mGrads->param_names()) {
-        const Tensor& master = model.mWeightManager->get_master(name);
-        if (master.Data && !stepped.insert(master.Data).second) continue;
-        names.push_back(name);
-    }
-
-    // 4. Initialize CPU optimizer state if needed
+    // 4. Initialize CPU optimizer state if needed: one slot per master, a tied lm_head's master being the
+    // embedding's (fork ledger T10), so each master takes one step with the gradient both names share. A resume
+    // has laid out and filled it already (fork ledger T21).
     auto& cpu_state = mImpl->cpu_state;
-    if (!cpu_state.initialized) {
-        std::size_t total = 0;
-        for (const auto& name : names) {
-            total += model.mWeightManager->get_master(name).nelem();
-        }
-        cpu_state.m.resize(total, 0.0f);
-        cpu_state.v.resize(total, 0.0f);
-        cpu_state.total_params = total;
-        cpu_state.initialized = true;
-    }
+    mImpl->ensure_cpu_streaming_state(model);
 
     // 5. Per-parameter CPU optimizer step
-    std::size_t offset = 0;
-    for (const auto& name : names) {
+    for (const auto& slot : mImpl->cpu_checkpoint.slots()) {
+        const std::string& name = slot.name;
+        const std::size_t offset = slot.offset;
         Tensor& master = model.mWeightManager->get_master(name);
         const Tensor& grad = model.mGrads->get_cpu_grad(name);
         const auto n = static_cast<std::size_t>(master.nelem());
+        if (n != slot.n) {
+            throw std::logic_error("AdamW8BitOptimizer::step_cpu_streaming: " + name +
+                                   " no longer matches its CPU AdamW slot");
+        }
 
         if (master.DType == ETensorDType::FP32 && grad.DType == ETensorDType::FP32) {
             cpu_adamw_step(master.get<float>(),
@@ -792,7 +812,6 @@ void AdamW8BitOptimizer::step_cpu_streaming(dsl::DslModel& model,
                                      name + " (master=" + std::to_string(static_cast<int>(master.DType)) +
                                      ", grad=" + std::to_string(static_cast<int>(grad.DType)) + ")");
         }
-        offset += n;
     }
 
     // 6. Sync updated master weights to GPU work copies

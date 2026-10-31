@@ -175,10 +175,16 @@ def test_exports_write_a_tied_head_once():
 
 
 def test_cpu_training_steps_a_shared_master_once_and_counts_its_gradient_once():
+    # The step visits the slots of T21's layout (fork/native/src/cpu_adamw_checkpoint.cpp), which a resume shares;
+    # build_layout skips a master an earlier name has. T21's host check
+    # layout_matches_upstream_step_order_and_steps_a_tied_master_once runs it on a tied list.
     streaming = body(OPTIMIZERS / "adamw_8bit_optimizer.cpp", r"void AdamW8BitOptimizer::step_cpu_streaming\(")
-    assert "if (master.Data && !stepped.insert(master.Data).second) continue;" in streaming
-    assert streaming.count("for (const auto& name : names)") == 2
-    assert "for (const auto& name : model.mGrads->param_names())" in streaming  # only the loop that builds `names`
+    assert "mImpl->ensure_cpu_streaming_state(model);" in streaming
+    assert streaming.count("for (const auto& slot : mImpl->cpu_checkpoint.slots())") == 1
+    ensure = body(OPTIMIZERS / "adamw_8bit_optimizer.cpp", r"void ensure_cpu_streaming_state\(")
+    assert "for (const auto& name : model.mGrads->param_names())" in ensure
+    layout = body(REPO / "fork/native/src/cpu_adamw_checkpoint.cpp", r"std::vector<Slot> build_layout\(")
+    assert "if (master.Data && !stepped.insert(master.Data).second) continue;" in layout
     host = body(DSL / "dsl_grad_store.cpp", r"void DslGradStore::allocate_streaming_buffers\(")
     assert "mCpuGrads.emplace(name, shared->second);" in host
     assert "if (gpu_grad.Data) host_of_device.emplace(gpu_grad.Data, host);" in host

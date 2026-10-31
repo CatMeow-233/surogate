@@ -16,6 +16,7 @@
 #include "utilities/comm.h"
 #include "utilities/safetensors.h"
 #include "utilities/tensor.h"
+#include "surogate_fork/cpu_adamw_checkpoint.h"  // fork ledger T21
 
 /**
  * @brief Build the full checkpoint path for a given training step.
@@ -243,9 +244,16 @@ void load_checkpoint(std::string source, int step, IModel& model, DataLoader* lo
         model.prepare_optimizer_for_checkpoint_load();
 
         // load optimizer shards
+        // fork ledger T21: the reader skips names the file lacks; refuse a file without the CPU AdamW moments.
+        surogate_fork::cpu_adamw_checkpoint::require_complete(
+            source + fmt::format("/adam.m.shard_{:03}_of_{:03}.safetensors", shard_rank, shard_count),
+            model.opt_momentum());
         load_safetensors(source + fmt::format("/adam.m.shard_{:03}_of_{:03}.safetensors", shard_rank, shard_count),
                          model.opt_momentum(),
                          false);
+        surogate_fork::cpu_adamw_checkpoint::require_complete(
+            source + fmt::format("/adam.v.shard_{:03}_of_{:03}.safetensors", shard_rank, shard_count),
+            model.opt_variance());
         load_safetensors(source + fmt::format("/adam.v.shard_{:03}_of_{:03}.safetensors", shard_rank, shard_count),
                          model.opt_variance(),
                          false);

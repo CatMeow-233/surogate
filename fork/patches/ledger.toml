@@ -332,8 +332,10 @@ switch = "always on for tie_word_embeddings models, Gemma 3 configs without the 
 # (dsl_weight_manager.cpp allocate_weights); weights shards and HF exports skip the alias (no
 # lm_head.weight, as HF writes a tied model; dsl_param_store.cpp:473, dsl_weight_manager.cpp:1192,
 # dsl_model_weights.cpp:345/567/576); under cpu_training the shared master takes one CPU step
-# (adamw_8bit_optimizer.cpp:722-786) and the tied gradient has one host copy, so the CPU norm counts it
-# once (dsl_grad_store.cpp:797-806). Built for sm_120a without a GPU; behaviour is GPU-unverified.
+# (adamw_8bit_optimizer.cpp:722-786; since T21 the master dedupe is build_layout in
+# fork/native/src/cpu_adamw_checkpoint.cpp, which the CPU step and a resume share) and the tied gradient has one
+# host copy, so the CPU norm counts it once (dsl_grad_store.cpp:797-806). Built for sm_120a without a GPU;
+# behaviour is GPU-unverified.
 # Gemma 3 text models (Gemma3ForCausalLM, Gemma3TextModel): the official config.json files have no
 # tie_word_embeddings key (HF's Gemma3TextConfig defaults it to True; recorded from upstream's test fixtures,
 # checked by test_the_published_gemma3_configs_still_omit_the_tie only against a cached checkpoint), and
@@ -509,4 +511,60 @@ fork_files = [
 tests = ["fork/patches/tests/native/test_full_step_warmup.py"]
 conflict_history = [
     "2026-10-31 reverse replay of 191109e8 together with b40ae9f7 (T20's include sits next to T17's) onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: py_train.cpp 1/1/0 (T17's include-line block, no other), py_train.h 0/0/0",
+]
+
+[[topic]]
+id = "T21"
+title = "cpu_training checkpoints its CPU AdamW moments"
+commits = []
+switch = "always on (defect fix): checkpoints hold the moments and a resume reads them; SUROGATE_FORK_CPU_ADAMW_SAVE_STATE=0 writes none (upstream's checkpoints), SUROGATE_FORK_CPU_ADAMW_ALLOW_MISSING_STATE=1 resumes from a checkpoint without them (upstream's zero moments); GPU optimizers unchanged"
+# Defect (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "cpu_training 的全量训练不保存 CPU AdamW
+# 的矩"): under cpu_training, AdamW8BitOptimizer::step routes every step to step_cpu_streaming, whose FP32 moments
+# (CPUAdamWState, pageable std::vectors) momentum_container()/variance_container() never exposed, so adam.m/adam.v
+# held no tensors. A resume ran prepare_for_checkpoint_load -> init_state, which allocated the GPU path's 8-bit
+# state ON_DEVICE for every parameter (~17.4 GB at Qwen3-8B: 16.4 GB state + 1.0 GB FP16 scales), never used and
+# never freed, and on_restore_checkpoint pointed the containers at it, so every later save wrote it. The CPU
+# moments restarted at zero while bias correction continued from the saved step; SafeTensorsReader::load_tensors
+# skipped the missing names silently. And SafeTensorWriter's cudaMemcpy(DeviceToHost) cannot read pageable host
+# memory (undefined on a GPU host, cudaErrorInsufficientDriver without one).
+# Fix: fork/native/src/cpu_adamw_checkpoint.cpp owns the layout (build_layout: param_names() order, a master seen
+# before skipped, which is T10's tied dedupe moved out of step_cpu_streaming) that the first CPU step and a
+# resume share through Impl::ensure_cpu_streaming_state, and exposes the moments as format v1: cpu_adamw.m.<param>
+# and cpu_adamw.v.<param> (FP32, the master's shape) plus cpu_adamw.format (INT32 [1] = 1) in each file, one copy
+# per local rank. prepare_for_checkpoint_load lays the host state out under is_streaming_grads() and returns
+# before init_state (no device state); load_checkpoint calls require_complete before each optimizer file, which
+# refuses a file that lacks any expected name (upstream's checkpoints, the 8-bit junk, GPU-training or adamw/
+# normuon checkpoints, another parameter set) unless SUROGATE_FORK_CPU_ADAMW_ALLOW_MISSING_STATE=1;
+# on_restore_checkpoint (finish_load) refuses another format version and a file read without the check. The
+# writer memcpys pageable host memory (surogate_fork/pageable_host.h; pinned and write-combined memory keep
+# cudaMemcpy, so the weights shards and exports are unchanged). Results: a fresh run's step is unchanged (same
+# slots, offsets and kernels); a resume from a T21 checkpoint continues with the saved moments. Costs: 8 B/param
+# of disk per checkpoint and local rank (65.5 GB at 8B; SUROGATE_FORK_CPU_ADAMW_SAVE_STATE=0 skips it). Compatibility
+# rules: fork/docs/performance.md "cpu_training 的 AdamW 状态 checkpoint". Unchanged, adjacent: cpu_training with
+# adamw or normuon (no CPU path; their checkpoints hold no optimizer state, so their resume is now refused unless
+# opted in, and DslModel::prepare_optimizer_for_checkpoint_load's ADAMW_8BIT lays out host moments it drops at the
+# first step). The CPU test builds the production writer/reader and the fork module against libcudart without a
+# GPU and fails on upstream's writer; the sources compile for sm_120a; the GPU behaviour is unverified (5090 check
+# in the errata).
+files = [
+    "csrc/src/runtime/optimizers/adamw_8bit_optimizer.cpp",   # shared with T10
+    "csrc/src/runtime/training/checkpoint.cpp",
+    "csrc/src/utilities/safetensors.cpp",
+]
+fork_files = [
+    "fork/native/cmake/fork_native.cmake",   # compiles src/cpu_adamw_checkpoint.cpp into surogate-common (shared with T5)
+    "fork/native/include/surogate_fork/cpu_adamw_checkpoint.h",
+    "fork/native/include/surogate_fork/pageable_host.h",
+    "fork/native/src/cpu_adamw_checkpoint.cpp",
+    "fork/native/tests/host/cpu_adamw_checkpoint.cpp",
+    "fork/native/tests/host/stubs.cpp",
+    "fork/patches/tests/native/test_cpu_adamw_checkpoint.py",
+]
+tests = [
+    "fork/patches/tests/native/test_cpu_adamw_checkpoint.py",
+    "fork/native/tests/host/cpu_adamw_checkpoint.cpp",
+    "fork/patches/tests/native/test_tied_lm_head.py",
+]
+conflict_history = [
+    "2026-10-31 reverse replay onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: adamw_8bit_optimizer.cpp 0/0/0 (T10 and T21 hunks), checkpoint.cpp 0/0/0, safetensors.cpp 0/0/0; upstream/main 82d42c72 has not changed the three files",
 ]

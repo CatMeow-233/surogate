@@ -174,3 +174,34 @@ roadmap 还说整步 warmup 也会重复计数，这不对：微步 0 的前向�
 
 - 重计算：MoE SFT（例如 OLMoE-1B-7B，BF16 LoRA），固定 seed 与 batch，分别用 `recompute: true` 与 `false` 记录 `aux_loss` 与 `z_loss`：修复前两者之比为 2.0，修复后为 1.0；`expert_utilization` 与 `router_entropy` 在四次运行中都相同。
 - 分块：同一模型，`sequence_chunks: 2`、`per_device_train_batch_size: 1`、`recompute: false`、学习率 0，每个微步喂同一行，分别用 GA 1 与 GA 2 记录 `aux_loss`：修复后 GA 2 与 GA 1 之比为 2.0，修复前为 3.0；`router_entropy` 在两种 GA 下相同。
+
+## cpu_training 的全量训练不保存 CPU AdamW 的矩（fork 已修复：ledger T21）
+
+本节同样是例外：fork 修改了上游文件，修复记在 [ledger](../patches/ledger.toml) 的 T21。行号对应上游 `282f9901`；`upstream/main` 的 `82d42c72` 中这三个文件没有变化。
+
+现象：`cpu_training: true`、`lora: false`、`optimizer: adamw_8bit`（默认优化器，也是唯一有 CPU 步的优化器）的训练从 checkpoint 恢复时，CPU AdamW 的一阶矩和二阶矩从零重新开始，偏差校正却沿用恢复的步数，恢复后的更新比不中断的训练大数倍；同时 GPU 上多分配一份永远不用的 8-bit 优化器状态（Qwen3-8B 约 17.4 GB，0.6B 约 1.3 GB），此后每个 checkpoint 都把它写进 `adam.m`/`adam.v`。没有报错，也没有警告。SFT 默认 `resume_from_checkpoint: true`（`surogate/core/config/sft_config.py:359`），GRPO、DPO 和 Ray 的恢复也都经过同一个 `load_checkpoint`。
+
+证据：
+
+- `csrc/src/runtime/optimizers/adamw_8bit_optimizer.cpp:162` 的 `CPUAdamWState cpu_state`（`cpu_adamw.h`，两个 pageable 的 `std::vector<float>`）只有 `step_cpu_streaming` 使用（`:672` 起，`:728` 第一次 resize）；`momentum_container()`/`variance_container()`（`:197-203`）返回的 8-bit 容器在 `mState1` 为空时什么也不列出（`:47`），而 `step_cpu_streaming` 从不调用 `init_state`。所以 `checkpoint.cpp:86-89` 写出的 `adam.m`/`adam.v` 没有任何张量。
+- 恢复时 `load_checkpoint`（`runtime/training/checkpoint.cpp:243`）调用 `DslModel::prepare_optimizer_for_checkpoint_load`（`dsl_model_weights.cpp:378-387`，没有优化器时建一个 `ADAMW_8BIT`），再到 `AdamW8BitOptimizer::prepare_for_checkpoint_load`（`adamw_8bit_optimizer.cpp:313`）→ `init_state`。`cpu_training` 只强制打开 `offload_master` 与 `offload_grads`（`binding/binding.cpp:557-559`），不打开 `offload_optimizer`，所以 `alloc_kind` 是 `ON_DEVICE`（`:269`）：每参数 2 字节的状态加每 32 个元素一个 FP16 scale，8.19B 参数时为 16.4 GB + 1.0 GB。trainer 构造时 run state 已经分配好，这份状态叠加在它之上；`on_restore_checkpoint`（`:305`）随后把容器指向它，`step()` 仍走 `step_cpu_streaming`，状态从不使用也不释放。
+- `SafeTensorsReader::load_tensors`（`utilities/safetensors.cpp:287-295`）只读文件和容器都有的名字，缺少的名字不报错（在 CPU 上复现：从只有文件头的文件加载，目标中的哨兵值不变）。
+- `SafeTensorWriter::write_tensor`（`:518`）与 `write_raw`（`:565`）对每个张量做 `cudaMemcpy(..., cudaMemcpyDeviceToHost)`：源是 pageable 主机内存时这在 GPU 主机上属于未定义行为，在没有驱动的主机上直接失败（`cudaErrorInsufficientDriver`）。即使把这份状态交给容器，现有的写入器也写不了它。
+- 步长（按 `cpu_adamw_step` 的 FP32 运算模拟，β1 0.9、β2 0.999）：在第 50/500/2000 步恢复后，第一次更新是 0.71/1.99/2.94 倍学习率的符号步；与不中断的训练相比，噪声主导的梯度下第一步的 RMS 比为 3.1/8.5/12.9 倍，高信噪比梯度下比值在恢复后约 12-16 步达到 1.6/4.2/6.1 倍；在第 2000 步恢复时，第 100 步仍是 3.0 倍，第 500 步 1.5 倍。
+
+修复（T21）：`fork/native/src/cpu_adamw_checkpoint.cpp` 持有 CPU 步与恢复共用的布局（`build_layout`：按 `param_names()` 的顺序，跳过已见过的 master，即 T10 原先放在 `step_cpu_streaming` 中的 tied 去重），并把矩以格式 v1 交给 checkpoint：每个 master 一个 `cpu_adamw.m.<参数名>` / `cpu_adamw.v.<参数名>`（FP32，形状同 master），每个文件另有 `cpu_adamw.format`（INT32 [1]，值为 1）。`cpu_training` 下 `prepare_for_checkpoint_load` 只布置主机上的矩，在 `init_state` 之前返回，不再分配设备上的 8-bit 状态；`load_checkpoint` 在读每个优化器文件之前调用 `require_complete`，文件缺少任何一个应有的名字就拒绝；`on_restore_checkpoint` 拒绝其他格式版本。写入器对 pageable 主机内存直接 memcpy（`surogate_fork/pageable_host.h`），pinned 与 write-combined 内存仍走 `cudaMemcpy`，权重 shard 与导出不变。新训练的 CPU 步不变（同样的槽位、偏移和 kernel）；从 T21 的 checkpoint 恢复时沿用保存的矩，偏差校正的步数仍由 trainer 传入（`step + 1`）。格式、开关、磁盘开销和兼容规则见 [performance.md 的“cpu_training 的 AdamW 状态 checkpoint”](performance.md#cpu_training-的-adamw-状态-checkpoint)。
+
+旧 checkpoint：上游和不带 T21 的 fork 写出的 `cpu_training` checkpoint 中没有矩（没有张量，或者是此后每次保存写下的无用 8-bit 状态），无法补救。用带 T21 的构建恢复它们会报错并说明原因；设 `SUROGATE_FORK_CPU_ADAMW_ALLOW_MISSING_STATE=1` 后照旧恢复（矩为零，与上游相同，打印警告），之后的 checkpoint 带有矩。
+
+未修复（相邻问题，只读了代码）：`cpu_training` 配 `adamw` 或 `normuon` 没有 CPU 路径（块参数的梯度在 GPU 上为空，T10 一节末尾已记），它们的 checkpoint 也不带优化器状态；它们恢复时 `DslModel::prepare_optimizer_for_checkpoint_load` 建的 `ADAMW_8BIT` 现在布置主机上的矩（8B 时 65.5 GB，第一步换成配置的优化器时释放），并且因文件里没有矩而拒绝，除非设上面的开关。应在配置阶段拒绝这种组合，不属于本修复。
+
+验证：`fork/patches/tests/native/test_cpu_adamw_checkpoint.py`（`fork/dev test patches`）用主机编译器从生产源码（`utilities/safetensors.cpp`、`cu_file_fallback.cpp`、`cu_file_common.cpp`、`tensor.cpp`、`dtype.cpp`、`utils.cpp`）和 `fork/native/src/cpu_adamw_checkpoint.cpp` 构建 `fork/native/tests/host/cpu_adamw_checkpoint.cpp`，链接 libcudart，不用 GPU：带 tied 别名的布局与上游的步顺序一致；保存、恢复后矩逐字节相同；只有文件头的旧文件和只有 8-bit 状态的文件被拒绝，开关打开后以零恢复；参数集不同、格式版本不同、形状或 dtype 不同时拒绝；保存开关关闭时不写矩但恢复仍读。需要 CUDA 工具包（`CUDA_HOME`）以及 fmt 与 nlohmann_json 的头文件（`FORK_FC_DEPS` 或 `csrc/build/_deps`），没有时跳过并说明原因（fork CI 中跳过，只运行源码 pin）。同一程序换成上游的 `safetensors.cpp` 时，写入在 `:518` 以 `cudaErrorInsufficientDriver` 失败。三个上游文件和 fork 源文件都按 sm_120a 的编译命令编译通过。
+
+GPU 上未确认，在 RTX 5090 上这样检查（`fork/dev build train` 之后）：
+
+1. 以 `examples/training/cpu-offload.yaml` 为底，`model: Qwen/Qwen3-8B`，`max_steps: 12`，`save_steps: 10`。`step_00000010/adam.m.shard_000_of_001.safetensors` 的文件头应列出 `cpu_adamw.format` 和每个 master 一个 `cpu_adamw.m.*`，文件约 32.8 GB，`adam.v` 同样（修复前这两个文件只有约 60 字节的文件头）。
+2. 同一配置改 `max_steps: 30`、`resume_from_checkpoint: true`、`debug_memory_breakdown: true` 再运行：分配器的分项中没有 `AdamW8bit_OptState`（修复前约 16.2 GiB），`nvidia-smi` 的峰值与不中断的运行相同，日志中没有 `[surogate fork T21]` 警告。
+3. 再做一次 `max_steps: 30` 的不中断运行，以及一次重复的不中断运行作为噪声基线：恢复运行第 11-30 步的 loss 与 grad norm 应与不中断运行一致，差别不超过两次不中断运行之间的差别（修复前从第 11 步起明显偏离）。
+4. 用修复前的构建写出的 checkpoint 恢复：报错并提到 `SUROGATE_FORK_CPU_ADAMW_ALLOW_MISSING_STATE`；设为 1 后恢复并打印警告。
+5. 在 GPU 主机上运行 `fork/dev test patches -k cpu_adamw_checkpoint`（设 `CUDA_HOME`，构建过 `csrc/build` 时自动找到 `_deps`）：这时 `is_pageable_host` 走 `cudaPointerGetAttributes` 成功的分支。
+6. 可选：`Qwen/Qwen3-14B` 重复第 1、2 步，修复前在恢复时 OOM，修复后不分配设备状态。
