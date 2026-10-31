@@ -1,4 +1,4 @@
-"""Shared fixtures for the CPU tests of the fork's GRPO patches (ledger topics T6-T8, T28)."""
+"""Shared fixtures for the CPU tests of the fork's GRPO patches (ledger topics T6-T8, T11, T28)."""
 
 import importlib
 import importlib.util

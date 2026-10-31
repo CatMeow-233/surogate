@@ -402,7 +402,30 @@ conflict_history = [
     "2026-10-30 reverse replay of the dispatch-PP refusal call sites, conflict blocks at 90/30/14 days: surogate/train/trainer.py 0/0/0, surogate/grpo/trainer.py 0/0/0",
 ]
 
-# T11 and T12 are left to the parallel branch perf/grpo-detok, which claimed them first.
+[[topic]]
+id = "T11"
+title = "GRPO training-path server builds non-streaming text once"
+commits = []
+switch = "SUROGATE_GRPO_DETOK=final (default; removes only per-token text work whose result is discarded) | incremental (also a ByteLevel window for stop strings) | per_token (upstream's loop); streaming requests always use upstream's loop"
+# shared_model.py keeps three hunks in SharedModelServer._generate: a local import of the fork
+# module, `view = completion_view(...)` before the token loop, and after `stopped = token in eos`
+# a `continue` on the steps that cannot end the completion. The step that ends it runs upstream's
+# text block unchanged (one full decode, the stop truncation, one parse with final=True, the
+# message), so the response is upstream's own computation. Upstream's non-final steps, without a
+# callback, only rebuild values the next step overwrites, and their parse(final=False) only slices
+# strings (tools are validated by request_tools), so skipping them changes nothing a client sees.
+# The `incremental` mode's exactness argument (tokenizers 0.23.3 ByteLevel decode_chain and
+# from_utf8_lossy) is in the module docstring; it is checked against full decodes by the tests.
+files = ["surogate/grpo/shared_model.py"]
+fork_files = [
+    "surogate/_fork/grpo_detok.py",
+    "fork/patches/tests/grpo/test_shared_model_detok.py",
+]
+tests = ["fork/patches/tests/grpo/test_shared_model_detok.py"]
+conflict_history = [
+    "2026-10-31 reverse replay from 282f9901, conflict blocks at 90/30/14 days: shared_model.py did not exist 90 days back (added 2026-09-09), 0/0 at 30/14 days",
+]
+
 [[topic]]
 id = "T13"
 title = "cpu_training: no step-start memset of the host gradients"

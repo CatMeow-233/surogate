@@ -371,6 +371,8 @@ class SharedModelServer:
         return result
 
     def _generate(self, request, callback, decode=None):
+        from surogate._fork.grpo_detok import completion_view
+
         prompt = request["prompt_ids"]
         inputs = None if self.persistent_decode else np.zeros((self.trainer.batch_size, self.trainer.seq_length), dtype=np.int32)
         if inputs is not None:
@@ -390,6 +392,8 @@ class SharedModelServer:
             ("presence_penalty", 0.), ("frequency_penalty", 0.))}
         params.update(top_k=int(request.get("top_k", -1)), top_logprobs=int(request.get("top_logprobs", 0) or 0),
                       logit_bias={int(token): float(bias) for token, bias in (request.get("logit_bias") or {}).items()})
+        # Without a callback only the final step's text is used (ledger T11).
+        view = completion_view(self.tokenizer, request, callback)
         for step in range(request["maximum"]):
             positions[0] = len(prompt) + step - 1
             self.admission.check_client()  # stops when the client has left (ledger T28)
@@ -421,6 +425,8 @@ class SharedModelServer:
                 score["top_logprobs"].append(dict(token=token_text, logprob=float(logprob), bytes=list(token_text.encode())))
             scores.append(score)
             stopped = token in eos
+            if view is not None and not view.ends(ids, step, stopped):
+                continue
             # Tool/think delimiters may themselves be special tokens. Preserve
             # them for parsing, removing only a terminal model EOS from the
             # text view. The training token/logprob arrays retain every token.
