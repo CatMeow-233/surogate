@@ -403,3 +403,36 @@ GPU 检查（未做）：这条路径只有强制打开才能走到，例如做�
 修复（T28，开关见 ledger）：`surogate/_fork/shared_admission.py`。lane 全忙时请求按到达顺序排队，最多 `max_pending_requests` 个外加每个 lane 一个（已经应答的请求要到 `do_POST` 离开 `admit()` 才让出 lane，而它的客户端可能已经发出下一个请求），等待超过 `pending_timeout_ms` 时回 429；训练期间和关闭后仍立即回 429，`begin_training()` 与 `close()` 让所有等待者以 429 结束。客户端已经关闭连接的等待者不会被接纳，已接纳的请求在下一次 token 检查（最多每 50 ms 一次）时停止；判断方法与原生服务相同（cpp-httplib 的 `is_socket_alive`：套接字可读且 1 字节的 `MSG_PEEK` 读到 EOF 或出错）。按连接判断而不是由调度器触发全局中止，是因为验证 rollout 和 RULER judge 也走这个服务，没有人取消它们。`SUROGATE_SHARED_SERVER_QUEUE=reject` 恢复上游行为。同一复现中，修复后一批用 36.5-38.6 s，没有 429，丢失 0 个，batch 中原始组 15-16 个（缺的那一组里有到达上限的长 rollout，晚于一个补发的组完成），`begin_training()` 等 0.01-0.02 s，取消后只再解码 3-13 个 token；不缩放时间常数时 74.1 s，0 次 429，16 个原始组全在 batch 中，等 0.02 s。只排队、客户端离开后不停止（`SUROGATE_SHARED_SERVER_ABORT=0`）时，`begin_training()` 等 7.3-8.7 s，多解码 7.0k-9.3k 个 token。
 
 验证：`fork/patches/tests/grpo/test_shared_admission.py`（`fork/dev test patches`）驱动真实的 HTTP 处理、`admit()` 和 token 循环，其中标明的几项在上游的服务上失败（第二个请求立即得到 429；关闭 SDK 重试时 6 个请求中 4 个 `RateLimitError`；客户端离开后请求仍解码到 `max_tokens`）。上游的 `tests/grpo/test_shared_model.py`、`test_tool_protocol.py`、`test_sampling_args.py`、`test_routing_replay.py` 在两种模式下都通过。GPU 上未验证，5090 检查见 [performance.md](performance.md#grpo-训练路径服务的排队与中止ledger-t28)。
+
+## LoRA 配置文档中的默认值与代码不符
+
+`surogate/core/config/sft_config.py` 的类 docstring 和 `docs/reference/config.md` 的 LoRA 选项表写错了默认值：
+
+```text
+surogate/core/config/sft_config.py:276      lora_rank 写 "defaults to 8"          实际为 16（:443）
+surogate/core/config/sft_config.py:280      lora_dropout 写 "defaults to 0.05"    实际为 0（:445）
+surogate/core/config/sft_config.py:282-283  lora_dtype 拼成 lora_dype，说明误抄为 "Dropout rate for LoRA adapters."，默认值 'fp32 少一个引号
+docs/reference/config.md:592                lora_dropout 默认值写 `0.05`          实际为 0
+```
+
+来历：上游 `e07fc6fd`（2026-04-26，“speed & mem improvements”）把 `lora_dropout` 的默认值从 0.05 改为 0，没有更新这两处文档。配置不写这个键时保留类默认值（`sft_config.py:603`），C++ 侧的默认值也是 0（`csrc/src/runtime/lora/lora_config.h:52`），所以这只是文档错误，运行行为不受影响。`docs/reference/config.md:765` 的完整示例显式设置 `lora_dropout: 0.05`，这是合法的设置，不是默认值说明。
+
+影响：相信文档的用户以为 LoRA 默认带 0.05 的 dropout，实际没有；需要 dropout 时要显式设置。`sequence_chunks`（`sft_config.py:1128`）、`row_packing`（`sft_config.py:1155`）、`long_context`（`csrc/src/runtime/dsl/dsl_model_execution.cpp:297`）和原生 GRPO colocate（`surogate/grpo/native_colocate.py:61`）都要求 `lora_dropout: 0`，默认配置已经满足。重新核对（docstring、类默认值、选项表）：
+
+```bash
+grep -nE '^ +lora_[a-z_]+ ?\(' surogate/core/config/sft_config.py
+grep -nE '^    lora_[a-z_]+:' surogate/core/config/sft_config.py
+grep -n '^| `lora_' docs/reference/config.md
+```
+
+## `AsyncStaleAdamW` 的注释声称已接入 dispatch-PP
+
+`csrc/src/runtime/optimizers/async_optimizer.h:4` 和 `:71-72`（“the dispatch-PP CPU-master optimizer path”）以及 nanobind 绑定的 docstring（`csrc/src/binding/binding.cpp:1244`）把 `AsyncStaleAdamW` 说成 dispatch-PP 的 CPU master 优化器路径。实际上没有运行时代码构造它。除了它自己的两个源文件，只有 `binding.cpp:22`（include）和 `binding.cpp:1241-1270`（绑定；docstring 末尾自称 “Debug/validation surface”）引用它。唯一的使用者是 Python 测试 `tests/train/dispatch_pp/test_phase3_async_optimizer.py`。加入它的上游提交 `e0019c03`（2026-06-21）在说明中写着 “Remaining: wire the worker into a fused multi-GPU dispatch step()”，此后没有接入。
+
+dispatch-PP 自己的一步滞后模式也不使用这个类：`dispatch_pp_train_step_multigpu` 的 `stale` 参数默认为 false（`binding.cpp:1714`），设为 true 时把本步梯度留到下一次调用，在那次调用里经 `dispatch_pp_apply_grads_` 同步应用（`csrc/src/binding/py_train.cpp:3145-3160`），既没有工作线程，也不与计算重叠。另外，这个类按值接收 `std::vector<float>` 形式的 master 和每一步的梯度（`async_optimizer.h:77`、`:88`），不能直接作用于 `cpu_training` 的 pinned master。
+
+因此，估算 CPU 优化器与计算的重叠收益时，不能把它算作已有的重叠；做这种重叠是新工作，能复用的只有通用的 `AsyncOptimizer` 队列。fork 不修改这些注释：只改注释也要一个 ledger topic，还会成为同步冲突的来源。重新核对（输出只应有 `binding.cpp` 和上面的测试）：
+
+```bash
+git grep -n -E 'AsyncStaleAdamW|AsyncOptimizer|async_optimizer\.h' -- csrc surogate tests ':!csrc/src/runtime/optimizers/async_optimizer.*'
+```
