@@ -82,7 +82,7 @@ fork 文档引用上游代码时写文件和符号名（函数、CMake 目标或
 `git diff -M --name-status $(git merge-base HEAD upstream/main) HEAD` 中的每一条都必须能在 ledger 中找到：
 
 - **A（新增）**：fork 自有路径，列在 `[owned]` 中（`fork/` 及少数必须放在其他位置的 fork 文件）。
-- **M（修改上游文件）**：归属某个 `[[topic]]`（T1–T10、T21、T22），每个 topic 记录提交、开关、涉及文件、测试和冲突历史。
+- **M（修改上游文件）**：归属某个 `[[topic]]`（T1–T10、T21–T23），每个 topic 记录提交、开关、涉及文件、测试和冲突历史。
 - **D（删除）/ R（重命名）**：分别列在 `[[deletion]]` 与 `[[relocation]]` 中；重命名必须是 100% 相似度。
 
 ledger 的表格形式见 [patches/README.md](patches/README.md)（由 ledger 生成）。检查命令（只用标准库，比较 merge base 与工作区，已暂存和未暂存的改动都算，未跟踪的文件在 `git add` 之前不计；`fork/dev check` 会运行它）：
@@ -93,7 +93,7 @@ python3 -I fork/tools/check_divergence.py --strict
 
 未登记的改动会使其以退出码 1 失败并列出路径；`--strict` 还会报告过期条目（topic 文件已与上游一致、登记路径已不存在等）。实现见 [tools/check_divergence.py](tools/check_divergence.py)。
 
-GRPO 补丁（T6–T8）和 T10 的 dispatch-PP 拒绝调用的 fork 代码位于 `surogate/_fork`，上游文件中只保留调用它的几行；T3 同样如此，MoE 基础专家权重梯度的计算位于 `fork/native/src/moe_weight_grad.cpp`，`csrc/src/runtime/ops/moe_grouped_gemm.cpp` 的 `backward_moe_base_weights()` 只调用它；T21 的 `cpu_training` AdamW 矩的布局、checkpoint 容器与加载检查位于 `fork/native/src/cpu_adamw_checkpoint.cpp`，三个上游文件中只有调用点。GRPO 补丁的 CPU 测试位于 `fork/patches/tests/grpo`，T3、T5 和 T10（tied 的 LM head 在全量训练时共用 embedding）的源码 pin、T10 dispatch-PP 拒绝的测试、T21 的源码 pin 与主机检查（构建 `fork/native/tests/host` 中的程序，需要 CUDA 工具包，没有时跳过），以及 T22（cuDNN 注意力使用 op 的 softmax_scale）的源码 pin 与其 GPU 检查用的转储比较脚本 `t22_attention_dump_check.py` 位于 `fork/patches/tests/native`，测试都用 `fork/dev test patches` 运行；`tests/` 与上游逐字节一致。
+GRPO 补丁（T6–T8）和 T10 的 dispatch-PP 拒绝调用的 fork 代码位于 `surogate/_fork`，上游文件中只保留调用它的几行；T3 同样如此，MoE 基础专家权重梯度的计算位于 `fork/native/src/moe_weight_grad.cpp`，`csrc/src/runtime/ops/moe_grouped_gemm.cpp` 的 `backward_moe_base_weights()` 只调用它；T21 的 `cpu_training` AdamW 矩的布局、checkpoint 容器与加载检查位于 `fork/native/src/cpu_adamw_checkpoint.cpp`，三个上游文件中只有调用点。GRPO 补丁的 CPU 测试位于 `fork/patches/tests/grpo`，T3、T5 和 T10（tied 的 LM head 在全量训练时共用 embedding）的源码 pin、T10 dispatch-PP 拒绝的测试、T21 的源码 pin 与主机检查（构建 `fork/native/tests/host` 中的程序，需要 CUDA 工具包，没有时跳过）、T22（cuDNN 注意力使用 op 的 softmax_scale）的源码 pin 与其 GPU 检查用的转储比较脚本 `t22_attention_dump_check.py`，以及 T23 的两个 CPU 探针（`test_cross_entropy_row_offsets.py` 与 `test_fp8_quant_grid_stride.py`，把上游 kernel 编译成主机 C++，需要 C++ 编译器，没有时跳过）位于 `fork/patches/tests/native`，测试都用 `fork/dev test patches` 运行；`tests/` 与上游逐字节一致。
 
 ## 文档
 
