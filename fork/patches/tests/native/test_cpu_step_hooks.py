@@ -215,6 +215,14 @@ def test_the_kernels_build_with_their_flags_in_surogate_common():
     assert "surogate_fork_add_cpu_step_kernels(${target})" in common.group(1)
 
 
+def test_the_contract_references_compile_like_upstream():
+    """At -O0 the references cannot fuse multiply-adds, so an FMA-baseline build would hide T15's mismatch."""
+    cmake = (REPO / "fork/native/openmp-contract/CMakeLists.txt").read_text(encoding="utf-8")
+    assert "set_source_files_properties(cpu_step_check.cpp PROPERTIES COMPILE_OPTIONS -O3)" in cmake
+    source = KERNELS.read_text(encoding="utf-8")
+    assert "if (cpu_adamw_simd_supported()) return true;" in source
+
+
 def test_the_topic_is_documented():
     doc = PERFORMANCE.read_text(encoding="utf-8")
     assert "HostGradOverwrites" in doc and "## cpu_training 主机端步" in doc

@@ -8,17 +8,20 @@
 //   2. host_grad_add_bf16/f32 give the bits of DslGradStore::accumulate_staged_layer's loop, with the host
 //      __float2bfloat16 of cuda_bf16.hpp, for every BF16 `dst` value against a structured set of `src` values,
 //      at every team size and length (T14);
-//   3. adamw_step_* give the bits of cpu_adamw.cpp's three loops, specials included (T15).
+//   3. adamw_step_* give the bits of cpu_adamw.cpp's three loops, specials included (T15), where the build's
+//      baseline ISA has no fused multiply-add; where it has one, SUROGATE_FORK_CPU_ADAMW_SIMD=1 is refused.
 //   In 2 and 3 a NaN in an FP32 result may carry another NaN's payload (same_floats explains why).
 //   4. the host-function team and the rank thread's team do not halve each other when they share a serial group
 //      (T14), and do without it.
-// The reference loops below are the upstream expressions; the checker is built without OpenMP or -O flags (as
-// team_check.cpp), on the baseline ISA, where GCC cannot contract them into FMAs.
+// The reference loops below are the upstream expressions. The checker is built without OpenMP (as team_check.cpp)
+// but at -O3 and with the compiler's default contraction, as surogate-common's Release build compiles
+// cpu_adamw.cpp, so that on a baseline ISA with FMA the references fuse multiply-adds as upstream's loops do there.
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <pthread.h>
@@ -436,7 +439,29 @@ void check_add_lengths_and_teams(const std::vector<int>& cpus) {
 
 // ---- 3. AdamW (T15) -------------------------------------------------------------------------------------------
 
+// Whether this file's baseline ISA has a fused multiply-add (the macros cpu_step_kernels.cpp tests): the reference
+// loops above then fuse, as upstream's cpu_adamw.cpp does in such a build.
+constexpr bool kReferenceHasFma =
+#if defined(__FP_FAST_FMAF) || defined(__FMA__) || defined(__FMA4__) || defined(__ARM_FEATURE_FMA)
+    true;
+#else
+    false;
+#endif
+
 void check_adamw(const std::vector<int>& cpus) {
+    // main() sets SUROGATE_FORK_CPU_ADAMW_SIMD=1 before anything reads it.
+    expect(surogate_fork::cpu_adamw_simd_supported() == !kReferenceHasFma,
+           "the kernels refuse the switch exactly where the baseline ISA has FMA",
+           surogate_fork::cpu_adamw_simd_supported(),
+           !kReferenceHasFma);
+    expect(surogate_fork::cpu_adamw_simd_enabled() == surogate_fork::cpu_adamw_simd_supported(),
+           "SUROGATE_FORK_CPU_ADAMW_SIMD=1 turns the path on where it is supported, and only there",
+           surogate_fork::cpu_adamw_simd_enabled(),
+           surogate_fork::cpu_adamw_simd_supported());
+    if (!surogate_fork::cpu_adamw_simd_supported()) {
+        std::printf("skipped: AdamW bits (the baseline ISA has FMA: upstream fuses, and T15 is refused)\n");
+        return;
+    }
     const surogate_fork::AdamWStep steps[] = {
         {1e-4f,
          0.9f,
@@ -530,6 +555,7 @@ void check_serial_group_teams(const std::vector<int>& cpus) {
 }  // namespace
 
 int main() {
+    setenv("SUROGATE_FORK_CPU_ADAMW_SIMD", "1", 1);  // read once, by check_adamw
     const std::vector<int> cpus = process_cpus();
     check_overwrites_rules();
     check_overwrites_protocol();

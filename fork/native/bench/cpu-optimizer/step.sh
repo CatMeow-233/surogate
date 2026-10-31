@@ -77,15 +77,16 @@ done
 [[ ${ISA:-1} == 0 ]] && exit 0
 echo "isa=clones $("$B" exhaust)"
 # One object per ISA, without clones; the whole object is built for that ISA. The x86-64-v4 build runs only where
-# this host has AVX-512 F/BW/DQ/VL.
+# this host has AVX-512 F/BW/DQ/VL. cpu_adamw.o stays the baseline build, which has no FMA, so the x86-64-v4 object
+# (whose ISA has FMA) must not refuse SUROGATE_FORK_CPU_ADAMW_SIMD: SUROGATE_FORK_UPSTREAM_FMA=0 says so.
 isas=("-march=x86-64" "-mavx2")
 grep -qw avx512bw /proc/cpuinfo && grep -qw avx512dq /proc/cpuinfo && grep -qw avx512vl /proc/cpuinfo \
     && isas+=("-march=x86-64-v4")
 for isa in "${isas[@]}"; do
     name=${isa#-m}
     name=${name#arch=}
-    "${KERNEL_CC[@]}" "$isa" -DSUROGATE_FORK_SIMD_CLONES= -c "$ROOT/fork/native/src/cpu_step_kernels.cpp" \
-        -o "$OUT/kernels-$name.o"
+    "${KERNEL_CC[@]}" "$isa" -DSUROGATE_FORK_SIMD_CLONES= -DSUROGATE_FORK_UPSTREAM_FMA=0 \
+        -c "$ROOT/fork/native/src/cpu_step_kernels.cpp" -o "$OUT/kernels-$name.o"
     "${ADAMW_CC[0]}" "$OUT/stepbench.o" "$OUT/cpu_adamw.o" "$OUT/kernels-$name.o" -o "$OUT/stepbench-$name" \
         -fopenmp -pthread
     echo "isa=$name $("$OUT/stepbench-$name" exhaust)"

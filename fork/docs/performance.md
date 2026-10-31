@@ -153,7 +153,7 @@ team 因而不超过调用线程掩码中的 CPU 数；同一组 CPU 上的几�
 | 删去 micro-step 0 对每个主机梯度的 memset | T13 | 始终开启（去掉的是冗余工作） | 主机梯度逐字节相同 |
 | 主机梯度加法向量化，并在 `OmpTeam` 的 team 上并行 | T14 | `SUROGATE_FORK_HOST_GRAD_ACCUM=1` | BF16 逐位相同；FP32 除 NaN 的 payload 外逐位相同 |
 | 块梯度的 D2H 与主机加法移到 grad store 自己的 stream | T14 | `SUROGATE_FORK_GRAD_D2H_STREAM=1` | 不改变数值，只改变排队的 stream |
-| CPU AdamW 向量化 | T15 | `SUROGATE_FORK_CPU_ADAMW_SIMD=1` | 除 NaN 的 payload 外逐位相同 |
+| CPU AdamW 向量化 | T15 | `SUROGATE_FORK_CPU_ADAMW_SIMD=1` | 基线 ISA 没有 FMA 的构建（上游的 x86-64 wheel）中除 NaN 的 payload 外逐位相同；基线 ISA 有 FMA 时开关被忽略（见“数值”） |
 
 T14、T15 的开关默认关闭，关闭时行为与上游相同；进程中第一次用到时读取一次环境变量，只有值恰好为 `1` 时开启。
 
@@ -174,11 +174,12 @@ GA>1 时，从 micro-step 1 起，每层梯度先 D2H 到所有层共用的暂�
 
 ### CPU AdamW（T15）
 
-`cpu_adamw.cpp` 的三个逐元素函数（`step_cpu_streaming` 对每个参数调用其中一个）都不向量化：`std::sqrt` 保留 errno；BF16 master 的循环中主机 `__float2bfloat16` 的舍入分支依赖被丢掉的低 16 位，更新后的权重让它频繁预测失败，本机单核上这个循环比 FP32 master 的慢约 4 倍（见下文）。`examples/training/cpu-offload.yaml` 没有设 `master_dtype`，用的正是 BF16 master。`SUROGATE_FORK_CPU_ADAMW_SIMD=1` 时，每个函数照旧算出 `bc1`、`bc2`、`wd_factor`，再调用 `cpu_step_kernels.cpp` 中对应的 `adamw_step_*`：同样的表达式与运算顺序，向量化，在调用线程的 `OmpTeam` team 上执行。源码 pin 比较 fork 循环与上游循环的表达式，上游改动 AdamW 的算术时 pin 失败，而不会悄悄分叉。用 8-bit CPU 状态替换这条路径（python-rl R19、train-native #9）是另一项工作，那时这条路径作为 FP32 状态的后备保留。
+`cpu_adamw.cpp` 的三个逐元素函数（`step_cpu_streaming` 对每个参数调用其中一个；Dispatch-PP 的异步优化器调试接口 `AsyncStaleAdamW` 在它的工作线程上也调用 `cpu_adamw_step`，开关同样作用于它，结果与上游逐位相同）都不向量化：`std::sqrt` 保留 errno；BF16 master 的循环中主机 `__float2bfloat16` 的舍入分支依赖被丢掉的低 16 位，更新后的权重让它频繁预测失败，本机单核上这个循环比 FP32 master 的慢约 4 倍（见下文）。`examples/training/cpu-offload.yaml` 没有设 `master_dtype`，用的正是 BF16 master。`SUROGATE_FORK_CPU_ADAMW_SIMD=1` 时，每个函数照旧算出 `bc1`、`bc2`、`wd_factor`，再调用 `cpu_step_kernels.cpp` 中对应的 `adamw_step_*`：同样的表达式与运算顺序，向量化，在调用线程的 `OmpTeam` team 上执行。源码 pin 比较 fork 循环与上游循环的表达式，上游改动 AdamW 的算术时 pin 失败，而不会悄悄分叉。用 8-bit CPU 状态替换这条路径（python-rl R19、train-native #9）是另一项工作，那时这条路径作为 FP32 状态的后备保留。
 
 ### 数值
 
-- 每个元素由一个线程按上游的表达式计算，team 大小和分块不影响结果。`cpu_step_kernels.cpp` 单独使用 `-fno-math-errno`（让 `std::sqrt` 向量化；IEEE 的 sqrt 在各种宽度下都正确舍入）和 `-ffp-contract=off`（`fork/native/cmake/cpu_step_kernels.cmake`）。上游按 x86-64 基线 ISA 编译，没有 FMA；不加后者时 GCC 13 在 x86-64-v4 克隆中融合 57 处乘加，`cpu-step-contract` 的 AdamW 检查在本机全部失败。
+- 每个元素由一个线程按上游的表达式计算，team 大小和分块不影响结果。`cpu_step_kernels.cpp` 单独使用 `-fno-math-errno`（让 `std::sqrt` 向量化；IEEE 的 sqrt 在各种宽度下都正确舍入）和 `-ffp-contract=off`（`fork/native/cmake/cpu_step_kernels.cmake`）。上游的 x86-64 构建按 x86-64 基线 ISA 编译，没有 FMA；不加后者时 GCC 13 在 x86-64-v4 克隆中融合 57 处乘加，`cpu-step-contract` 的 AdamW 检查在本机全部失败。
+- 上面的论证只在构建的基线 ISA 没有 FMA 时成立。aarch64（上游的 DGX Spark wheel）的基线 ISA 总有 FMA；x86-64 的 CXXFLAGS 选了 FMA（`-mfma`、`-march=x86-64-v3` 及以上、`-march=native`）时也有。这时 `surogate-common` 按编译器默认的收缩规则编译 `cpu_adamw.cpp`（GCC 是 `-ffp-contract=fast`，Clang 是 `on`），上游的循环融合乘加，fork 的循环不融合，结果不同：本机以 `-march=x86-64-v3` 模拟，2^20 个元素中 p 有 559 个、m 有 267946 个、v 有 239611 个不同。所以目标 ISA 有 FMA 时（`__FP_FAST_FMAF`、`__FMA__`、`__FMA4__` 或 `__ARM_FEATURE_FMA`，与 `-ffp-contract` 无关，两个文件看到的相同），`cpu_adamw_simd_supported()` 返回 false，`SUROGATE_FORK_CPU_ADAMW_SIMD=1` 被忽略，并在 stderr 上提示一次。`cpu-step-contract` 的参考循环与生产中的 `cpu_adamw.cpp` 一样按 `-O3`、默认收缩编译，在有 FMA 的基线上与上游一样融合：本机以 `-march=x86-64-v3` 构建时，强制打开开关（`-DSUROGATE_FORK_UPSTREAM_FMA=0`）后 AdamW 检查失败；不强制时它确认开关被拒绝，并跳过 AdamW 的逐位比较。之前按 `-O0` 编译的参考循环看不到这种融合，在同样的构建上照样通过。没有在 aarch64 上构建过（这里没有交叉工具链）。主机梯度加法不做乘法，在所有 ISA 上都逐位相同。
 - BF16 结果与上游逐位相同：主机梯度加法在全部 2^32 个 BF16 操作数对上与上游的循环比较过（`step.sh`，带克隆的构建以及基线、AVX2、x86-64-v4 各一份不带克隆的构建）。FP32 结果除 NaN 的 payload 外逐位相同：两个 NaN 参与一次运算时返回哪一个没有规定（IEEE 754 不规定，GCC 也会交换 `+` 和 `*` 的操作数），向量化的循环可能保留另一个 NaN 的 payload。BF16 输出把所有 NaN 映射为 `0x7fff`，不受影响。
 - 浮点环境（例如 FTZ/DAZ）由各线程从创建它的线程继承，与上游的 OpenMP 区域相同。
 
@@ -228,7 +229,7 @@ CPU AdamW 一整步（T15，`SUROGATE_FORK_CPU_ADAMW_SIMD=1`），小模型的�
 
 没有 serial group 时，按上节的共享规则，两个从不同时运行的调用线程互相计入，各自只得到 2 个线程；有了它，两者都得到 4 个。
 
-逐位检查（`step.sh` 的最后一段）：带克隆的构建以及基线（`-march=x86-64`）、AVX2（`-mavx2`）、x86-64-v4（`-march=x86-64-v4`）三份不带克隆的构建，全部 4294967296 个 BF16 操作数对的加法结果都与上游的循环相同；AdamW 在小模型上开与不开 `SUROGATE_FORK_CPU_ADAMW_SIMD` 的哈希在四份构建中都相同。
+逐位检查（`step.sh` 的最后一段）：带克隆的构建以及基线（`-march=x86-64`）、AVX2（`-mavx2`）、x86-64-v4（`-march=x86-64-v4`）三份不带克隆的构建（只有 `cpu_step_kernels.cpp` 按该 ISA 编译，`cpu_adamw.cpp` 仍是基线构建，所以这三份定义 `SUROGATE_FORK_UPSTREAM_FMA=0`，不按自身 ISA 的 FMA 拒绝开关），全部 4294967296 个 BF16 操作数对的加法结果都与上游的循环相同；AdamW 在小模型上开与不开 `SUROGATE_FORK_CPU_ADAMW_SIMD` 的哈希在四份构建中都相同。
 
 解读与限制：
 
@@ -243,7 +244,7 @@ CPU AdamW 一整步（T15，`SUROGATE_FORK_CPU_ADAMW_SIMD=1`），小模型的�
 1. T13：在 T13 的提交与它的父提交 `488e5f00` 上各运行一次 C8。每步记录的 loss 与梯度范数应逐位相同（先在父提交上连跑两次，确认这个配置本身可复现）；`step_seconds` 应减少，至多减少 memset 的时间（16.4 GB 除以主机单核的 memset 带宽），实际减少量取决于已排队的前向遮住了多少。
 2. T14 的加法：C8 分别不设与设置 `SUROGATE_FORK_HOST_GRAD_ACCUM=1`。两者每步的梯度范数与 loss 应逐位相同（主机梯度逐位相同）。用 `nsys profile -t cuda,osrt -o t14 surogate sft C8` 比较 micro-step 1–3 与 micro-step 0 的每层反向耗时（目标：不超过 1.3 倍）和回调线程上主机函数的时长；训练时用 `grep -H Cpus_allowed_list /proc/<pid>/task/*/status` 记下回调线程与它的 team 线程的掩码。
 3. T14 的 stream：再加 `SUROGATE_FORK_GRAD_D2H_STREAM=1`。nsys 中块梯度的 D2H 应出现在一条与权重预取的 H2D 不同的 stream 上，权重预取不再排在主机函数之后；梯度范数与 loss 与第 2 项逐位相同。先用 `deviceQuery` 记下 `asyncEngineCount`（为 2 时 D2H 与 H2D 可以同时进行）。有两张卡时加 `world_size: 2` 再跑一次，检查 NCCL 归约（`reduce_done`）之后的 D2H。
-4. T15：C8 改为 `max_steps: 5`、`save_steps: 5`，分别不设与设置 `SUROGATE_FORK_CPU_ADAMW_SIMD=1`。两次的 loss 应逐位相同，checkpoint 中权重分片的 sha256 应相同；nsys 中最后一个反向 kernel 到下一步第一个前向 kernel 之间的空隙（CPU 优化器步）应缩短。
+4. T15：C8 改为 `max_steps: 5`、`save_steps: 5`，分别不设与设置 `SUROGATE_FORK_CPU_ADAMW_SIMD=1`。5090 主机是 x86-64：用 fork 的 x86-64 wheel，或不在 CXXFLAGS 中选 FMA 的本地构建；第二次的日志中不应出现 `SUROGATE_FORK_CPU_ADAMW_SIMD=1 is ignored`。两次的 loss 应逐位相同，checkpoint 中权重分片的 sha256 应相同；nsys 中最后一个反向 kernel 到下一步第一个前向 kernel 之间的空隙（CPU 优化器步）应缩短。
 5. `fork/dev test gpu` 照常通过（fork 的 C++ 用例不经过这些路径）。
 
 第 2–4 项的逐位比较同样以第 1 项确认的可复现性为前提：同一提交连跑两次结果就不同时，改为比较各步梯度范数的相对差（主机梯度相同，差异只来自 GPU 的不确定性）。结果记在 ledger 中 T13–T15 各自的 `conflict_history` 末尾。

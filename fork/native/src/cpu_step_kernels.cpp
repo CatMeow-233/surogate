@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string_view>
@@ -31,6 +32,23 @@
 #define SUROGATE_FORK_SIMD_CLONES __attribute__((target_clones("arch=x86-64-v4", "avx2", "default")))
 #else
 #define SUROGATE_FORK_SIMD_CLONES
+#endif
+#endif
+
+// Whether upstream's cpu_adamw.cpp fuses multiply-adds (T15). surogate-common compiles it with the flags this file
+// gets, minus the two this file adds, so without -ffp-contract: GCC then contracts across expressions
+// (-ffp-contract=fast) and Clang within one ("on") wherever the baseline ISA has a fused multiply-add. That is
+// always the case on aarch64 (upstream's DGX Spark wheel), and on x86-64 when CXXFLAGS select FMA (-mfma,
+// -march=x86-64-v3 or later, -march=native); upstream's x86-64 wheel uses the baseline ISA, which has none. The
+// macros below describe the target ISA, which -ffp-contract does not change, so they are the same here as in
+// cpu_adamw.cpp. Where they hold, this file's AdamW loops, which never fuse, would not give upstream's bits, and
+// cpu_adamw_simd_enabled() refuses the switch. step.sh's per-ISA builds compile only this file for another ISA,
+// next to a baseline cpu_adamw.cpp, and define SUROGATE_FORK_UPSTREAM_FMA=0.
+#ifndef SUROGATE_FORK_UPSTREAM_FMA
+#if defined(__FP_FAST_FMAF) || defined(__FMA__) || defined(__FMA4__) || defined(__ARM_FEATURE_FMA)
+#define SUROGATE_FORK_UPSTREAM_FMA 1
+#else
+#define SUROGATE_FORK_UPSTREAM_FMA 0
 #endif
 #endif
 
@@ -165,8 +183,20 @@ bool grad_d2h_stream_enabled() {
     return on;
 }
 
+bool cpu_adamw_simd_supported() {
+    return SUROGATE_FORK_UPSTREAM_FMA == 0;
+}
+
 bool cpu_adamw_simd_enabled() {
-    static const bool on = env_flag("SUROGATE_FORK_CPU_ADAMW_SIMD");
+    static const bool on = [] {
+        if (!env_flag("SUROGATE_FORK_CPU_ADAMW_SIMD")) return false;
+        if (cpu_adamw_simd_supported()) return true;
+        std::fprintf(stderr,
+                     "surogate: SUROGATE_FORK_CPU_ADAMW_SIMD=1 is ignored: this build's baseline ISA has a fused "
+                     "multiply-add, which upstream's CPU AdamW uses and the fork's loops do not, so their results "
+                     "would differ (fork ledger T15)\n");
+        return false;
+    }();
     return on;
 }
 

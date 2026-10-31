@@ -509,15 +509,26 @@ conflict_history = [
 id = "T15"
 title = "cpu_training: opt-in vectorized CPU AdamW"
 commits = ["f43d459e"]   # shared with T14
-switch = "SUROGATE_FORK_CPU_ADAMW_SIMD=1 (default off, read once per process)"
+switch = "SUROGATE_FORK_CPU_ADAMW_SIMD=1 (default off, read once per process; refused where the baseline ISA has FMA)"
 # cpu_adamw.cpp's three element-wise steps (cpu_adamw_step, cpu_adamw_step_bf16, cpu_adamw_step_bf16_param, which
-# step_cpu_streaming calls per parameter) do not vectorize: std::sqrt keeps errno, and the BF16-master loop's host
+# step_cpu_streaming calls per parameter; AsyncStaleAdamW, the Dispatch-PP async optimizer debug surface, also
+# runs cpu_adamw_step on its worker thread, so the switch applies there too, with the same bits) do not
+# vectorize: std::sqrt keeps errno, and the BF16-master loop's host
 # __float2bfloat16 branches on the rounding remainder, which mispredicts for updated weights (about 20 ns/elem on
 # one core of this VM, against 4.8 ns/elem for the FP32-master loop). With the switch each computes its scalars as
 # before and calls adamw_step_* (cpu_step_kernels.cpp, T14's file and flags): the same expressions in the same
 # order, vectorized, on the calling thread's OmpTeam team, with the branch-free round. Same bits up to the payload
-# of a NaN (cpu-step-contract; stepbench hashes per ISA). test_cpu_step_hooks.py pins that the fork loops compute
-# upstream's expressions, so an upstream change to the AdamW arithmetic fails the pin instead of diverging.
+# of a NaN (cpu-step-contract; stepbench hashes per ISA) where the build's baseline ISA has no fused multiply-add,
+# as upstream's x86-64 wheel. Elsewhere (aarch64, i.e. the DGX Spark wheel, or x86-64 with FMA in CXXFLAGS)
+# surogate-common compiles cpu_adamw.cpp with the compiler's default contraction, which fuses its multiply-adds,
+# while cpu_step_kernels.cpp is built with -ffp-contract=off; cpu_adamw_simd_supported() is false there (FMA macros
+# of the target), and the switch is ignored with a note on stderr. Emulated on this host with -march=x86-64-v3:
+# the unfused kernels differ from upstream's -O3 loop in 559 p, 267946 m and 239611 v of 2^20 elements; the
+# contract's references are compiled at -O3 with default contraction as upstream's are, so an FMA-baseline build
+# of cpu-step-contract fails when the gate is forced open, and passes with the AdamW bits skipped otherwise
+# (the previous -O0 references could not see the fusion). Not built for aarch64 here (no cross toolchain).
+# test_cpu_step_hooks.py pins that the fork loops compute upstream's expressions, so an upstream change to the
+# AdamW arithmetic fails the pin instead of diverging.
 # Measured on the 4-vCPU VM (178M parameters, 4 threads, medians of 3 rounds): BF16 master 972 -> 64 ms (15x), FP32
 # master 243 -> 75 ms (3.2x), the latter at 66 GB/s, i.e. memory-bound. CPU only; the end-to-end step on a 5090 host
 # is unmeasured. python-rl R19 / train-native #9 (8-bit CPU state) would
@@ -525,8 +536,10 @@ switch = "SUROGATE_FORK_CPU_ADAMW_SIMD=1 (default off, read once per process)"
 files = ["csrc/src/runtime/optimizers/cpu_adamw.cpp"]
 fork_files = [
     "fork/native/cmake/cpu_step_kernels.cmake",   # shared with T14
+    "fork/native/cmake/fork_native.cmake",   # compiles cpu_step_kernels.cpp into surogate-common (shared with T3, T5, T10, T14)
     "fork/native/include/surogate_fork/cpu_step_kernels.h",   # shared with T14
     "fork/native/src/cpu_step_kernels.cpp",   # shared with T14
+    "fork/native/openmp-contract/CMakeLists.txt",   # builds cpu-step-contract, its references at -O3 (shared with T5, T13, T14)
     "fork/native/openmp-contract/cpu_step_check.cpp",   # shared with T13, T14
     "fork/native/bench/cpu-optimizer/stepbench.cpp",   # shared with T14
     "fork/native/bench/cpu-optimizer/step.sh",   # shared with T14

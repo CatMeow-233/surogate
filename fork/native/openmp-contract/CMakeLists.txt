@@ -28,6 +28,9 @@ target_link_libraries(training-openmp-team PRIVATE training-openmp-probe Threads
 
 add_executable(cpu-step-contract cpu_step_check.cpp)
 target_include_directories(cpu-step-contract PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+# Its reference loops are compiled as surogate-common's Release build compiles cpu_adamw.cpp (-O3, the compiler's
+# default contraction), so that a baseline ISA with FMA fuses them as it fuses upstream's (ledger T15).
+set_source_files_properties(cpu_step_check.cpp PROPERTIES COMPILE_OPTIONS -O3)
 target_link_libraries(cpu-step-contract PRIVATE training-openmp-probe Threads::Threads)
 
 enable_testing()
