@@ -215,7 +215,7 @@ git log --oneline HEAD..MERGE_HEAD -- <文件>                # 上游改了什�
 ### T23 交叉熵 kernel 的 64 位行偏移
 
 - 文件：`csrc/src/kernels/fused_classifier.cu`（`cross_entropy_forward_kernel`、`cross_entropy_backward_kernel`、`chunked_cross_entropy_forward_kernel`、`chunked_cross_entropy_backward_kernel` 中 7 处 logits/dlogits 下标写成 `static_cast<int64_t>(行号) * P + i`）。缺陷与证据见 [upstream-errata.md](upstream-errata.md#交叉熵-kernel-按-int-计算行偏移一个-lm-head-分块超过-231-个-logits-时越界读写fork-已修复ledger-t23)。
-- 反向回放：见 ledger 中 T23 的 `conflict_history`。
+- 反向回放：0/0/0。90 天内上游改过 `fused_classifier.cu` 4 次（`c58d8b6c` 分块 GRPO 引擎，`87d55b15` 与 `9cd58353` 候选集目标，`26b2dec1` GRPO 按 loss_scale 归一化），都不在 T23 的 7 行附近（最近的是 `87d55b15` 紧接在分块反向 kernel 之后插入的候选集 kernel，离 `:788` 约 15 行）；30 天内 1 次（`26b2dec1`），14 天内没有。
 - 解决：以上游为准，再把这几处的 `static_cast<int64_t>` 放回；上游新增按行索引 logits 的 kernel，或改写这四个 kernel 时，同样在乘法前转成 64 位。上游自己改成 64 位时删去 T23。
 - 测试：`fork/patches/tests/native/test_cross_entropy_row_offsets.py`（`fork/dev test patches`，不需要 GPU；探针按源码原样编译这四个 kernel、`prepare_softmax_blockwide3` 与 `kernels.h` 的分块常量，函数改名或签名变化时它在提取或编译时失败，按新代码调整探针中的调用）；GPU 检查见 errata。
 

@@ -622,7 +622,7 @@ conflict_history = [
 [[topic]]
 id = "T23"
 title = "64-bit row offsets in the cross-entropy kernels"
-commits = []
+commits = ["79165030"]
 switch = "always on (defect fix); chunks of at most 2^31 logits read and write the same elements with the same float arithmetic"
 # Defect (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "交叉熵 kernel 按 int 计算行偏移"):
 # fused_classifier.cu formed the logits/dlogits index as `row * P + i` in int at seven sites:
@@ -647,4 +647,6 @@ switch = "always on (defect fix); chunks of at most 2^31 logits read and write t
 files = ["csrc/src/kernels/fused_classifier.cu"]
 fork_files = ["fork/patches/tests/native/test_cross_entropy_row_offsets.py"]
 tests = ["fork/patches/tests/native/test_cross_entropy_row_offsets.py"]
-conflict_history = []
+conflict_history = [
+    "2026-10-31 reverse replay of 79165030 onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: fused_classifier.cu 0/0/0",
+]
