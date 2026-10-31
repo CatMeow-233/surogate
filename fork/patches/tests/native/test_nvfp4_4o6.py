@@ -25,7 +25,9 @@ What runs here:
 3. The header and the emulation compute the same values, request by request.
 4. Source pins: the upstream launchers dispatch to the fork kernels behind the switches, the fork kernels call the
    checked arithmetic, upstream's kernels (the legacy path the emulation models) are unedited, the standard SR
-   kernels take the graph generation, and the documented switch names are the built ones.
+   kernels take the graph generation, everything that names a unit's graph counter has internal linkage (with
+   nvcc found, also two units compiled at host -O0 that must not share one `advance`), and the documented switch
+   names are the built ones.
 
 The GPU behaviour (the kernels compute what the emulation computes, graph replays differ) is unverified here:
 fork/native/tests/test-fork-nvfp4-4o6.cu and fork/docs/upstream-errata.md give the RTX 5090 checks.
@@ -639,6 +641,70 @@ def test_the_graph_generation_is_inert_outside_captures():
     assert "return status == cudaStreamCaptureStatusActive;" in use
     assert "if (use) advance_generation_kernel<<<1, 1, 0, stream>>>();" in body(header, r"inline void advance\(")
     assert "<< 34" in body(header, r"unsigned long long curand_offset\(bool use\)")
+
+
+# Everything in sr_graph_generation.cuh that names the per-unit counter or its kernel. An `inline` function with
+# external linkage is one function for the whole program: where the host compiler does not inline `advance` (-O0,
+# CMake's Debug build) the linker keeps one including unit's copy, so every unit's launches advance that unit's
+# counter and the other units' counters stay at 0 (frozen noise under graphs again).
+UNIT_LOCAL = {
+    "g_generation": r"__device__ uint32_t g_generation\b",
+    "advance_generation_kernel": r"__global__ void advance_generation_kernel\(",
+    "generation": r"uint32_t generation\(bool use\)",
+    "curand_offset": r"unsigned long long curand_offset\(bool use\)",
+    "advance": r"inline void advance\(bool use, cudaStream_t stream\)",
+}
+
+
+def test_everything_that_names_the_counter_has_internal_linkage():
+    text = (NATIVE / "include/surogate_fork/sr_graph_generation.cuh").read_text(encoding="utf-8")
+    unnamed = re.search(r"\bnamespace\s*\{", text)
+    assert unnamed, "no unnamed namespace"
+    depth, start = 1, unnamed.end()
+    for end in range(start, len(text)):
+        depth += {"{": 1, "}": -1}.get(text[end], 0)
+        if depth == 0:
+            break
+    for name, pattern in UNIT_LOCAL.items():
+        found = [match.start() for match in re.finditer(pattern, text)]
+        assert len(found) == 1 and start <= found[0] < end, f"{name} is not defined once, in the unnamed namespace"
+
+
+def _nvcc():
+    for root in (os.environ.get("CUDA_HOME"), os.environ.get("CUDA_PATH"), "/usr/local/cuda"):
+        if root and (Path(root) / "bin/nvcc").is_file():
+            return str(Path(root) / "bin/nvcc")
+    return shutil.which("nvcc")
+
+
+def test_no_two_units_share_an_advance_when_the_host_compiler_does_not_inline_it(tmp_path):
+    """Two units built like CMake's Debug build (host -O0): each defines its own `advance`, under its own name."""
+    nvcc, nm = _nvcc(), shutil.which("nm")
+    if nvcc is None or nm is None:
+        pytest.skip("needs nvcc (CUDA_HOME, CUDA_PATH, /usr/local/cuda or PATH) and nm")
+    names = {}
+    for unit in ("a", "b"):
+        source = tmp_path / f"{unit}.cu"
+        source.write_text(
+            '#include "surogate_fork/sr_graph_generation.cuh"\n'
+            f"void launch_{unit}(cudaStream_t stream) {{\n"
+            "    const bool graph = surogate_fork::sr_graph::use_generation(stream);\n"
+            "    surogate_fork::sr_graph::advance(graph, stream);\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        obj = tmp_path / f"{unit}.o"
+        command = [nvcc, "-O0", "-g", "-std=c++20", "-I", str(NATIVE / "include"), "-c", str(source), "-o", str(obj)]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=300)
+        assert result.returncode == 0, result.stderr[-4000:]
+        symbols = subprocess.run([nm, "--defined-only", str(obj)], capture_output=True, text=True, check=True)
+        names[unit] = {
+            line.split()[-1]
+            for line in symbols.stdout.splitlines()
+            if "sr_graph" in line and "7advanceEbP11CUstream_st" in line
+        }
+    assert names["a"] and names["b"], names  # emitted out of line at -O0, so the check sees both copies
+    assert not names["a"] & names["b"], f"one `advance` symbol for both units: {names}"
 
 
 def test_the_fork_source_and_gpu_test_are_built():

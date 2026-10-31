@@ -697,10 +697,14 @@ switch = "on by default (defect fixes); SUROGATE_NVFP4_4O6_SR_LEGACY=1 runs upst
 # scale, clamp [2^-9, 448]. Graphs: surogate_fork/sr_graph_generation.cuh gives each including TU a device
 # counter; a launcher on a capturing stream (cudaStreamIsCapturing) passes `graph_generation`, the kernel mixes
 # the counter into its Philox stream (4/6: counter word; standard: curand_init offset gen<<34) and a 1-thread
-# kernel advances it after the launch. Outside captures nothing is read or advanced: eager results are upstream's
-# bit for bit (the standard SR kernels) and resume reproducibility is kept. Not fixed: the cudnn-backend SR kernels
-# (quant_fp4.cu) reuse graph noise too; the standard SR kernels' curand subsequence ignores blockIdx.y (noise
-# repeats every 128 columns, correlation not bias); the dead `no_fp4_stochastic_rounding` doc row (upstream doc).
+# kernel advances it after the launch. The counter and everything that names it (generation, curand_offset,
+# advance) have internal linkage: an external-linkage inline `advance` that the host compiler does not inline (-O0,
+# CMake's Debug build) is merged by the linker, and then only one unit's counter moves (review finding; pinned, and
+# checked on two nvcc -O0 objects when nvcc is found). Outside captures nothing is read or advanced: eager results
+# are upstream's bit for bit (the standard SR kernels) and resume reproducibility is kept. Not fixed: the
+# cudnn-backend SR kernels (quant_fp4.cu) reuse graph noise too; the standard SR kernels' curand subsequence ignores
+# blockIdx.y (noise repeats every 128 columns, correlation not bias); the dead `no_fp4_stochastic_rounding` doc row
+# (upstream doc).
 # Convergence effect unknown (2512.02010 App. A.3: unbiased SR on 4/6 showed no gain); GPU-unverified, the 5090
 # checks are in fork/native/tests/test-fork-nvfp4-4o6.cu and the errata.
 files = [

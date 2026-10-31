@@ -16,8 +16,12 @@
 //     const bool graph = surogate_fork::sr_graph::use_generation(stream);
 //     kernel<<<..., stream>>>(..., graph);  // the kernel reads generation(graph) or curand_offset(graph)
 //     surogate_fork::sr_graph::advance(graph, stream);
-// The counter is per translation unit (internal linkage, no relocatable device code needed); each kernel of a
-// unit sees a value that differs from every earlier captured launch of that unit. It is not checkpointed.
+// The counter is per translation unit (no relocatable device code needed); each kernel of a unit sees a value
+// that differs from every earlier captured launch of that unit. It is not checkpointed. Everything that names the
+// counter or its kernel (generation, curand_offset, advance) has internal linkage too, in the unnamed namespace
+// below: an `inline` function with external linkage is one function for the whole program, so where the host
+// compiler does not inline it (-O0, CMake's Debug build) the linker keeps one including unit's copy and every
+// other unit's launches would advance that unit's counter, leaving their own at 0 (frozen noise again).
 
 #pragma once
 
@@ -38,7 +42,26 @@ __global__ void advance_generation_kernel() {
     atomicAdd(&g_generation, 1u);
 }
 
+/// The generation a kernel launched with `use` mixes into its random stream: 0 outside captures.
+__device__ __forceinline__ uint32_t generation(bool use) {
+    return use ? __ldcg(&g_generation) : 0u;
+}
+
+/// curand_init offset that moves a per-thread Philox stream to generation(use): offset / 4 is added to the low
+/// 64 bits of the Philox counter, so the counter's second word grows by the generation and the streams of two
+/// generations are disjoint as long as a thread draws fewer than 2^34 values. 0 outside captures.
+__device__ __forceinline__ unsigned long long curand_offset(bool use) {
+    return static_cast<unsigned long long>(generation(use)) << 34;
+}
+
+/// Enqueue the counter step after a captured SR launch (no-op when `use` is false).
+inline void advance(bool use, cudaStream_t stream) {
+    if (use) advance_generation_kernel<<<1, 1, 0, stream>>>();
+}
+
 }  // namespace
+
+// These two name nothing unit-local, so they keep external linkage: one switch, read once per process.
 
 /// SUROGATE_NVFP4_SR_GRAPH_LEGACY=1: replays reuse the noise drawn at capture time, as upstream.
 inline bool fresh_noise_enabled() {
@@ -58,23 +81,6 @@ inline bool use_generation(cudaStream_t stream) {
         return false;
     }
     return status == cudaStreamCaptureStatusActive;
-}
-
-/// The generation a kernel launched with `use` mixes into its random stream: 0 outside captures.
-__device__ __forceinline__ uint32_t generation(bool use) {
-    return use ? __ldcg(&g_generation) : 0u;
-}
-
-/// curand_init offset that moves a per-thread Philox stream to generation(use): offset / 4 is added to the low
-/// 64 bits of the Philox counter, so the counter's second word grows by the generation and the streams of two
-/// generations are disjoint as long as a thread draws fewer than 2^34 values. 0 outside captures.
-__device__ __forceinline__ unsigned long long curand_offset(bool use) {
-    return static_cast<unsigned long long>(generation(use)) << 34;
-}
-
-/// Enqueue the counter step after a captured SR launch (no-op when `use` is false).
-inline void advance(bool use, cudaStream_t stream) {
-    if (use) advance_generation_kernel<<<1, 1, 0, stream>>>();
 }
 
 }  // namespace surogate_fork::sr_graph
