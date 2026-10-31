@@ -34,7 +34,7 @@ constexpr std::uint32_t kThreeChunkPromptVisibleKeys = 1024;
 // supported head width and KV count with any positive integral query group.
 bool supported_attention_shape(std::int32_t dim, std::int32_t queries, std::int32_t kv) {
     return queries > 0 && kv > 0 && queries % kv == 0 &&
-           gqa_kv_shape_is_registered(dim, kv);
+           gqa_kv_shape_is_registered(dim, kv) && !surogate_fork::gqa_fork_kv_pair_withheld(dim, kv);
 }
 
 bool optimized_decode_shape(std::int32_t dim, std::int32_t queries, std::int32_t kv, DType dtype) {
@@ -74,7 +74,8 @@ void require_registered_shape(std::int32_t head_dim, std::int32_t q_heads, std::
 // The append path holds no query count; the registry answers on the head
 // dimension and KV count alone, which is all its kernels read.
 void require_kv_heads(std::int32_t head_dim, std::int32_t kv_heads, const char* op) {
-    if (!gqa_kv_shape_is_registered(head_dim, kv_heads)) {
+    if (!gqa_kv_shape_is_registered(head_dim, kv_heads) ||
+        surogate_fork::gqa_fork_kv_pair_withheld(head_dim, kv_heads)) {
         throw std::invalid_argument(std::string(op) + ": unsupported KV head geometry (head dim " +
                                     std::to_string(head_dim) + ", " + std::to_string(kv_heads) +
                                     " KV heads)");
@@ -121,7 +122,8 @@ std::uint32_t validate_cache(const PagedKVLayerView& cache, std::int32_t kv_head
     const std::int32_t head_dim = cache.head_dim;
     if ((cache.dtype != DType::BF16 && cache.dtype != DType::I8 &&
          cache.dtype != DType::FP8_E4M3FN) ||
-        cache.num_kv_heads != kv_heads || !gqa_kv_shape_is_registered(head_dim, kv_heads)) {
+        cache.num_kv_heads != kv_heads || !gqa_kv_shape_is_registered(head_dim, kv_heads) ||
+        surogate_fork::gqa_fork_kv_pair_withheld(head_dim, kv_heads)) {
         throw std::invalid_argument(std::string(op) +
                                     ": invalid KV cache geometry or dtype (head dim " +
                                     std::to_string(head_dim) + ", " +
@@ -190,7 +192,8 @@ std::uint32_t validate_batch_cache(const PagedKVBatchLayerView& cache, std::int3
     const std::int32_t head_dim = cache.head_dim;
     if ((cache.dtype != DType::BF16 && cache.dtype != DType::I8 &&
          cache.dtype != DType::FP8_E4M3FN) ||
-        cache.num_kv_heads != kv_heads || !gqa_kv_shape_is_registered(head_dim, kv_heads)) {
+        cache.num_kv_heads != kv_heads || !gqa_kv_shape_is_registered(head_dim, kv_heads) ||
+        surogate_fork::gqa_fork_kv_pair_withheld(head_dim, kv_heads)) {
         throw std::invalid_argument(std::string(op) +
                                     ": invalid KV cache geometry or dtype (head dim " +
                                     std::to_string(head_dim) + ", " +

@@ -182,6 +182,7 @@
 | `dsl-run-state-tests` | PRIVATE | `"${SUROGATE_FORK_NATIVE_DIR}/include"` | `fork/native/cmake/fork_native.cmake` |
 | `_surogate` | PRIVATE | `"${SUROGATE_FORK_NATIVE_DIR}/include"` | `fork/native/cmake/fork_native.cmake` |
 | `sinfer_ops` | PRIVATE | `"${SUROGATE_FORK_NATIVE_DIR}/include"` | `fork/native/cmake/fork_native.cmake` |
+| `sinfer_gqa_attention_test` | PRIVATE | `"${SUROGATE_FORK_NATIVE_DIR}/include"` | `fork/native/cmake/fork_native.cmake` |
 | `training-openmp-probe` | PRIVATE | `${CMAKE_CURRENT_SOURCE_DIR}/../include` | `fork/native/openmp-contract/CMakeLists.txt` |
 | `cpu-step-contract` | PRIVATE | `${CMAKE_CURRENT_SOURCE_DIR}/../include` | `fork/native/openmp-contract/CMakeLists.txt` |
 

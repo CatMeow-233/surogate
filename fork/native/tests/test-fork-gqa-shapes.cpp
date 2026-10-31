@@ -7,12 +7,15 @@
 // cases on all three fork shapes against its double-precision oracle: decode and verify rows,
 // appending (A1) and over a populated cache (A3); 7-63-column prompt segments and wide prompts;
 // sliding windows; batched rows with masked columns and permuted table rows; an e4m3 cache
-// (appended against cached bits); batched int8 rows, which stay on the generic kernel either
-// way; and packed multi-prompt rounds against the segments' own calls, bit for bit.
+// against attention in double over the cache's own codes (decode, verify, short and wide
+// prompts, with and without a window), and appended against cached bits; batched int8 rows,
+// which stay on the generic kernel either way; and packed multi-prompt rounds against the
+// segments' own calls, bit for bit.
 //
 // fork/native/cmake/fork_native.cmake builds it as sinfer_gqa_fork_shapes_test and registers it
 // with ctest twice: with SUROGATE_SERVE_GQA_FORK_SHAPES=0 (the routes the shapes took before
-// they were registered) and set to 1 (the registered small-T kernels for BF16 and e4m3).
+// they were registered; the multi-head shape, which upstream refused, must be refused) and set
+// to 1 (the registered small-T kernels for BF16 and e4m3, the multi-head shape served).
 #define main sinfer_gqa_attention_test_main
 #include "ops/test_gqa_attention.cpp"
 #undef main
@@ -59,6 +62,234 @@ int run_fork_shape(const Geometry& geometry, std::uint32_t seed) {
     return failures;
 }
 
+// An e4m3 cache against attention in double over the codes the cache holds, as upstream's
+// verify_fp8_wide_prompts checks Qwen3-8B's decode and verify rows (its cases 819 and 820): the
+// widths the small-T kernel, its chunks and the prompt tiles serve with the switch on, and the
+// generic kernel with it off (1, 3, 6, 17), and one past the prompt kernel's first width (66),
+// over a history that crosses pages, 128-key partitions and splits, with and without a window,
+// on scattered pages. Each width runs at the default switches and batch-invariant; the wide one
+// also with the prompt kernel's FP8 query-key product, against an oracle that rounds the queries
+// the same way, as upstream does. A misread head, group or page is off by order one; the bounds
+// are upstream's.
+int verify_fork_shape_fp8_against_reference(const Geometry& geometry, std::uint32_t seed) {
+    struct Case {
+        int history;
+        int tokens;
+        int window;
+    };
+    const Case cases[] = {{2000, 1, 0},   {2000, 3, 0},   {2000, 6, 0},   {2000, 17, 0},
+                          {2000, 66, 0},  {1999, 1, 300}, {1999, 3, 300}, {1999, 6, 300},
+                          {1999, 17, 300}, {1999, 66, 300}};
+    constexpr int pages = 64;
+    constexpr float scale = 1.0F / 16.0F;
+    int device = 0, major = 0;
+    CUDA_CHECK(cudaGetDevice(&device));
+    CUDA_CHECK(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device));
+    const int dim = geometry.head_dim, heads = geometry.q_heads, kv_heads = geometry.kv_heads;
+    const int group = heads / kv_heads;
+    int failures = 0;
+    for (const Case& c : cases) {
+        const int keys = c.history + c.tokens;
+        const std::uint32_t case_seed = seed + 7u * static_cast<std::uint32_t>(c.tokens) +
+                                        static_cast<std::uint32_t>(c.window);
+        DeviceArena arena(256U << 20);
+        Tensor q = arena.alloc(DType::BF16, {dim, heads, c.tokens});
+        Tensor k = arena.alloc(DType::BF16, {dim, kv_heads, keys});
+        Tensor v = arena.alloc(DType::BF16, {dim, kv_heads, keys});
+        Tensor positions = arena.alloc(DType::I32, {keys});
+        const std::vector<float> q_values = make_bf16_values(q.numel(), case_seed, -2.0F, 2.0F);
+        const std::vector<float> k_values = make_bf16_values(k.numel(), case_seed + 1u, -2.0F, 2.0F);
+        const std::vector<float> v_values = make_bf16_values(v.numel(), case_seed + 2u, -1.0F, 1.0F);
+        const auto upload = [](Tensor tensor, const std::vector<float>& values) {
+            const std::vector<std::uint16_t> bits = to_bf16_bits(values);
+            CUDA_CHECK(cudaMemcpy(tensor.data, bits.data(), tensor.bytes(), cudaMemcpyHostToDevice));
+        };
+        upload(q, q_values);
+        upload(k, k_values);
+        upload(v, v_values);
+        std::vector<int> pos(keys), table(pages);
+        for (int t = 0; t < keys; ++t) { pos[t] = t; }
+        for (int i = 0; i < pages; ++i) { table[i] = (i * 17 + 3) % pages; }
+        CUDA_CHECK(cudaMemcpy(positions.data, pos.data(), positions.bytes(), cudaMemcpyHostToDevice));
+        PagedKVLayerView cache;
+        cache.head_dim     = dim;
+        cache.num_kv_heads = kv_heads;
+        cache.dtype        = DType::FP8_E4M3FN;
+        cache.k_pages      = arena.alloc(cache.dtype, {dim, kPagedKVPageSize, kv_heads, pages});
+        cache.v_pages      = arena.alloc(cache.dtype, {dim, kPagedKVPageSize, kv_heads, pages});
+        cache.block_table  = arena.alloc(DType::I32, {pages});
+        CUDA_CHECK(cudaMemcpy(cache.block_table.data, table.data(), cache.block_table.bytes(),
+                              cudaMemcpyHostToDevice));
+        ops::gqa_kv_append(k, v, positions, cache, nullptr);
+        cuda_synchronize();
+
+        // The oracle reads the codes the cache holds: [page][kv head][slot][dim].
+        const auto k_codes = from_device<std::uint8_t>(cache.k_pages.data, cache.k_pages.numel());
+        const auto v_codes = from_device<std::uint8_t>(cache.v_pages.data, cache.v_pages.numel());
+        const auto cached = [&](const std::vector<std::uint8_t>& codes, int t, int g, int d) {
+            const std::size_t page = static_cast<std::size_t>(table[t / kPagedKVPageSize]);
+            return static_cast<double>(fp8_reference_value(
+                codes[((page * kv_heads + g) * kPagedKVPageSize + t % kPagedKVPageSize) * dim + d]));
+        };
+        std::vector<double> kd(static_cast<std::size_t>(keys) * kv_heads * dim), vd(kd.size());
+        for (int t = 0; t < keys; ++t) {
+            for (int g = 0; g < kv_heads; ++g) {
+                for (int d = 0; d < dim; ++d) {
+                    const std::size_t i = (static_cast<std::size_t>(t) * kv_heads + g) * dim + d;
+                    kd[i] = cached(k_codes, t, g, d);
+                    vd[i] = cached(v_codes, t, g, d);
+                }
+            }
+        }
+        const auto attend = [&](const std::vector<float>& queries) {
+            std::vector<double> reference(q.numel());
+            std::vector<double> scores(keys);
+            for (int col = 0; col < c.tokens; ++col) {
+                const int last  = c.history + col;
+                const int first = c.window > 0 ? std::max(0, last - c.window + 1) : 0;
+                for (int h = 0; h < heads; ++h) {
+                    const int g = h / group;
+                    const float* query = queries.data() + (static_cast<std::size_t>(col) * heads + h) * dim;
+                    double peak = -std::numeric_limits<double>::infinity();
+                    for (int t = first; t <= last; ++t) {
+                        const double* key = kd.data() + (static_cast<std::size_t>(t) * kv_heads + g) * dim;
+                        double dot = 0;
+                        for (int d = 0; d < dim; ++d) { dot += query[d] * key[d]; }
+                        scores[t] = dot * scale;
+                        peak      = std::max(peak, scores[t]);
+                    }
+                    double total = 0;
+                    for (int t = first; t <= last; ++t) { total += scores[t] = std::exp(scores[t] - peak); }
+                    double* row = reference.data() + (static_cast<std::size_t>(col) * heads + h) * dim;
+                    for (int t = first; t <= last; ++t) {
+                        const double* value = vd.data() + (static_cast<std::size_t>(t) * kv_heads + g) * dim;
+                        const double weight = scores[t] / total;
+                        for (int d = 0; d < dim; ++d) { row[d] += weight * value[d]; }
+                    }
+                }
+            }
+            return reference;
+        };
+        const std::vector<double> reference = attend(q_values);
+        // The prompt kernel's FP8 query-key product rounds each query row to e4m3 against its own
+        // absolute maximum; its oracle rounds the queries the same way (upstream's construction).
+        const bool fp8_query = major != 9 && c.tokens >= 64;
+        std::vector<double> reference_q8;
+        if (fp8_query) {
+            std::vector<float> q8_values(q_values.size());
+            for (std::size_t row = 0; row < q_values.size(); row += dim) {
+                float amax = 0.0F;
+                for (int d = 0; d < dim; ++d) { amax = std::max(amax, std::abs(q_values[row + d])); }
+                const float inv = amax > 0.0F ? 448.0F / amax : 0.0F;
+                const float row_scale = amax * (1.0F / 448.0F);
+                for (int d = 0; d < dim; ++d) {
+                    q8_values[row + d] = fp8_reference_value(fp8_reference_code(q_values[row + d] * inv)) * row_scale;
+                }
+            }
+            reference_q8 = attend(q8_values);
+        }
+
+        Tensor query_pos = positions.slice(0, c.history, c.tokens);
+        const ops::GqaExecutionEnvelope envelope{1, pages * kPagedKVPageSize, c.window};
+        struct Run {
+            bool invariant;
+            bool fp8_query;
+        };
+        const bool default_fp8_query = ops::prompt_attention_fp8_query();
+        for (const Run run : {Run{false, false}, Run{false, true}, Run{true, false}}) {
+            if (run.fp8_query && !fp8_query) { continue; }
+            ops::set_batch_invariant(run.invariant);
+            ops::set_prompt_attention_fp8_query(run.fp8_query);
+            const bool pv_fp8 = run.fp8_query && major == 12 && c.window == 0 && ops::prompt_attention_fp8_pv();
+            Tensor out = arena.alloc(DType::BF16, {dim, heads, c.tokens});
+            CUDA_CHECK(cudaMemset(out.data, 0xFF, out.bytes()));
+            // The engine sizes its plan with the history form (layouts_impl.h), which also covers
+            // the prompt tiles of every shorter history.
+            WorkspaceArena scratch(std::max<std::size_t>(256, ops::gqa_attention_history_workspace_capacity_bytes(
+                dim, heads, kv_heads, cache.dtype, envelope, 1, c.tokens, c.tokens)));
+            ops::gqa_attention_cached(q, query_pos, scale, cache, envelope, scratch, out, nullptr);
+            cuda_synchronize();
+            ops::set_batch_invariant(false);
+            ops::set_prompt_attention_fp8_query(default_fp8_query);
+            const bool flash = !run.invariant && major == 9 && c.tokens >= 32;
+            const bool kernel = !run.invariant && !flash && c.tokens >= 64;
+            const bool q8 = kernel && run.fp8_query;
+            const bool p8 = q8 && pv_fp8;
+            const std::string label = std::string("fork fp8 reference ") + geometry.name +
+                                      " T=" + std::to_string(c.tokens) + " keys=" + std::to_string(keys) +
+                                      " window=" + std::to_string(c.window) +
+                                      " invariant=" + std::to_string(int(run.invariant)) +
+                                      (flash ? " flash-attention-3" : p8 ? " prompt kernel fp8 query and probabilities" :
+                                       q8 ? " prompt kernel fp8 query" : kernel ? " prompt kernel" : " small-T, tiles or generic");
+            failures += verify_attention(label, bf16_bits_to_double(from_device<std::uint16_t>(out.data, out.numel())),
+                                         q8 ? reference_q8 : reference,
+                                         flash || p8 ? kAttentionFp8QueryCriterion : kAttentionBf16Criterion);
+        }
+    }
+    return failures;
+}
+
+// With the switch off the multi-head shape is refused as it was before the fork registered it
+// (surogate_fork::gqa_fork_kv_pair_withheld): the workspace plans, the KV append and the attention
+// calls throw std::invalid_argument naming the geometry (the messages upstream gave it), and
+// nothing packs. The switch-on run serves the same shape through run_fork_shape.
+int verify_fork_kv_pair_refused(const Geometry& geometry) {
+    const int dim = geometry.head_dim, heads = geometry.q_heads, kv_heads = geometry.kv_heads;
+    int failures = 0;
+    const auto refused = [&](const std::string& what, const auto& call) {
+        try {
+            call();
+        } catch (const std::invalid_argument& error) {
+            if (std::string(error.what()).find("geometry") != std::string::npos) { return; }
+            std::cerr << geometry.name << ": " << what << " refused for another reason: " << error.what() << "\n";
+            ++failures;
+            return;
+        }
+        std::cerr << geometry.name << ": " << what << " accepted with the switch off\n";
+        ++failures;
+    };
+    const ops::GqaExecutionEnvelope envelope{1, 128};
+    for (const auto dtype : {DType::BF16, DType::FP8_E4M3FN, DType::I8}) {
+        const std::string name = std::string(" dtype=") + std::to_string(int(dtype));
+        refused("the workspace plan" + name, [&] {
+            (void)ops::gqa_attention_workspace_capacity_bytes(dim, heads, kv_heads, dtype, envelope, 1, 1, 8);
+        });
+        refused("the history workspace plan" + name, [&] {
+            (void)ops::gqa_attention_history_workspace_capacity_bytes(dim, heads, kv_heads, dtype, envelope, 1, 1, 66);
+        });
+        if (ops::gqa_attention_packs_prompt(dim, heads, kv_heads, dtype, 40, envelope)) {
+            std::cerr << geometry.name << ": a prompt packs with the switch off" << name << "\n";
+            ++failures;
+        }
+    }
+    DeviceArena arena(16U << 20);
+    Tensor q = arena.alloc(DType::BF16, {dim, heads, 4});
+    Tensor k = arena.alloc(DType::BF16, {dim, kv_heads, 4});
+    Tensor v = arena.alloc(DType::BF16, {dim, kv_heads, 4});
+    Tensor out = arena.alloc(DType::BF16, {dim, heads, 4});
+    Tensor positions = arena.alloc(DType::I32, {4});
+    const std::vector<int> pos = {0, 1, 2, 3}, table = {1, 0};
+    CUDA_CHECK(cudaMemcpy(positions.data, pos.data(), positions.bytes(), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(q.data, 0, q.bytes()));
+    CUDA_CHECK(cudaMemset(k.data, 0, k.bytes()));
+    CUDA_CHECK(cudaMemset(v.data, 0, v.bytes()));
+    PagedKVLayerView cache;
+    cache.head_dim     = dim;
+    cache.num_kv_heads = kv_heads;
+    cache.dtype        = DType::BF16;
+    cache.k_pages      = arena.alloc(cache.dtype, {dim, kPagedKVPageSize, kv_heads, 2});
+    cache.v_pages      = arena.alloc(cache.dtype, {dim, kPagedKVPageSize, kv_heads, 2});
+    cache.block_table  = arena.alloc(DType::I32, {2});
+    CUDA_CHECK(cudaMemcpy(cache.block_table.data, table.data(), cache.block_table.bytes(), cudaMemcpyHostToDevice));
+    WorkspaceArena scratch(1U << 20);
+    refused("gqa_kv_append", [&] { ops::gqa_kv_append(k, v, positions, cache, nullptr); });
+    refused("gqa_attention_cached", [&] {
+        ops::gqa_attention_cached(q, positions, attention_scale(geometry), cache, envelope, scratch, out, nullptr);
+    });
+    cuda_synchronize();
+    return failures;
+}
+
 // Multi-prompt rounds pack once a shape is registered (ops::gqa_attention_packs_prompt), which the
 // switch turns on for these shapes. The packed launch must leave every output and cache bit its
 // segments' own calls leave, as upstream's verify_packed_prompt_invariance checks for its shapes;
@@ -71,8 +302,7 @@ int verify_fork_shape_packed_prompts(const Geometry& geometry) {
     };
     const std::vector<Chunk> chunks = {{0, 200}, {127, 41}, {3967, 385}, {300, 7}, {4095, 64},
                                        {0, 63},  {127, 65}, {1000, 200}, {50, 5}};
-    const char* raw    = std::getenv("SUROGATE_SERVE_GQA_FORK_SHAPES");
-    const bool enabled = raw != nullptr && std::strcmp(raw, "1") == 0;
+    const bool enabled = surogate_fork::gqa_fork_shapes_enabled();
     constexpr int pages_per_row = 72;
     const int rows = static_cast<int>(chunks.size());
     const int dim = geometry.head_dim, heads = geometry.q_heads, kv_heads = geometry.kv_heads;
@@ -232,11 +462,27 @@ int main() {
     const char* raw = std::getenv("SUROGATE_SERVE_GQA_FORK_SHAPES");
     std::cout << "SUROGATE_SERVE_GQA_FORK_SHAPES=" << (raw == nullptr ? "(unset)" : raw) << "\n";
     int failures = 0;
-    failures += run_fork_shape(Geometry{"qwen3_8b", 32, 8, 128}, 9100U);
-    failures += run_fork_shape(Geometry{"qwen3_14b", 40, 8, 128}, 9600U);
-    failures += run_fork_shape(Geometry{"mha_128", 32, 32, 128}, 10100U);
-    for (const Geometry geometry : {Geometry{"qwen3_8b", 32, 8, 128}, Geometry{"qwen3_14b", 40, 8, 128},
-                                    Geometry{"mha_128", 32, 32, 128}}) {
+    // The switch withholds exactly the multi-head shape's KV pair, and only while it is off;
+    // 128 over 8 KV heads is upstream's Gqa128_16q8 pair.
+    if (surogate_fork::gqa_fork_kv_pair_withheld(128, 32) == surogate_fork::gqa_fork_shapes_enabled() ||
+        surogate_fork::gqa_fork_kv_pair_withheld(128, 8)) {
+        std::cerr << "the fork withholds the wrong KV pairs\n";
+        ++failures;
+    }
+    struct Shape {
+        Geometry geometry;
+        std::uint32_t seed;
+    };
+    for (const Shape& shape : {Shape{Geometry{"qwen3_8b", 32, 8, 128}, 9100U},
+                               Shape{Geometry{"qwen3_14b", 40, 8, 128}, 9600U},
+                               Shape{Geometry{"mha_128", 32, 32, 128}, 10100U}}) {
+        const Geometry& geometry = shape.geometry;
+        if (surogate_fork::gqa_fork_kv_pair_withheld(geometry.head_dim, geometry.kv_heads)) {
+            failures += verify_fork_kv_pair_refused(geometry);
+            continue;
+        }
+        failures += run_fork_shape(geometry, shape.seed);
+        failures += verify_fork_shape_fp8_against_reference(geometry, shape.seed + 500U);
         failures += verify_fork_shape_packed_prompts(geometry);
     }
     std::cout << (failures == 0 ? "PASS" : "FAIL") << " gqa fork shapes\n";

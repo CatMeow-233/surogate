@@ -71,12 +71,15 @@ function(_surogate_fork_attach_serve)
             "${SUROGATE_FORK_NATIVE_DIR}/serve/gqa_attention_decode_gqa128_32q32.cu"
         )
     endif()
-    # T16's GPU cases (serve tests only). sinfer_gqa_fork_shapes_test compiles upstream's GQA test
-    # harness with the three fork shapes' cases (tests/test-fork-gqa-shapes.cpp); it copies
-    # sinfer_gqa_attention_test's include directories, options and libraries, lands beside it and
-    # joins serve-tests. ctest runs it with SUROGATE_SERVE_GQA_FORK_SHAPES=0 and =1, and
+    # T16's GPU cases (serve tests only). Upstream's test_gqa_attention.cpp reads the fork header
+    # (its registration contract exempts the KV pair the fork withholds with the switch off), so
+    # sinfer_gqa_attention_test gets the fork include directory first. sinfer_gqa_fork_shapes_test
+    # compiles that harness with the three fork shapes' cases (tests/test-fork-gqa-shapes.cpp); it
+    # copies sinfer_gqa_attention_test's include directories, options and libraries, lands beside
+    # it and joins serve-tests. ctest runs it with SUROGATE_SERVE_GQA_FORK_SHAPES=0 and =1, and
     # upstream's own test with =1 (its unset run is upstream's sinfer_gqa_attention_test).
     if(TARGET sinfer_gqa_attention_test)
+        target_include_directories(sinfer_gqa_attention_test PRIVATE "${SUROGATE_FORK_NATIVE_DIR}/include")
         add_executable(sinfer_gqa_fork_shapes_test EXCLUDE_FROM_ALL
             "${SUROGATE_FORK_NATIVE_DIR}/tests/test-fork-gqa-shapes.cpp")
         foreach(property INCLUDE_DIRECTORIES COMPILE_DEFINITIONS COMPILE_OPTIONS LINK_LIBRARIES)

@@ -9,6 +9,7 @@
 #include "ops/launcher/gqa_attention.h"
 #include "ops/fp8_reference.h"
 #include "ops/op_tester.h"
+#include "surogate_fork/gqa_fork_shapes.h" // fork T16
 
 #include <algorithm>
 #include <cmath>
@@ -2331,7 +2332,8 @@ int verify_geometry_registration_contract() {
     };
 
 #define SINFER_GQA_REGISTERED_CASE(Name)                                                           \
-    if (!accepted(ops::Name::HeadDim, ops::Name::QHeads, ops::Name::KVHeads)) {                    \
+    if (!accepted(ops::Name::HeadDim, ops::Name::QHeads, ops::Name::KVHeads) &&                    \
+        !surogate_fork::gqa_fork_kv_pair_withheld(ops::Name::HeadDim, ops::Name::KVHeads)) {       \
         std::cerr << "gqa_attention rejected registered geometry " << ops::Name::HeadDim << "d"    \
                   << ops::Name::QHeads << "q" << ops::Name::KVHeads << "\n";                       \
         ++failures;                                                                                \

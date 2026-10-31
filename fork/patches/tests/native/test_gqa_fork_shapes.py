@@ -4,12 +4,14 @@ csrc/src/serve/ops/kernel/gqa_attention_geometry.cuh registers Gqa128_32q8, Gqa1
 fork; fork/native/serve holds their small-T decode units and fork/native/include/surogate_fork/gqa_fork_shapes.h the
 switch, SUROGATE_SERVE_GQA_FORK_SHAPES=1. The routing decisions are made by three upstream functions the topic
 edits: optimized_decode_shape and generic_takes (wrapper/gqa_attention.cpp) and dispatch_prompt_geometry
-(launcher/gqa_attention_prefill.cu). The probe below compiles those functions' own text, cut out of the sources,
-against the real registry header and the fork header, with host stubs for the dtype enum and the block mask, and
-runs it with the switch unset, off and on. So these tests check the routing production compiles, not a copy of it:
-the registry carries the shapes, the switch off leaves every shape on the route it took before (the new ones on the
-generic kernel and the KV geometry's prompt dispatch), on sends a BF16 or e4m3 cache to the registered kernels and
-keeps int8 on the generic kernel, and no other shape moves. The GPU half (kernels, numerics, speed) is
+(launcher/gqa_attention_prefill.cu); acceptance by the wrapper's KV checks, of which supported_attention_shape and
+require_kv_heads are cut out here (validate_cache and validate_batch_cache carry the same two-term check, pinned by
+text). The probe below compiles those functions' own text, cut out of the sources, against the real registry header
+and the fork header, with host stubs for the dtype enum and the block mask, and runs it with the switch unset, off and
+on. So these tests check the routing production compiles, not a copy of it: the registry carries the shapes, the
+switch off leaves every shape as it was before (32q8 and 40q8 on the generic kernel and the KV geometry's prompt
+dispatch, the multi-head shape refused because its KV pair is withheld), on accepts the multi-head shape, sends a
+BF16 or e4m3 cache to the registered kernels and keeps int8 on the generic kernel, and no other shape moves. The GPU half (kernels, numerics, speed) is
 sinfer_gqa_fork_shapes_test (fork/native/tests/test-fork-gqa-shapes.cpp), upstream's sinfer_gqa_attention_test run
 with the switch on as well, and the bench in fork/docs/performance.md; the last tests here pin their wiring.
 """
@@ -37,6 +39,7 @@ FORK_CMAKE = REPO / "fork/native/cmake/fork_native.cmake"
 CSRC_CMAKE = REPO / "csrc/CMakeLists.txt"
 LEDGER = REPO / "fork/patches/ledger.toml"
 PERFORMANCE = REPO / "fork/docs/performance.md"
+UPSTREAM_TEST = REPO / "csrc/src/testing/serve/ops/test_gqa_attention.cpp"
 SWITCH = "SUROGATE_SERVE_GQA_FORK_SHAPES"
 
 FORK_SHAPES = {"Gqa128_32q8": (128, 32, 8), "Gqa128_40q8": (128, 40, 8), "Gqa128_32q32": (128, 32, 32)}
@@ -45,6 +48,11 @@ DTYPES = ("BF16", "FP8_E4M3FN", "I8")
 #: the one int8 exception upstream makes), and unregistered query groups over registered KV counts.
 UPSTREAM_REGISTERED = [(128, 16, 8), (128, 32, 4), (128, 32, 16), (128, 16, 2), (64, 32, 8), (256, 8, 4), (256, 24, 4)]
 UNREGISTERED = [(128, 28, 4), (128, 64, 8), (128, 24, 8), (256, 12, 4), (64, 16, 8)]
+#: Shapes no registered shape serves at all: refused whatever the switch says.
+REFUSED = [(96, 16, 8), (128, 32, 6)]
+#: An unregistered query group over the KV pair only the fork's multi-head shape carries: it follows that pair's
+#: acceptance (refused with the switch off, the generic route with it on).
+FORK_KV_PAIR = [(128, 64, 32)]
 
 
 def definition(path: Path, signature: str) -> str:
@@ -71,9 +79,11 @@ def probe_source() -> str:
     assert quant, "gqa_attention_kv_quant.cuh: no kGqaKvQuantGroup"
     serves = definition(GENERIC, r"bool gqa_generic_attention_serves\(")
     dispatch = definition(PREFILL, r"template <typename Visitor>\s*void dispatch_prompt_geometry\(")
+    supported = definition(WRAPPER, r"bool supported_attention_shape\(")
+    require_kv = definition(WRAPPER, r"void require_kv_heads\(")
     optimized = definition(WRAPPER, r"bool optimized_decode_shape\(")
     generic = definition(WRAPPER, r"bool generic_takes\(")
-    shapes = UPSTREAM_REGISTERED + UNREGISTERED + list(FORK_SHAPES.values())
+    shapes = UPSTREAM_REGISTERED + UNREGISTERED + REFUSED + FORK_KV_PAIR + list(FORK_SHAPES.values())
     rows = ", ".join("{%d, %d, %d}" % shape for shape in shapes)
     return f"""
 // Host stand-ins for the CUDA qualifiers the registry header puts on one device helper.
@@ -82,6 +92,8 @@ def probe_source() -> str:
 #include "ops/kernel/gqa_attention_geometry.cuh"
 #include "surogate_fork/gqa_fork_shapes.h"
 #include <cstdio>
+#include <stdexcept>
+#include <string>
 
 namespace sinfer {{
 enum class DType {{ BF16, FP8_E4M3FN, I8 }};
@@ -97,8 +109,19 @@ namespace detail {{
 {serves}
 {dispatch}
 }} // namespace detail
+{supported}
+{require_kv}
 {optimized}
 {generic}
+
+bool kv_accepted(int dim, int kv) {{
+    try {{
+        require_kv_heads(dim, kv, "probe");
+        return true;
+    }} catch (const std::invalid_argument&) {{
+        return false;
+    }}
+}}
 
 int run() {{
 #define SINFER_PROBE_REGISTERED(Name) \\
@@ -117,13 +140,17 @@ int run() {{
     for (const auto& s : shapes) {{
         for (int d = 0; d < 3; ++d) {{
             int prompt[3] = {{0, 0, 0}};
-            detail::dispatch_prompt_geometry(s[0], s[1], s[2], dtypes[d], [&]<typename G>() {{
-                prompt[0] = G::HeadDim;
-                prompt[1] = G::QHeads;
-                prompt[2] = G::KVHeads;
-            }});
-            std::printf("route %d %d %d %s registered=%d optimized=%d generic=%d prompt=%d,%d,%d\\n", s[0], s[1],
-                        s[2], names[d], gqa_shape_is_registered(s[0], s[1], s[2]) ? 1 : 0,
+            if (gqa_kv_shape_is_registered(s[0], s[2])) {{
+                detail::dispatch_prompt_geometry(s[0], s[1], s[2], dtypes[d], [&]<typename G>() {{
+                    prompt[0] = G::HeadDim;
+                    prompt[1] = G::QHeads;
+                    prompt[2] = G::KVHeads;
+                }});
+            }}
+            std::printf("route %d %d %d %s registered=%d accepted=%d kv_accepted=%d optimized=%d generic=%d "
+                        "prompt=%d,%d,%d\\n", s[0], s[1], s[2], names[d],
+                        gqa_shape_is_registered(s[0], s[1], s[2]) ? 1 : 0,
+                        supported_attention_shape(s[0], s[1], s[2]) ? 1 : 0, kv_accepted(s[0], s[2]) ? 1 : 0,
                         optimized_decode_shape(s[0], s[1], s[2], dtypes[d]) ? 1 : 0,
                         generic_takes(s[0], s[1], s[2], dtypes[d], {{}}) ? 1 : 0, prompt[0], prompt[1], prompt[2]);
         }}
@@ -171,6 +198,8 @@ def routes(lines: list[str]) -> dict[tuple[int, int, int, str], dict[str, object
         values = dict(field.split("=") for field in fields)
         table[(int(dim), int(q), int(kv), dtype)] = {
             "registered": values["registered"] == "1",
+            "accepted": values["accepted"] == "1",
+            "kv_accepted": values["kv_accepted"] == "1",
             "optimized": values["optimized"] == "1",
             "generic": values["generic"] == "1",
             "prompt": tuple(int(x) for x in values["prompt"].split(",")),
@@ -199,10 +228,19 @@ def test_with_the_switch_off_the_fork_shapes_keep_their_old_routes(probe, switch
         for dtype in DTYPES:
             row = table[(dim, q, kv, dtype)]
             assert row["registered"]
+            if kv == 32:
+                # The multi-head shape is refused, as before registration: only the fork's line carries (128, 32).
+                assert not row["accepted"] and not row["kv_accepted"], (dim, q, kv, dtype, row)
+                continue
+            assert row["accepted"] and row["kv_accepted"], (dim, q, kv, dtype, row)
             # As an unregistered query group: no small-T kernel, the generic split-KV kernel for decode and narrow
             # prompts, and wide prompts on the prompt kernel of the first shape registered for the KV count.
             assert not row["optimized"] and row["generic"], (dim, q, kv, dtype, row)
-            assert row["prompt"] == ((128, 16, 8) if kv == 8 else (128, 32, 32)), (dim, q, kv, dtype, row)
+            assert row["prompt"] == (128, 16, 8), (dim, q, kv, dtype, row)
+    for shape in FORK_KV_PAIR:
+        for dtype in DTYPES:
+            row = table[(*shape, dtype)]
+            assert not row["accepted"] and not row["kv_accepted"], (shape, dtype, row)
 
 
 def test_with_the_switch_on_bf16_and_e4m3_take_the_registered_route_and_int8_does_not(probe):
@@ -210,6 +248,9 @@ def test_with_the_switch_on_bf16_and_e4m3_take_the_registered_route_and_int8_doe
     assert "enabled 1" in lines
     table = routes(lines)
     for dim, q, kv in FORK_SHAPES.values():
+        for dtype in DTYPES:
+            row = table[(dim, q, kv, dtype)]
+            assert row["accepted"] and row["kv_accepted"], (dim, q, kv, dtype, row)
         for dtype in ("BF16", "FP8_E4M3FN"):
             row = table[(dim, q, kv, dtype)]
             assert row["optimized"] and not row["generic"], (dim, q, kv, dtype, row)
@@ -218,11 +259,17 @@ def test_with_the_switch_on_bf16_and_e4m3_take_the_registered_route_and_int8_doe
         row = table[(dim, q, kv, "I8")]
         assert not row["optimized"] and row["generic"], (dim, q, kv, "I8", row)
         assert row["prompt"] == ((128, 16, 8) if kv == 8 else (128, 32, 32)), (dim, q, kv, "I8", row)
+    # Any other query group over the multi-head shape's KV pair is accepted with it, as an unregistered group.
+    for shape in FORK_KV_PAIR:
+        for dtype in DTYPES:
+            row = table[(*shape, dtype)]
+            assert row["accepted"] and row["kv_accepted"] and not row["optimized"] and row["generic"], (shape, row)
+            assert row["prompt"] == (128, 32, 32), (shape, dtype, row)
 
 
 def test_the_switch_moves_no_other_shape(probe):
     off, on = routes(run_probe(probe, None)), routes(run_probe(probe, "1"))
-    others = UPSTREAM_REGISTERED + UNREGISTERED
+    others = UPSTREAM_REGISTERED + UNREGISTERED + REFUSED
     for dim, q, kv in others:
         for dtype in DTYPES:
             assert off[(dim, q, kv, dtype)] == on[(dim, q, kv, dtype)], (dim, q, kv, dtype)
@@ -230,12 +277,18 @@ def test_the_switch_moves_no_other_shape(probe):
         for dtype in DTYPES:
             row = off[(dim, q, kv, dtype)]
             int8_prompt_kernel = (dim, q, kv, dtype) == (256, 8, 4, "I8")  # upstream's own exception
-            assert row["registered"] and row["optimized"] is not int8_prompt_kernel and not row["generic"]
+            assert row["registered"] and row["accepted"] and row["kv_accepted"]
+            assert row["optimized"] is not int8_prompt_kernel and not row["generic"]
             assert row["prompt"] == (dim, q, kv)
     for dim, q, kv in UNREGISTERED:
         for dtype in DTYPES:
             row = off[(dim, q, kv, dtype)]
+            assert row["accepted"] and row["kv_accepted"], (dim, q, kv, dtype)
             assert not row["registered"] and not row["optimized"] and row["generic"], (dim, q, kv, dtype)
+    for dim, q, kv in REFUSED:
+        for dtype in DTYPES:
+            row = off[(dim, q, kv, dtype)]
+            assert not row["registered"] and not row["accepted"] and not row["kv_accepted"], (dim, q, kv, dtype)
 
 
 def decode_units() -> dict[str, Path]:
@@ -291,6 +344,30 @@ def test_the_three_routing_points_read_the_fork_switch():
     assert prefill.count("gqa_shape_is_registered(") == 1, "the prompt launcher gained a registry check: route it too"
 
 
+def test_every_kv_acceptance_check_withholds_the_fork_pair():
+    """The wrapper's four KV acceptance checks each pair the registry's answer with the fork's withholding."""
+    wrapper = " ".join(WRAPPER.read_text(encoding="utf-8").split())
+    assert wrapper.count("gqa_kv_shape_is_registered(") == 4, "the wrapper gained a KV acceptance check: gate it too"
+    assert "gqa_kv_shape_is_registered(dim, kv) && !surogate_fork::gqa_fork_kv_pair_withheld(dim, kv)" in " ".join(
+        definition(WRAPPER, r"bool supported_attention_shape\(").split()
+    )
+    gated = "!gqa_kv_shape_is_registered(head_dim, kv_heads) || surogate_fork::gqa_fork_kv_pair_withheld(head_dim, kv_heads)"
+    assert gated in " ".join(definition(WRAPPER, r"void require_kv_heads\(").split())
+    for signature in (r"std::uint32_t validate_cache\(", r"std::uint32_t validate_batch_cache\("):
+        body = " ".join(definition(WRAPPER, signature).split())
+        assert f"cache.num_kv_heads != kv_heads || {gated})" in body, signature
+    # Upstream's registration contract demands that every registered shape be accepted; it exempts the withheld pair.
+    harness = UPSTREAM_TEST.read_text(encoding="utf-8")
+    assert '#include "surogate_fork/gqa_fork_shapes.h"' in harness
+    contract = " ".join(definition(UPSTREAM_TEST, r"int verify_geometry_registration_contract\(").split())
+    assert (
+        "if (!accepted(ops::Name::HeadDim, ops::Name::QHeads, ops::Name::KVHeads) && "
+        "\\ !surogate_fork::gqa_fork_kv_pair_withheld(ops::Name::HeadDim, ops::Name::KVHeads)) {"
+    ) in contract
+    hook = re.search(r"function\(_surogate_fork_attach_serve\)(.*?)endfunction\(\)", FORK_CMAKE.read_text(encoding="utf-8"), re.S)
+    assert hook and 'target_include_directories(sinfer_gqa_attention_test PRIVATE "${SUROGATE_FORK_NATIVE_DIR}/include")' in hook.group(1)
+
+
 def test_ctest_runs_the_gpu_cases_with_the_switch_off_and_on():
     hook = re.search(r"function\(_surogate_fork_attach_serve\)(.*?)endfunction\(\)", FORK_CMAKE.read_text(encoding="utf-8"), re.S)
     assert hook, "fork_native.cmake: no _surogate_fork_attach_serve()"
@@ -306,8 +383,12 @@ def test_ctest_runs_the_gpu_cases_with_the_switch_off_and_on():
     assert "add_dependencies(serve-tests sinfer_gqa_fork_shapes_test)" in cmake
     gpu = (REPO / "fork/native/tests/test-fork-gqa-shapes.cpp").read_text(encoding="utf-8")
     assert '#define main sinfer_gqa_attention_test_main\n#include "ops/test_gqa_attention.cpp"' in gpu
+    main = " ".join(definition(REPO / "fork/native/tests/test-fork-gqa-shapes.cpp", r"int main\(").split())
     for dim, q, kv in FORK_SHAPES.values():
-        assert re.search(rf'run_fork_shape\(Geometry\{{"\w+", {q}, {kv}, {dim}\}}', gpu), (dim, q, kv)
+        assert re.search(rf'Shape\{{Geometry\{{"\w+", {q}, {kv}, {dim}\}}', main), (dim, q, kv)
+    for call in ("verify_fork_kv_pair_refused(geometry)", "run_fork_shape(geometry, shape.seed)",
+                 "verify_fork_shape_fp8_against_reference(geometry,", "verify_fork_shape_packed_prompts(geometry)"):
+        assert call in main, call
 
 
 def test_the_switch_and_its_gpu_checks_are_documented():

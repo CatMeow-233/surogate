@@ -617,7 +617,7 @@ conflict_history = [
 id = "T16"
 title = "serve: register the 128-wide 32q8, 40q8 and MHA 32q32 GQA shapes"
 commits = ["45bf39b7"]
-switch = "SUROGATE_SERVE_GQA_FORK_SHAPES=1 (default off: the shapes keep the routes they took before registration; int8 KV keeps them with the switch on)"
+switch = "SUROGATE_SERVE_GQA_FORK_SHAPES=1 (default off: 32q8/40q8 keep their pre-registration routes and 128/32q32 is refused as before, its KV pair withheld; on, 32q32 is served; int8 KV keeps the generic route with the switch on)"
 # Roadmap serve R1. Qwen3-4B/8B, Llama-3-8B, Mistral-7B (128/32q8) and Qwen3-14B (128/40q8) decode, verify and
 # 7-63-column prompt segments ran on the CUDA-core generic split-KV kernel (gqa_attention_generic.cu) on every GPU
 # but Hopper: one CTA per (column, query head, split), so a KV head's keys are read once per query head; FP32 FMAs.
@@ -633,6 +633,15 @@ switch = "SUROGATE_SERVE_GQA_FORK_SHAPES=1 (default off: the shapes keep the rou
 # KV-geometry prompt dispatch, no packed prompts. With it on, BF16 and e4m3 caches take the small-T tensor-core
 # kernels, chunked small-T and prompt tiles, and pack prompts (gqa_attention_packs_prompt). An int8 cache stays on the
 # generic route either way: kGqaI8DecodeRegistered is 256-wide only, so the small-T launcher would throw.
+# Acceptance: X(Gqa128_32q32) makes (128, 32 KV heads) a registered KV pair, which upstream's KV acceptance
+# (gqa_kv_shape_is_registered) would accept for any query group. surogate_fork::gqa_fork_kv_pair_withheld refuses a
+# pair only fork lines carry (derived from the registry, so an upstream shape over the same pair is never refused)
+# while the switch is off; the wrapper's four KV checks (supported_attention_shape, which also gates the workspace
+# plans and gqa_attention_packs_prompt; require_kv_heads; validate_cache; validate_batch_cache) pair the registry's
+# answer with it, so with the switch off a 128-wide MHA model is refused at its workspace plan exactly as before.
+# Upstream's verify_geometry_registration_contract (test_gqa_attention.cpp) demands that every registered shape be
+# accepted; it exempts the withheld pair (one condition; the test includes the fork header, whose directory
+# _surogate_fork_attach_serve adds to sinfer_gqa_attention_test).
 # Output bits change with the switch on (P rounded to BF16 before P V; the generic kernel keeps FP32); the fixed key
 # partitions keep batch invariance. Build time: every X() line also instantiates the prefill kernels
 # (gqa_attention_prefill.cu) and the decode dispatch for the shape. GPU tests: sinfer_gqa_fork_shapes_test
@@ -648,6 +657,7 @@ files = [
     "csrc/src/serve/ops/kernel/gqa_attention_geometry.cuh",
     "csrc/src/serve/ops/wrapper/gqa_attention.cpp",
     "csrc/src/serve/ops/launcher/gqa_attention_prefill.cu",
+    "csrc/src/testing/serve/ops/test_gqa_attention.cpp",
 ]
 fork_files = [
     "fork/native/cmake/fork_native.cmake",   # _surogate_fork_attach_serve (shared with T3, T5, T10)
@@ -665,6 +675,7 @@ tests = [
 ]
 conflict_history = [
     "2026-10-31 reverse replay of the T16 hunks from 282f9901, conflict blocks at 90/30/14 days: all three files absent 90 days back; gqa_attention_geometry.cuh 0/0, gqa_attention_prefill.cu 0/0, gqa_attention.cpp 1/0 (at 30 days upstream had not yet written the FA3 and generic-route functions around generic_takes, cc33da57..c3019cf1)",
+    "2026-10-31 after the KV-pair withholding (wrapper's four KV checks, test_gqa_attention.cpp's contract and include), same replay against d5005633 (30 days) and 3be7659e (14 days): gqa_attention.cpp 1/0 (the same generic_takes block), test_gqa_attention.cpp 0/0 (absent 90 days back), the other two unchanged",
 ]
 
 [[topic]]
