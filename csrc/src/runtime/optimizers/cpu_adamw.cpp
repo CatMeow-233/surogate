@@ -18,6 +18,8 @@
 // Fork ledger T5: each region's team fits the calling thread's CPU mask, small loops run serially, and the norm
 // sums in an order that does not depend on the team size.
 #include "surogate_fork/omp_team.h"
+// Fork ledger T15: SUROGATE_FORK_CPU_ADAMW_SIMD=1 runs each step's loop vectorized, with the same bits.
+#include "surogate_fork/cpu_step_kernels.h"
 
 namespace optimizers {
 
@@ -36,6 +38,10 @@ void cpu_adamw_step(float* __restrict__ p,
     const float bc1 = 1.0f - std::pow(beta1, static_cast<float>(step));
     const float bc2 = 1.0f - std::pow(beta2, static_cast<float>(step));
     const float wd_factor = 1.0f - lr * weight_decay;
+    if (surogate_fork::cpu_adamw_simd_enabled()) {
+        surogate_fork::adamw_step_f32(p, g, m, v, n, {lr, beta1, beta2, bc1, bc2, eps, wd_factor, grad_scale});
+        return;
+    }
 
     const surogate_fork::OmpTeam team(n);
 #pragma omp parallel for schedule(static) num_threads(team.threads) if (team.threads > 1)
@@ -65,6 +71,15 @@ void cpu_adamw_step_bf16(float* __restrict__ p,
     const float bc1 = 1.0f - std::pow(beta1, static_cast<float>(step));
     const float bc2 = 1.0f - std::pow(beta2, static_cast<float>(step));
     const float wd_factor = 1.0f - lr * weight_decay;
+    if (surogate_fork::cpu_adamw_simd_enabled()) {
+        surogate_fork::adamw_step_bf16_grad(p,
+                                            grad_bf16,
+                                            m,
+                                            v,
+                                            n,
+                                            {lr, beta1, beta2, bc1, bc2, eps, wd_factor, grad_scale});
+        return;
+    }
 
     const surogate_fork::OmpTeam team(n);
 #pragma omp parallel for schedule(static) num_threads(team.threads) if (team.threads > 1)
@@ -95,6 +110,15 @@ void cpu_adamw_step_bf16_param(void* param_bf16,
     const float bc1 = 1.0f - std::pow(beta1, static_cast<float>(step));
     const float bc2 = 1.0f - std::pow(beta2, static_cast<float>(step));
     const float wd_factor = 1.0f - lr * weight_decay;
+    if (surogate_fork::cpu_adamw_simd_enabled()) {
+        surogate_fork::adamw_step_bf16_param(param_bf16,
+                                             grad_bf16,
+                                             m,
+                                             v,
+                                             n,
+                                             {lr, beta1, beta2, bc1, bc2, eps, wd_factor, grad_scale});
+        return;
+    }
 
     const surogate_fork::OmpTeam team(n);
 #pragma omp parallel for schedule(static) num_threads(team.threads) if (team.threads > 1)

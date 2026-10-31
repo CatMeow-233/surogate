@@ -9,7 +9,9 @@
 //      thread exits or once it has been idle for longer than its sharing window (twice its longest idle interval,
 //      at least the minimum window), so a rank thread still counts between two optimizer steps;
 //   4. ordered_block_sum gives the same bits for every team size, equal to the serial block order, and equal to
-//      the plain left-to-right sum up to one block.
+//      the plain left-to-right sum up to one block;
+//   5. the members of a serial group (a rank thread and the host functions it enqueues, ledger T14) do not count
+//      each other as sharers, and count once, together, for a caller outside the group.
 // Checks that need more CPUs than the process may use are reported as skipped, and the others still run.
 
 #include <algorithm>
@@ -226,6 +228,40 @@ void check_sharing_window() {
     fork_slot_destroy(10);
 }
 
+// Serial groups with synthetic masks and clocks: slots 20/21 are a rank thread and its host-function thread
+// (group A), 22 another rank's thread (group B, two members 22/23), 24 a caller in no group.
+void check_serial_groups() {
+    const cpu_set_t low = mask_of({0, 1, 2, 3});
+    const long long t = 3'000'000'000'000;
+    const int group_a = 0, group_b = 0;                   // only their addresses matter
+    int got = fork_slot_enter(20, low, t, 64, &group_a);  // the rank thread's optimizer region
+    expect(got == 4, "a group member alone gets its mask", got, 4);
+    fork_slot_leave(20, t + 1);
+    got = fork_slot_enter(21, low, t + 2, 64, &group_a);  // its host function, right after
+    expect(got == 4, "a member of the same serial group does not halve the team", got, 4);
+    fork_slot_leave(21, t + 3);
+    got = fork_slot_enter(20, low, t + 4, 64, &group_a);
+    expect(got == 4, "nor does the host function halve the rank thread's next team", got, 4);
+    fork_slot_leave(20, t + 5);
+    got = fork_slot_enter(21, low, t + 6, 64, nullptr);  // the same thread outside the group counts again
+    expect(got == 2, "without the group key the two count as two callers", got, 2);
+    fork_slot_leave(21, t + 7);
+    got = fork_slot_enter(21, low, t + 8, 64, &group_a);
+    expect(got == 4, "the key is the region's, not the thread's", got, 4);
+    fork_slot_leave(21, t + 9);
+    got = fork_slot_enter(22, low, t + 10, 64, &group_b);
+    expect(got == 2, "another group's caller counts group A once", got, 2);
+    fork_slot_leave(22, t + 11);
+    got = fork_slot_enter(23, low, t + 12, 64, &group_b);
+    expect(got == 2, "two groups of two members split the CPUs in two", got, 2);
+    fork_slot_leave(23, t + 13);
+    got = fork_slot_enter(24, low, t + 14, 64, nullptr);
+    expect(got == 1, "a caller in no group counts each group once and itself", got, 1);
+    fork_slot_leave(24, t + 15);
+    for (int id : {20, 21, 22, 23, 24})
+        fork_slot_destroy(id);
+}
+
 std::vector<float> wide_range(std::size_t n) {
     std::vector<float> d(n);
     for (std::size_t i = 0; i < n; ++i) {
@@ -307,6 +343,7 @@ int main() {
     const std::size_t big = 4 * fork_omp_min_parallel_elems();
     check_sharing_rule();
     check_sharing_window();
+    check_serial_groups();
     check_threshold(big);
     check_pinned(cpus, big, max_threads);
     check_threads_sharing(cpus, big, max_threads);

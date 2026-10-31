@@ -7,7 +7,7 @@
 | [避免冗余工作与交接](#避免冗余工作与交接) | T1、T3、T4、T6、T7、T8、T19 |
 | [不能捕获的整步只预热一次](#不能捕获的整步只预热一次) | T20 |
 | [CPU 优化器并行](#cpu-优化器并行) | T5 |
-| [cpu_training 主机端步](#cpu_training-主机端步) | T13 |
+| [cpu_training 主机端步](#cpu_training-主机端步) | T13、T14、T15 |
 | [LoRA 融合输入梯度](#lora-融合输入梯度) | T2 |
 | [GRPO 周期计时](#grpo-周期计时) | T6 |
 | [cpu_training 的 AdamW 状态 checkpoint](#cpu_training-的-adamw-状态-checkpoint) | T21 |
@@ -76,7 +76,7 @@ ledger T20：`has_capture_unsafe_ops()` 在第一次 warmup 之前就已知（gr
 因此 `cpu_adamw.cpp` 的每个并行区都由 `fork/native/include/surogate_fork/omp_team.h` 的 `OmpTeam` 决定线程数（ledger T5）：
 
 - 元素数少于 `kOmpMinParallelElems` = 65536 时用 1 个线程：并行区的 `if` 子句为假，循环在调用线程上执行。
-- 否则用调用线程当前掩码中的 CPU 数（每次进入这样的并行区都重新读取，一次 `sched_getaffinity` 系统调用），除以掩码与它重叠、且正在并行区中或离开并行区还不超过自己共享窗口的调用线程数（含它自己），至少 1，至多 `omp_get_max_threads()`。一个调用线程的共享窗口是它两次并行区之间最长空闲间隔的 2 倍，至少 1 秒（`kOmpSharerGapFactor`、`kOmpSharerWindowNs`）。
+- 否则用调用线程当前掩码中的 CPU 数（每次进入这样的并行区都重新读取，一次 `sched_getaffinity` 系统调用），除以掩码与它重叠、且正在并行区中或离开并行区还不超过自己共享窗口的调用线程数（含它自己），至少 1，至多 `omp_get_max_threads()`。一个调用线程的共享窗口是它两次并行区之间最长空闲间隔的 2 倍，至少 1 秒（`kOmpSharerGapFactor`、`kOmpSharerWindowNs`）。同一个 serial group 中的调用线程（rank 线程与它排队的主机函数，ledger T14，见[主机梯度加法](#主机梯度加法t14)）合起来只算一个。
 
 team 因而不超过调用线程掩码中的 CPU 数；同一组 CPU 上的几个 rank 平分这些 CPU，绑在不相交 CPU 上的 rank 互不影响。rank 线程两步之间的空闲是一次前向/反向加梯度卸载，它的共享窗口随之变长，所以从第 3 步起，无论前向/反向多长，同一组 CPU 上的 rank 在步与步之间仍互相计入。前两步例外：第 1 步时各 rank 还没有登记，第 2 步时它们还没有步间间隔可参考，窗口只有 1 秒；前向/反向超过 1 秒时，这一步最先进入的 rank 在其他 rank 的第一个并行区之前用满整组 CPU。之后某次步间空闲超过此前最长间隔的 2 倍时（例如中途保存 checkpoint），那一步也是如此。用满整组 CPU 时，libgomp 为该 rank 创建的 worker 在并行区结束后先空转一段时间（`GOMP_SPINCOUNT`）再睡眠；每个 rank 只分到 1 个 CPU 时，它与其他 rank 争用 CPU（见下文 R=2 共用 2 个 CPU 的几行）。线程退出时注销；只连续调用过几次优化器就停下的线程（例如 Python 线程通过 `AsyncStaleAdamW` 调试接口以 `overlap=False` 运行）空闲 1 秒后不再计入，不会长期占用份额。
 
@@ -151,14 +151,106 @@ team 因而不超过调用线程掩码中的 CPU 数；同一组 CPU 上的几�
 | 改动 | ledger | 开关 | 数值 |
 |---|---|---|---|
 | 删去 micro-step 0 对每个主机梯度的 memset | T13 | 始终开启（去掉的是冗余工作） | 主机梯度逐字节相同 |
+| 主机梯度加法向量化，并在 `OmpTeam` 的 team 上并行 | T14 | `SUROGATE_FORK_HOST_GRAD_ACCUM=1` | BF16 逐位相同；FP32 除 NaN 的 payload 外逐位相同 |
+| 块梯度的 D2H 与主机加法移到 grad store 自己的 stream | T14 | `SUROGATE_FORK_GRAD_D2H_STREAM=1` | 不改变数值，只改变排队的 stream |
+| CPU AdamW 向量化 | T15 | `SUROGATE_FORK_CPU_ADAMW_SIMD=1` | 除 NaN 的 payload 外逐位相同 |
+
+T14、T15 的开关默认关闭，关闭时行为与上游相同；进程中第一次用到时读取一次环境变量，只有值恰好为 `1` 时开启。
 
 ### 步开始的清零（T13）
 
-上游在 `DslGradStore::start_micro_step(0)` 中、micro-step 0 的反向排队之前，在 rank 线程上逐个 `std::memset` 全部主机梯度：Qwen3-8B 是 16.4 GB，桌面 CPU 的单核约 0.55–0.8 s；本机单线程 memset 约 8.6 GB/s（Llama 形状的 356 MB 用 41.5 ms），16.4 GB 约 1.9 s。这段时间里 rank 线程不排队反向，只有已经排队的前向能遮住它。而 micro-step 0 的 D2H（块梯度的 `offload_layer_grads`、其余梯度的 `offload_non_block_grads`）在任何读取之前就整块覆盖了这些缓冲。
+上游在 `DslGradStore::start_micro_step(0)` 中、micro-step 0 的反向排队之前，在 rank 线程上逐个 `std::memset` 全部主机梯度：Qwen3-8B 是 16.4 GB，桌面 CPU 的单核约 0.55–0.8 s；本机单线程 memset 约 8.5 GB/s（见下文测量），16.4 GB 约 1.9 s。这段时间里 rank 线程不排队反向，只有已经排队的前向能遮住它。而 micro-step 0 的 D2H（块梯度的 `offload_layer_grads`、其余梯度的 `offload_non_block_grads`）在任何读取之前就整块覆盖了这些缓冲。
 
 `fork/native/include/surogate_fork/host_grad_overwrites.h` 的 `HostGradOverwrites` 在排队每次这样的拷贝时记下它覆盖的缓冲；`zero_rest()` 每步至多一次，只清零没有被覆盖的缓冲，调用点在第一个读者之前：micro-step 1 起的 `start_micro_step`，以及只有一个 micro-step 时的 `wait_all_offloads`。全参微调中没有这样的缓冲；没有设备存储的非块梯度、或某层在 micro-step 0 没有卸载时才会有。主机梯度因此与 memset 路径逐字节相同：被覆盖的缓冲两种做法都是拷贝来的字节，其余缓冲两种做法在第一次被读之前都是零。清零不会与 GPU 竞争：拷进这些缓冲的 D2H 一次也没有排队（排队就会被记下），读它们的主机函数和优化器都在清零之后才排队或运行。主机梯度唯一的读者是 `step_cpu_streaming`，它在 `wait_all_offloads` 之后读；源码 pin `fork/patches/tests/native/test_cpu_step_hooks.py` 检查这一点，以及 grad store 中写入主机梯度的三处拷贝。`fork/dev test openmp` 中的 `cpu-step-contract` 在随机的 GA（1–4）、覆盖缺口、共用的 tied 缓冲和没有设备拷贝的缓冲上重放这个协议，与 memset 路径逐字节比较。
 
-尚未在 GPU 上验证：GPU 上的行为按构造不变（只少了主机上的 memset），`dsl_grad_store.cpp` 只在 sm_120a 的编译命令下编译检查过。在 RTX 5090 主机上，用 `examples/training/cpu-offload.yaml` 改为 `model: Qwen/Qwen3-8B`、`max_steps: 20`，在本分支和它的父提交上各运行一次 `surogate sft`：每步记录的 loss 与梯度范数应逐位相同（先用父提交连跑两次，确认这个配置本身可复现）；`step_seconds` 应减少，至多减少 memset 的时间（16.4 GB 除以主机单核的 memset 带宽），实际减少量取决于已排队的前向遮住了多少。
+### 主机梯度加法（T14）
+
+GA>1 时，从 micro-step 1 起，每层梯度先 D2H 到所有层共用的暂存缓冲，再由 `cudaLaunchHostFunc` 排队的主机函数 `accumulate_staged_layer` 加到主机梯度上。上游是单线程的标量循环，在执行器传入的 copy stream（`side_stream`）上占住这条 stream 直到返回；同一条 stream 还承载 `gather_block` 的权重预取和残差的取回。GPU 梯度槽只有 2 个，所以反向大约每层要等一次主机加法加一次 H2D。
+
+- `SUROGATE_FORK_HOST_GRAD_ACCUM=1`：主机函数改为调用 `fork/native/src/cpu_step_kernels.cpp` 的 `host_grad_add_bf16`/`host_grad_add_f32`：表达式与上游相同，BF16 舍入改为不含分支的位运算（就近舍入到偶数，NaN 一律为 `0x7fff`，与 `cuda_bf16.hpp` 的主机实现相同），循环向量化（`target_clones`：x86-64-v4、AVX2、基线），每个张量一个 `OmpTeam` 并行区（少于 65536 个元素时串行）。
+- 线程数：主机函数在 CUDA 的回调线程上运行，与 rank 线程是两个调用线程。按上节的规则，它们在共享窗口内互相计入，各自只得到一半 CPU，而它们从不同时运行（rank 线程在 `wait_all_offloads` 等完所有主机函数之后才执行优化器）。`omp_team.h` 因此增加了 serial group：开关打开时，`start_micro_step` 用 `set_omp_serial_group(this)` 把 rank 线程放进以 grad store 地址为键的组，每个 `HostAccumTask` 带着同一个键，主机函数用 `OmpTeam(n, key)`。同组的调用线程互不计入；组外的调用线程（例如另一个 rank）把整个组算作一个。team 线程继承回调线程的 CPU 掩码，team 大小按回调线程自己的掩码计算；回调线程的掩码由 CUDA 驱动决定，没有验证。
+- `SUROGATE_FORK_GRAD_D2H_STREAM=1`：`create_streaming_events` 另建一条 stream（与 `side_stream` 一样用 `cudaStreamCreate`），`offload_layer_grads` 把块梯度的 D2H、`d2h_done`、主机函数和 `accum_done` 都排在这条 stream 上，不再排在调用方传入的 copy stream 上，权重预取和残差取回不再排在主机函数之后。顺序仍由事件保证（`compute_done`、`reduce_done`、`d2h_done`，以及 `wait_all_offloads` 等待的事件）；一步中所有拷贝与加法仍在同一条 stream 上，`start_micro_step` 每个 micro-step 清空待等事件列表依赖这一点。只换 stream 不够：`prepare_layer_grads(L)` 等第 L+2 层的 `d2h_done`，它排在第 L+3 层的主机函数之后，所以两个开关应一起打开。这条 stream 与槽的事件一样不会销毁（`DslGradStore` 没有析构函数）。
+- 没有做：把前向的残差写回（`compiled_ops.cpp`）也移到这条 stream（先要确认 5090 的 `asyncEngineCount`）；K 个暂存槽加专用累加线程（python-rl R2 的第二步）；GPU 上逐层的梯度范数（只在 GA=1 时成立）。主机加法每个元素至少 6 字节的内存流量（读两个 BF16、写一个），GA>1 时这一项不会消失；能用 GA=1 和更大 micro-batch 的配置（train-native #2）完全不走这条路径。
+
+### CPU AdamW（T15）
+
+`cpu_adamw.cpp` 的三个逐元素函数（`step_cpu_streaming` 对每个参数调用其中一个）都不向量化：`std::sqrt` 保留 errno；BF16 master 的循环中主机 `__float2bfloat16` 的舍入分支依赖被丢掉的低 16 位，更新后的权重让它频繁预测失败，本机单核上这个循环比 FP32 master 的慢约 4 倍（见下文）。`examples/training/cpu-offload.yaml` 没有设 `master_dtype`，用的正是 BF16 master。`SUROGATE_FORK_CPU_ADAMW_SIMD=1` 时，每个函数照旧算出 `bc1`、`bc2`、`wd_factor`，再调用 `cpu_step_kernels.cpp` 中对应的 `adamw_step_*`：同样的表达式与运算顺序，向量化，在调用线程的 `OmpTeam` team 上执行。源码 pin 比较 fork 循环与上游循环的表达式，上游改动 AdamW 的算术时 pin 失败，而不会悄悄分叉。用 8-bit CPU 状态替换这条路径（python-rl R19、train-native #9）是另一项工作，那时这条路径作为 FP32 状态的后备保留。
+
+### 数值
+
+- 每个元素由一个线程按上游的表达式计算，team 大小和分块不影响结果。`cpu_step_kernels.cpp` 单独使用 `-fno-math-errno`（让 `std::sqrt` 向量化；IEEE 的 sqrt 在各种宽度下都正确舍入）和 `-ffp-contract=off`（`fork/native/cmake/cpu_step_kernels.cmake`）。上游按 x86-64 基线 ISA 编译，没有 FMA；不加后者时 GCC 13 在 x86-64-v4 克隆中融合 57 处乘加，`cpu-step-contract` 的 AdamW 检查在本机全部失败。
+- BF16 结果与上游逐位相同：主机梯度加法在全部 2^32 个 BF16 操作数对上与上游的循环比较过（`step.sh`，带克隆的构建以及基线、AVX2、x86-64-v4 各一份不带克隆的构建）。FP32 结果除 NaN 的 payload 外逐位相同：两个 NaN 参与一次运算时返回哪一个没有规定（IEEE 754 不规定，GCC 也会交换 `+` 和 `*` 的操作数），向量化的循环可能保留另一个 NaN 的 payload。BF16 输出把所有 NaN 映射为 `0x7fff`，不受影响。
+- 浮点环境（例如 FTZ/DAZ）由各线程从创建它的线程继承，与上游的 OpenMP 区域相同。
+
+### 测量
+
+主机：与上节相同的 4 vCPU KVM 虚拟机（Intel Xeon，family 6 model 207，2.1 GHz，1 个 socket，无 SMT，L3 260 MB，16 GB 内存，有 AVX-512，运行时选中 x86-64-v4 克隆），没有 GPU。机器与其他会话共用：每行只在其余进程平均占用不超过 0.25 个 CPU 时计时，否则重测。作为参照（一次单独的测量，不在 `step.sh` 中），本机单线程 memset 约 8.5 GB/s，4 线程对 1 GiB 数组做 64 位整数加法（读两个数组、写一个）约 56 GB/s。代码：`step.sh` 从构建目录的 `compile_commands.json` 取出 `cpu_adamw.cpp` 与 `cpu_step_kernels.cpp` 的编译命令（GCC 13.3，`-O3 -fopenmp`，后者另加上述两个选项），链接进 `stepbench.cpp`；“上游”是 `cpu_adamw.cpp` 中开关关闭时的循环，以及 `stepbench.cpp` 中逐字复制的 `accumulate_staged_layer` 的 BF16 循环（源码 pin 检查两者一致）。负载：小模型与 `run.sh` 的 Llama 形状相同（L=8、h=896、im=4864、V=32000，1.78 亿个参数，其中块梯度 1.21 亿个元素）；8B 层是两个 Qwen3-8B 块（h=4096、im=12288，k/v 为 h×h/4，每层 1.93 亿个元素）。PIN 是 rank 线程（以及模拟回调线程的线程）掩码中的 CPU 数，即 team 的上限。每格是 3 轮的中位数，括号中是每个元素的耗时；所有行中 T14、T15 的结果与上游逐位相同（FNV 哈希一致）。
+
+步开始的清零（T13）：
+
+| 负载 | 主机梯度 | 上游 memset | T13 |
+|---|---:|---:|---:|
+| 小模型 | 356 MB | 43.0 ms（8.3 GB/s） | 2.7 µs |
+| 8B 层 | 772 MB | 84.7 ms（9.1 GB/s） | 1.1 µs |
+
+T13 在两种负载上都清零 0 字节（micro-step 0 的拷贝覆盖了所有缓冲），只剩登记的开销（几微秒）。按本机的速度，Qwen3-8B 的 16.4 GB 要约 1.9 s；在桌面 CPU 上约 0.55–0.8 s。
+
+micro-step 1 起的主机梯度加法，每层耗时（T14，`SUROGATE_FORK_HOST_GRAD_ACCUM=1`；上游的循环是单线程的，不随 PIN 变化）：
+
+| 负载 | PIN | 上游 | T14 | 加速 | T14 的内存流量 |
+|---|---:|---:|---:|---:|---:|
+| 小模型 | 1 | 18.1 ms（1.20 ns） | 7.6 ms（0.50 ns） | 2.4× | 11.9 GB/s |
+| 小模型 | 2 | 18.9 ms（1.26 ns） | 4.2 ms（0.28 ns） | 4.6× | 21.8 GB/s |
+| 小模型 | 4 | 19.1 ms（1.26 ns） | 2.7 ms（0.18 ns） | 7.1× | 33.8 GB/s |
+| 8B 层 | 1 | 250.1 ms（1.30 ns） | 95.5 ms（0.49 ns） | 2.6× | 12.1 GB/s |
+| 8B 层 | 2 | 252.2 ms（1.31 ns） | 53.7 ms（0.28 ns） | 4.7× | 21.6 GB/s |
+| 8B 层 | 4 | 242.2 ms（1.25 ns） | 29.1 ms（0.15 ns） | 8.3× | 39.8 GB/s |
+
+CPU AdamW 一整步（T15，`SUROGATE_FORK_CPU_ADAMW_SIMD=1`），小模型的全部 1.78 亿个参数，FP32 矩：
+
+| master | PIN | 上游 | T15 | 加速 | T15 的内存流量 |
+|---|---:|---:|---:|---:|---:|
+| BF16 | 1 | 3512 ms（19.73 ns） | 228 ms（1.28 ns） | 15.4× | 17.2 GB/s |
+| BF16 | 2 | 1806 ms（10.14 ns） | 115 ms（0.65 ns） | 15.7× | 34.1 GB/s |
+| BF16 | 4 | 972 ms（5.46 ns） | 64 ms（0.36 ns） | 15.1× | 61.0 GB/s |
+| FP32 | 1 | 851 ms（4.78 ns） | 242 ms（1.36 ns） | 3.5× | 20.6 GB/s |
+| FP32 | 2 | 450 ms（2.53 ns） | 129 ms（0.72 ns） | 3.5× | 38.7 GB/s |
+| FP32 | 4 | 243 ms（1.37 ns） | 75 ms（0.42 ns） | 3.2× | 66.2 GB/s |
+
+内存流量按每个元素的字节数计：加法 6 B（读两个 BF16、写一个），AdamW 的 BF16 master 22 B、FP32 master 28 B（读写 master、m、v，读梯度）。
+
+线程数与 serial group（`stepbench group`，PIN=0，即进程的全部 4 个 CPU）：一个常驻线程模拟 CUDA 回调线程，每步先做 3 个 micro-step 的主机加法（小模型的全部块梯度），rank 线程等它做完，再对全部参数运行一次 AdamW（BF16 master，T15 的 `adamw_step_bf16_param`，每 2^24 个元素一个并行区）；两者都按 `OmpTeam` 确定线程数。
+
+| serial group | 回调线程的 team | 3 个 micro-step 的加法 | rank 线程的 team | AdamW |
+|---|---:|---:|---:|---:|
+| 无 | 2 | 104.5 ms | 2 | 124.6 ms |
+| 有（以 grad store 为键） | 4 | 75.7 ms | 4 | 82.8 ms |
+
+没有 serial group 时，按上节的共享规则，两个从不同时运行的调用线程互相计入，各自只得到 2 个线程；有了它，两者都得到 4 个。
+
+逐位检查（`step.sh` 的最后一段）：带克隆的构建以及基线（`-march=x86-64`）、AVX2（`-mavx2`）、x86-64-v4（`-march=x86-64-v4`）三份不带克隆的构建，全部 4294967296 个 BF16 操作数对的加法结果都与上游的循环相同；AdamW 在小模型上开与不开 `SUROGATE_FORK_CPU_ADAMW_SIMD` 的哈希在四份构建中都相同。
+
+解读与限制：
+
+- 上游的两个循环受计算限制：加法单线程约 1.2 ns/元素，不随 PIN 变化（各格之间的差异是这台共用虚拟机的波动）；BF16 master 的 AdamW 单线程约 20 ns/元素，是 FP32 master 的约 4 倍，原因是舍入分支的预测失败。T15 在 4 个线程时达到约 61–66 GB/s，不低于上面的 4 线程流式参照（56 GB/s），即已受内存带宽限制；T14 的加法在 4 个线程时约 34–40 GB/s。桌面主机的核更快、内存带宽更高（双通道 DDR5 约 60–75 GB/s），上游循环在那里会快一些，但加法仍是单线程，BF16 master 的 AdamW 仍受分支预测失败拖累。
+- 换算到 Qwen3-8B（每层 1.93 亿个元素，GA=4）：本机上游的主机加法每层约 240–250 ms，T14 用 4 个线程约 29 ms；在 16 核、约 60 GB/s 的桌面主机上，6 B/元素的下限约 19 ms，低于每层约 26 ms 的反向，但只有在加法不再挡住权重预取（`SUROGATE_FORK_GRAD_D2H_STREAM=1`）时才能藏在反向之下。这些换算没有在 GPU 主机上测过。
+- AdamW 的换算：按上表 4 个线程的每元素耗时，BF16 master 的 8.19B 个参数约 3.0 s（上游约 45 s；本机内存放不下 8B 的状态，这只是换算）；桌面主机上 T15 受内存带宽限制（22 B/参数，180 GB，60–70 GB/s 时约 2.6–3 s）。
+
+### 尚未在 GPU 上验证的部分
+
+没有 GPU：GPU 上的行为由代码阅读确定；`dsl_grad_store.cpp`、`graph_executor.cpp`、`py_train.cpp`、`adamw_8bit_optimizer.cpp`、`cpu_adamw.cpp` 与 `cpu_step_kernels.cpp` 只按 sm_120a 构建的编译命令编译检查过。在 RTX 5090 主机上依次检查下列各项，配置都是 `examples/training/cpu-offload.yaml` 改为 `model: Qwen/Qwen3-8B`、`max_steps: 20`（下称 C8），用 `surogate sft C8` 运行：
+
+1. T13：在 T13 的提交与它的父提交 `488e5f00` 上各运行一次 C8。每步记录的 loss 与梯度范数应逐位相同（先在父提交上连跑两次，确认这个配置本身可复现）；`step_seconds` 应减少，至多减少 memset 的时间（16.4 GB 除以主机单核的 memset 带宽），实际减少量取决于已排队的前向遮住了多少。
+2. T14 的加法：C8 分别不设与设置 `SUROGATE_FORK_HOST_GRAD_ACCUM=1`。两者每步的梯度范数与 loss 应逐位相同（主机梯度逐位相同）。用 `nsys profile -t cuda,osrt -o t14 surogate sft C8` 比较 micro-step 1–3 与 micro-step 0 的每层反向耗时（目标：不超过 1.3 倍）和回调线程上主机函数的时长；训练时用 `grep -H Cpus_allowed_list /proc/<pid>/task/*/status` 记下回调线程与它的 team 线程的掩码。
+3. T14 的 stream：再加 `SUROGATE_FORK_GRAD_D2H_STREAM=1`。nsys 中块梯度的 D2H 应出现在一条与权重预取的 H2D 不同的 stream 上，权重预取不再排在主机函数之后；梯度范数与 loss 与第 2 项逐位相同。先用 `deviceQuery` 记下 `asyncEngineCount`（为 2 时 D2H 与 H2D 可以同时进行）。有两张卡时加 `world_size: 2` 再跑一次，检查 NCCL 归约（`reduce_done`）之后的 D2H。
+4. T15：C8 改为 `max_steps: 5`、`save_steps: 5`，分别不设与设置 `SUROGATE_FORK_CPU_ADAMW_SIMD=1`。两次的 loss 应逐位相同，checkpoint 中权重分片的 sha256 应相同；nsys 中最后一个反向 kernel 到下一步第一个前向 kernel 之间的空隙（CPU 优化器步）应缩短。
+5. `fork/dev test gpu` 照常通过（fork 的 C++ 用例不经过这些路径）。
+
+第 2–4 项的逐位比较同样以第 1 项确认的可复现性为前提：同一提交连跑两次结果就不同时，改为比较各步梯度范数的相对差（主机梯度相同，差异只来自 GPU 的不确定性）。结果记在 ledger 中 T13–T15 各自的 `conflict_history` 末尾。
+
+### 复现
+
+`step.sh` 与 `run.sh` 一样读取构建目录中的 `compile_commands.json`：先运行 `make configure`，再运行 `cmake -S csrc -B csrc/build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON`，然后 `fork/native/bench/cpu-optimizer/step.sh csrc/build`。它用 `cpu_adamw.cpp` 与 `cpu_step_kernels.cpp` 各自的编译命令编译这两个文件，链接进 `stepbench.cpp`，按 `ROUNDS` 轮运行上表各行，最后按 ISA 做逐位检查（`ISA=0` 跳过）。`SMALL`、`LARGE` 替换两种形状。各行在机器上其他进程活跃时会偏慢；上表各行的计时都满足上文的空闲条件。
 
 ## RTX 5090 32 GB：稠密与 MoE 微调
 

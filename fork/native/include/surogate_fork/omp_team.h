@@ -25,6 +25,13 @@
 // teams for the rest of the process. The registry's mutex is held only for that bookkeeping; a forked child that
 // never runs the optimizer is unaffected.
 //
+// A serial group (ledger T14) is a set of callers whose regions never overlap in time: a rank thread and the CUDA
+// host functions it enqueues, which it joins (wait_all_offloads) before its own next region. The rank thread names
+// its group with set_omp_serial_group(key); a host function passes the same key to OmpTeam(n, key). The members of
+// a group count once, together, when a caller counts its sharers, so the host function's regions and the rank
+// thread's optimizer regions do not halve each other's teams, while a caller outside the group still sees the
+// group as one sharer. Without a key (the default) every caller counts alone.
+//
 // ordered_block_sum() is the reduction the gradient norm uses. Each kOrderedSumBlock-element block is summed in
 // index order and the block sums are added in block order, so the result is the same for every team size: it
 // does not depend on pinning, on other ranks, on the threshold, or on whether the build has OpenMP. For
@@ -67,6 +74,7 @@ namespace detail {
 
 struct OmpCaller {
     cpu_set_t mask;
+    const void* group = nullptr;                  // serial group of its current or last region, nullptr = none
     int active = 0;                               // regions entered and not yet left
     bool has_left = false;                        // it has left a region, so last_ns is a leave time when idle
     std::int64_t last_ns = 0;                     // when it last entered or left a region
@@ -105,8 +113,9 @@ public:
         delete mCaller;
     }
 
-    // Registers a region on `mask` that starts at `now_ns` and returns its team size.
-    int enter(const cpu_set_t& mask, std::int64_t now_ns, int max_threads) {
+    // Registers a region on `mask` that starts at `now_ns`, in serial group `group` (nullptr: none), and returns
+    // its team size.
+    int enter(const cpu_set_t& mask, std::int64_t now_ns, int max_threads, const void* group = nullptr) {
         auto& callers = omp_callers();
         std::lock_guard<std::mutex> lock(callers.mu);
         if (!mCaller) {
@@ -118,13 +127,23 @@ public:
             if (idle_ns > mCaller->window_ns / kOmpSharerGapFactor) mCaller->window_ns = kOmpSharerGapFactor * idle_ns;
         }
         mCaller->mask = mask;
+        mCaller->group = group;
         ++mCaller->active;
         mCaller->last_ns = now_ns;
-        int sharers = 0;  // includes this caller
-        for (const OmpCaller* other : callers.live) {
+        const auto shares = [&](const OmpCaller* other) {
             cpu_set_t common;
             CPU_AND(&common, &other->mask, &mask);
-            if (CPU_COUNT(&common) > 0 && (other->active > 0 || now_ns - other->last_ns <= other->window_ns)) ++sharers;
+            return CPU_COUNT(&common) > 0 && (other->active > 0 || now_ns - other->last_ns <= other->window_ns);
+        };
+        // The callers sharing these CPUs, this one included; a serial group counts once, at its first such member.
+        int sharers = 0;
+        for (std::size_t i = 0; i < callers.live.size(); ++i) {
+            const OmpCaller* other = callers.live[i];
+            if (!shares(other)) continue;
+            bool counted = false;
+            for (std::size_t j = 0; other->group && j < i && !counted; ++j)
+                counted = callers.live[j]->group == other->group && shares(callers.live[j]);
+            if (!counted) ++sharers;
         }
         return std::clamp(CPU_COUNT(&mask) / sharers, 1, std::max(1, max_threads));
     }
@@ -144,10 +163,30 @@ private:
 }  // namespace detail
 #endif
 
+namespace detail {
+
+// The serial group of the calling thread's OmpTeam(n) regions (see the top of this file).
+inline const void*& omp_thread_serial_group() {
+    thread_local const void* group = nullptr;
+    return group;
+}
+
+}  // namespace detail
+
+// Puts the calling thread's later OmpTeam(n) regions in serial group `group`; nullptr takes it out of any group.
+inline void set_omp_serial_group(const void* group) {
+    detail::omp_thread_serial_group() = group;
+}
+
 // The team for one region over `n` elements; keep it alive until the region has finished.
 class OmpTeam {
 public:
-    explicit OmpTeam(std::size_t n) {
+    explicit OmpTeam(std::size_t n)
+        : OmpTeam(n, detail::omp_thread_serial_group()) {
+    }
+
+    // A region in serial group `group` (nullptr: none), whatever group the calling thread is in.
+    OmpTeam(std::size_t n, const void* group) {
 #ifdef _OPENMP
         if (n < kOmpMinParallelElems) return;
         cpu_set_t mask;
@@ -157,9 +196,10 @@ public:
         }
         thread_local detail::OmpCallerSlot slot;
         mSlot = &slot;
-        threads = slot.enter(mask, detail::omp_now_ns(), omp_get_max_threads());
+        threads = slot.enter(mask, detail::omp_now_ns(), omp_get_max_threads(), group);
 #else
         (void)n;
+        (void)group;
 #endif
     }
 

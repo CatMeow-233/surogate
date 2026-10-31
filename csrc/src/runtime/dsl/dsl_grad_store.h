@@ -320,6 +320,7 @@ private:
         const void* src = nullptr;
         std::size_t nelem = 0;
         ETensorDType dtype = ETensorDType::FP32;
+        const void* serial_group = nullptr;  ///< the owning store: OmpTeam serial group (fork ledger T14)
     };
     /// Per-layer accumulation tasks; the host function's payload, so never resized after allocation.
     std::vector<std::vector<HostAccumTask>> mLayerHostAccum;
@@ -328,6 +329,10 @@ private:
 
     // Track pending D2H operations for wait_all_offloads()
     std::vector<cudaEvent_t> mPendingD2HEvents;
+    // SUROGATE_FORK_GRAD_D2H_STREAM=1: the block-gradient D2H and host additions run here instead of on the
+    // copy stream callers pass, which also carries the weight prefetch (fork ledger T14). Lives as long as the
+    // slot events, which are not destroyed either.
+    cudaStream_t mForkD2HStream = nullptr;
 
     void allocate_streaming_buffers(const DslParamStore& params);
     void create_streaming_events();

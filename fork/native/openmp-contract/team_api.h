@@ -23,7 +23,10 @@ bool fork_omp_dynamic();
 RegionReport fork_omp_region(std::size_t n);
 double fork_ordered_sum(const float* d, std::size_t n, int threads);
 double fork_ordered_sum_auto(const float* d, std::size_t n);
-// Synthetic callers for the sharing rule: slot `id` stands for one thread, `now_ns` is its clock.
-int fork_slot_enter(int id, const cpu_set_t& mask, long long now_ns, int max_threads);
+// Synthetic callers for the sharing rule: slot `id` stands for one thread, `now_ns` is its clock, `group` its
+// serial group (nullptr: none).
+int fork_slot_enter(int id, const cpu_set_t& mask, long long now_ns, int max_threads, const void* group = nullptr);
 void fork_slot_leave(int id, long long now_ns);
 void fork_slot_destroy(int id);
+// set_omp_serial_group() for the calling thread, run inside the library, whose thread_local it sets.
+void fork_set_omp_serial_group(const void* group);

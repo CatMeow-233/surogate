@@ -85,10 +85,10 @@ double fork_ordered_sum_auto(const float* d, std::size_t n) {
     return surogate_fork::ordered_block_sum(n, [d](std::size_t i) { return norm_term(d, i); });
 }
 
-int fork_slot_enter(int id, const cpu_set_t& mask, long long now_ns, int max_threads) {
+int fork_slot_enter(int id, const cpu_set_t& mask, long long now_ns, int max_threads, const void* group) {
     auto& slot = slots()[id];
     if (!slot) slot = std::make_unique<surogate_fork::detail::OmpCallerSlot>();
-    return slot->enter(mask, now_ns, max_threads);
+    return slot->enter(mask, now_ns, max_threads, group);
 }
 
 void fork_slot_leave(int id, long long now_ns) {
@@ -97,4 +97,8 @@ void fork_slot_leave(int id, long long now_ns) {
 
 void fork_slot_destroy(int id) {
     slots().erase(id);
+}
+
+void fork_set_omp_serial_group(const void* group) {
+    surogate_fork::set_omp_serial_group(group);
 }

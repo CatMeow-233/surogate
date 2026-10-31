@@ -1,21 +1,35 @@
 // Copyright (c) 2026, Invergent SA
 // SPDX-License-Identifier: Apache-2.0
 //
-// CPU contract of the cpu_training host step (fork ledger T13), without CUDA: surogate_fork::HostGradOverwrites.
-// Replaying DslGradStore's host-side protocol (micro-step 0 D2H overwrites, staged additions on later micro-steps,
-// non-block copies, gaps in the coverage) gives the same host gradients as the upstream memset of every buffer at
-// micro-step 0. The staged addition below is DslGradStore::accumulate_staged_layer's BF16 loop with the host
-// __float2bfloat16 of cuda_bf16.hpp, copied.
+// CPU contract of the cpu_training host step (fork ledgers T13-T15), without CUDA:
+//   1. surogate_fork::HostGradOverwrites: replaying DslGradStore's host-side protocol (micro-step 0 D2H
+//      overwrites, staged additions on later micro-steps, non-block copies, gaps in the coverage) gives the same
+//      host gradients as the upstream memset of every buffer at micro-step 0 (T13);
+//   2. host_grad_add_bf16/f32 give the bits of DslGradStore::accumulate_staged_layer's loop, with the host
+//      __float2bfloat16 of cuda_bf16.hpp, for every BF16 `dst` value against a structured set of `src` values,
+//      at every team size and length (T14);
+//   3. adamw_step_* give the bits of cpu_adamw.cpp's three loops, specials included (T15).
+//   In 2 and 3 a NaN in an FP32 result may carry another NaN's payload (same_floats explains why).
+//   4. the host-function team and the rank thread's team do not halve each other when they share a serial group
+//      (T14), and do without it.
+// The reference loops below are the upstream expressions; the checker is built without OpenMP or -O flags (as
+// team_check.cpp), on the baseline ISA, where GCC cannot contract them into FMAs.
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
+#include <pthread.h>
 #include <random>
+#include <sched.h>
+#include <thread>
 #include <vector>
 
+#include "surogate_fork/cpu_step_kernels.h"
 #include "surogate_fork/host_grad_overwrites.h"
+#include "team_api.h"
 
 namespace {
 
@@ -55,7 +69,7 @@ std::uint16_t ref_f32_to_bf16(float a) {
     return r;
 }
 
-// ---- the upstream loop (dsl_grad_store.cpp accumulate_staged_layer), with the copy above --------------------
+// ---- the upstream loops (dsl_grad_store.cpp accumulate_staged_layer, cpu_adamw.cpp), with the copy above ------
 
 void ref_add_bf16(std::uint16_t* dst, const std::uint16_t* src, std::size_t n) {
     for (std::size_t i = 0; i < n; ++i) {
@@ -64,8 +78,125 @@ void ref_add_bf16(std::uint16_t* dst, const std::uint16_t* src, std::size_t n) {
     }
 }
 
+void ref_adamw_f32(float* p, const float* g, float* m, float* v, std::size_t n, const surogate_fork::AdamWStep& s) {
+    for (std::size_t i = 0; i < n; ++i) {
+        const float gi = g[i] * s.grad_scale;
+        m[i] = s.beta1 * m[i] + (1.0f - s.beta1) * gi;
+        v[i] = s.beta2 * v[i] + (1.0f - s.beta2) * gi * gi;
+        const float m_hat = m[i] / s.bc1;
+        const float v_hat = v[i] / s.bc2;
+        p[i] = p[i] * s.wd_factor - s.lr * m_hat / (std::sqrt(v_hat) + s.eps);
+    }
+}
+
+void ref_adamw_bf16_grad(float* p,
+                         const std::uint16_t* g,
+                         float* m,
+                         float* v,
+                         std::size_t n,
+                         const surogate_fork::AdamWStep& s) {
+    for (std::size_t i = 0; i < n; ++i) {
+        const float gi = ref_bf16_to_f32(g[i]) * s.grad_scale;
+        m[i] = s.beta1 * m[i] + (1.0f - s.beta1) * gi;
+        v[i] = s.beta2 * v[i] + (1.0f - s.beta2) * gi * gi;
+        const float m_hat = m[i] / s.bc1;
+        const float v_hat = v[i] / s.bc2;
+        p[i] = p[i] * s.wd_factor - s.lr * m_hat / (std::sqrt(v_hat) + s.eps);
+    }
+}
+
+void ref_adamw_bf16_param(std::uint16_t* p,
+                          const std::uint16_t* g,
+                          float* m,
+                          float* v,
+                          std::size_t n,
+                          const surogate_fork::AdamWStep& s) {
+    for (std::size_t i = 0; i < n; ++i) {
+        float pi = ref_bf16_to_f32(p[i]);
+        const float gi = ref_bf16_to_f32(g[i]) * s.grad_scale;
+        m[i] = s.beta1 * m[i] + (1.0f - s.beta1) * gi;
+        v[i] = s.beta2 * v[i] + (1.0f - s.beta2) * gi * gi;
+        const float m_hat = m[i] / s.bc1;
+        const float v_hat = v[i] / s.bc2;
+        pi = pi * s.wd_factor - s.lr * m_hat / (std::sqrt(v_hat) + s.eps);
+        p[i] = ref_f32_to_bf16(pi);
+    }
+}
+
+// ---- inputs --------------------------------------------------------------------------------------------------
+
+std::vector<int> process_cpus() {
+    cpu_set_t mask;
+    sched_getaffinity(0, sizeof(mask), &mask);
+    std::vector<int> cpus;
+    for (int c = 0; c < CPU_SETSIZE; ++c)
+        if (CPU_ISSET(c, &mask)) cpus.push_back(c);
+    return cpus;
+}
+
+void pin(const std::vector<int>& cpus) {
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    for (int c : cpus)
+        CPU_SET(c, &mask);
+    if (pthread_setaffinity_np(pthread_self(), sizeof(mask), &mask) != 0) {
+        std::fprintf(stderr, "FAIL: pthread_setaffinity_np\n");
+        ++failures;
+    }
+}
+
+// Every exponent with a few mantissas and both signs, the specials (zeros, infinities, NaNs with payloads,
+// subnormals, the largest finite values) and values one ULP around rounding ties.
+std::vector<std::uint16_t> structured_bf16() {
+    std::vector<std::uint16_t> out;
+    for (std::uint32_t sign : {0u, 0x8000u})
+        for (std::uint32_t exp = 0; exp < 256; ++exp)
+            for (std::uint32_t mant : {0u, 1u, 0x3fu, 0x40u, 0x41u, 0x7eu, 0x7fu})
+                out.push_back(static_cast<std::uint16_t>(sign | exp << 7 | mant));
+    return out;
+}
+
+std::vector<float> wide_floats(std::size_t n, std::uint64_t seed) {
+    std::mt19937_64 rng(seed);
+    std::vector<float> out(n);
+    for (auto& x : out) {
+        const std::uint64_t r = rng();
+        const float mantissa = 1.0f + static_cast<float>(r & 0xffffff) / 16777216.0f;
+        x = std::ldexp(mantissa, static_cast<int>((r >> 24) % 60) - 40) * ((r >> 40) & 1 ? -1.0f : 1.0f);
+        switch ((r >> 48) % 64) {
+            case 0: x = 0.0f; break;
+            case 1: x = -0.0f; break;
+            case 2: x = std::numeric_limits<float>::infinity(); break;
+            case 3: x = std::numeric_limits<float>::quiet_NaN(); break;
+            case 4: x = from_bits(0x7f800001u + static_cast<std::uint32_t>(r >> 56)); break;  // signalling NaN
+            case 5: x = std::numeric_limits<float>::denorm_min() * static_cast<float>(r >> 56); break;
+            case 6: x = std::numeric_limits<float>::max(); break;
+            default: break;
+        }
+    }
+    return out;
+}
+
+std::vector<std::uint16_t> wide_bf16(std::size_t n, std::uint64_t seed) {
+    std::vector<std::uint16_t> out(n);
+    const std::vector<float> f = wide_floats(n, seed);
+    for (std::size_t i = 0; i < n; ++i)
+        out[i] = ref_f32_to_bf16(f[i]);
+    return out;
+}
+
 bool same_bits(const void* a, const void* b, std::size_t bytes) {
     return std::memcmp(a, b, bytes) == 0;
+}
+
+// FP32 results: the same bits, except that two NaNs match whatever their payloads. An operation with two NaN
+// operands returns one of them, and which one is not fixed (IEEE 754 leaves it open, and GCC commutes the operands
+// of + and *), so the vectorized loop may keep the other payload. BF16 results map every NaN to 0x7fff and are
+// compared with same_bits.
+bool same_floats(const float* a, const float* b, std::size_t n) {
+    for (std::size_t i = 0; i < n; ++i)
+        if (std::isnan(a[i]) ? !std::isnan(b[i]) : bits(a[i]) != bits(b[i])) return false;
+    return true;
 }
 
 // ---- 1. host gradient overwrites (T13) ------------------------------------------------------------------------
@@ -168,15 +299,171 @@ void check_overwrites_rules() {
     expect(o.zero_rest() == 0 && a[0] == 3.0f, "zero_rest runs once per step", static_cast<long long>(a[0]), 3);
 }
 
+// ---- 2. host gradient additions (T14) -------------------------------------------------------------------------
+
+void check_add_bf16_values() {
+    // Every BF16 dst value against the structured src set, in one long call per src block.
+    const std::vector<std::uint16_t> srcs = structured_bf16();
+    std::vector<std::uint16_t> dst(65536), want(65536), src(65536);
+    for (std::uint16_t s : srcs) {
+        for (std::uint32_t d = 0; d < 65536; ++d) {
+            dst[d] = static_cast<std::uint16_t>(d);
+            src[d] = s;
+        }
+        want = dst;
+        ref_add_bf16(want.data(), src.data(), want.size());
+        surogate_fork::host_grad_add_bf16(dst.data(), src.data(), dst.size(), nullptr);
+        if (!same_bits(dst.data(), want.data(), dst.size() * 2)) {
+            std::size_t i = 0;
+            while (dst[i] == want[i])
+                ++i;
+            std::fprintf(stderr, "FAIL: bf16 add 0x%04zx + 0x%04x = 0x%04x, upstream 0x%04x\n", i, s, dst[i], want[i]);
+            ++failures;
+            return;
+        }
+    }
+}
+
+void check_add_lengths_and_teams(const std::vector<int>& cpus) {
+    const std::size_t big = 4 * 65536 + 17;
+    for (std::size_t k = 1; k <= std::min<std::size_t>(cpus.size(), 4); ++k) {
+        for (std::size_t n : {std::size_t{0},
+                              std::size_t{1},
+                              std::size_t{63},
+                              std::size_t{64},
+                              std::size_t{65},
+                              std::size_t{65535},
+                              std::size_t{65536},
+                              big}) {
+            std::vector<std::uint16_t> d16 = wide_bf16(n, n + 1), s16 = wide_bf16(n, n + 2), w16 = d16;
+            std::vector<float> d32 = wide_floats(n, n + 3), s32 = wide_floats(n, n + 4), w32 = d32;
+            ref_add_bf16(w16.data(), s16.data(), n);
+            for (std::size_t i = 0; i < n; ++i)
+                w32[i] += s32[i];
+            int team16 = 0, team32 = 0;
+            std::thread([&] {
+                pin(std::vector<int>(cpus.begin(), cpus.begin() + static_cast<long>(k)));
+                team16 = surogate_fork::host_grad_add_bf16(d16.data(), s16.data(), n, nullptr);
+                team32 = surogate_fork::host_grad_add_f32(d32.data(), s32.data(), n, nullptr);
+            }).join();
+            if (!same_bits(d16.data(), w16.data(), n * 2) || !same_floats(d32.data(), w32.data(), n)) {
+                std::fprintf(stderr, "FAIL: host additions of %zu elements on %zu CPUs differ from upstream\n", n, k);
+                ++failures;
+            }
+            const int want_team = n < 65536 ? 1 : std::min(static_cast<int>(k), fork_omp_max_threads());
+            expect(team16 == want_team && team32 == want_team, "host additions run OmpTeam's team", team16, want_team);
+        }
+    }
+}
+
+// ---- 3. AdamW (T15) -------------------------------------------------------------------------------------------
+
+void check_adamw(const std::vector<int>& cpus) {
+    const surogate_fork::AdamWStep steps[] = {
+        {1e-4f,
+         0.9f,
+         0.999f,
+         1.0f - std::pow(0.9f, 3.0f),
+         1.0f - std::pow(0.999f, 3.0f),
+         1e-8f,
+         1.0f - 1e-4f * 0.01f,
+         1.0f / 4096.0f},
+        {3e-2f, 0.8f, 0.95f, 1.0f - 0.8f, 1.0f - 0.95f, 1e-6f, 1.0f, 0.37f},
+    };
+    for (const auto& s : steps) {
+        for (std::size_t k = 1; k <= std::min<std::size_t>(cpus.size(), 4); ++k) {
+            for (std::size_t n : {std::size_t{1}, std::size_t{65}, std::size_t{65535}, std::size_t{3 * 65536 + 5}}) {
+                const std::vector<float> g32 = wide_floats(n, 11), p32 = wide_floats(n, 12);
+                std::vector<float> m0 = wide_floats(n, 13), v0 = wide_floats(n, 14);
+                for (auto& x : v0)
+                    x = std::fabs(x);  // the second moment is never negative
+                const std::vector<std::uint16_t> g16 = wide_bf16(n, 15), p16 = wide_bf16(n, 16);
+
+                std::vector<float> rp = p32, rm = m0, rv = v0, fp = p32, fm = m0, fv = v0;
+                ref_adamw_f32(rp.data(), g32.data(), rm.data(), rv.data(), n, s);
+                std::vector<float> rp2 = p32, rm2 = m0, rv2 = v0, fp2 = p32, fm2 = m0, fv2 = v0;
+                ref_adamw_bf16_grad(rp2.data(), g16.data(), rm2.data(), rv2.data(), n, s);
+                std::vector<std::uint16_t> rp3 = p16, fp3 = p16;
+                std::vector<float> rm3 = m0, rv3 = v0, fm3 = m0, fv3 = v0;
+                ref_adamw_bf16_param(rp3.data(), g16.data(), rm3.data(), rv3.data(), n, s);
+                std::thread([&] {
+                    pin(std::vector<int>(cpus.begin(), cpus.begin() + static_cast<long>(k)));
+                    surogate_fork::adamw_step_f32(fp.data(), g32.data(), fm.data(), fv.data(), n, s);
+                    surogate_fork::adamw_step_bf16_grad(fp2.data(), g16.data(), fm2.data(), fv2.data(), n, s);
+                    surogate_fork::adamw_step_bf16_param(fp3.data(), g16.data(), fm3.data(), fv3.data(), n, s);
+                }).join();
+                const bool ok = same_floats(fp.data(), rp.data(), n) && same_floats(fm.data(), rm.data(), n) &&
+                                same_floats(fv.data(), rv.data(), n) && same_floats(fp2.data(), rp2.data(), n) &&
+                                same_floats(fm2.data(), rm2.data(), n) && same_floats(fv2.data(), rv2.data(), n) &&
+                                same_bits(fp3.data(), rp3.data(), n * 2) && same_floats(fm3.data(), rm3.data(), n) &&
+                                same_floats(fv3.data(), rv3.data(), n);
+                if (!ok) {
+                    std::fprintf(stderr, "FAIL: AdamW of %zu elements on %zu CPUs differs from upstream\n", n, k);
+                    ++failures;
+                }
+            }
+        }
+    }
+}
+
+// ---- 4. serial group on real threads (T14) --------------------------------------------------------------------
+
+// A rank thread runs an optimizer region, then a second thread (the CUDA callback thread) runs a host addition,
+// then the rank thread runs another region, all on the same CPUs and never at the same time.
+void check_serial_group_teams(const std::vector<int>& cpus) {
+    if (cpus.size() < 2) {
+        std::printf("skipped: serial group teams (the process may use 1 CPU)\n");
+        return;
+    }
+    const std::vector<int> shared(cpus.begin(),
+                                  cpus.begin() + static_cast<long>(std::min<std::size_t>(cpus.size(), 4)));
+    const int full = std::min(static_cast<int>(shared.size()), fork_omp_max_threads());
+    const int half = std::max(1, std::min(static_cast<int>(shared.size()) / 2, fork_omp_max_threads()));
+    const std::size_t n = 4 * 65536;
+    std::vector<float> p(n, 1.0f), g(n, 0.5f), m(n, 0.0f), v(n, 0.0f);
+    std::vector<std::uint16_t> dst(n, 0x3f80), src(n, 0x3f80);
+    const surogate_fork::AdamWStep s{1e-3f, 0.9f, 0.999f, 0.1f, 0.001f, 1e-8f, 1.0f, 1.0f};
+    for (const bool grouped : {true, false}) {
+        static int store = 0;  // stands for the DslGradStore whose address is the key
+        const void* key = grouped ? &store : nullptr;
+        int rank_first = 0, callback = 0, rank_second = 0;
+        std::thread rank([&] {
+            pin(shared);
+            fork_set_omp_serial_group(key);
+            rank_first = surogate_fork::adamw_step_f32(p.data(), g.data(), m.data(), v.data(), n, s);
+            std::thread([&] {
+                pin(shared);
+                callback = surogate_fork::host_grad_add_bf16(dst.data(), src.data(), n, key);
+            }).join();
+            rank_second = surogate_fork::adamw_step_f32(p.data(), g.data(), m.data(), v.data(), n, s);
+        });
+        rank.join();
+        expect(rank_first == full, "the rank thread alone gets its CPUs", rank_first, full);
+        if (grouped) {
+            expect(callback == full, "a host function in the rank's serial group keeps the full team", callback, full);
+            expect(rank_second == full, "and the rank thread's next team stays full", rank_second, full);
+        } else {
+            // Exited threads stop counting, so each call above saw only callers still alive.
+            expect(callback == half, "without a group the host function shares with the rank thread", callback, half);
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
+    const std::vector<int> cpus = process_cpus();
     check_overwrites_rules();
     check_overwrites_protocol();
+    // On a fresh thread: the main thread would stay registered as a caller on every CPU and halve later teams.
+    std::thread(check_add_bf16_values).join();
+    check_add_lengths_and_teams(cpus);
+    check_adamw(cpus);
+    check_serial_group_teams(cpus);
     if (failures) {
         std::fprintf(stderr, "%d cpu step checks failed\n", failures);
         return 1;
     }
-    std::printf("cpu step contract verified\n");
+    std::printf("cpu step contract verified on %zu CPUs\n", cpus.size());
     return 0;
 }

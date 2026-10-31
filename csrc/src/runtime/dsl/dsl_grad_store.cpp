@@ -25,7 +25,9 @@
 #include "utilities/comm.h"
 #include "utilities/utils.h"
 
+#include "surogate_fork/cpu_step_kernels.h"
 #include "surogate_fork/host_grad_overwrites.h"
+#include "surogate_fork/omp_team.h"
 
 namespace dsl {
 
@@ -316,6 +318,9 @@ void DslGradStore::start_micro_step(cudaStream_t stream, int micro_step, int tot
     if (mStreamGrads) {
         mActiveGradSlot = 0;
         mPendingD2HEvents.clear();
+        // The host functions this rank thread enqueues add with teams of this store's serial group, so they and
+        // the CPU optimizer on this thread do not halve each other's teams (fork ledger T14, omp_team.h).
+        if (surogate_fork::host_grad_accum_enabled()) surogate_fork::set_omp_serial_group(this);
     }
 
     // Reset block states for new micro-step (only needed when overlapped reduction is active)
@@ -867,7 +872,8 @@ void DslGradStore::allocate_streaming_buffers(const DslParamStore& params) {
             mLayerHostAccum[layer].push_back(HostAccumTask{cpu_it->second.Data,
                                                            staging_it->second.Data,
                                                            static_cast<std::size_t>(cpu_it->second.nelem()),
-                                                           cpu_it->second.DType});
+                                                           cpu_it->second.DType,
+                                                           this});
         }
     }
 
@@ -896,6 +902,9 @@ void DslGradStore::create_streaming_events() {
         CUDA_CHECK(cudaEventCreateWithFlags(&slot.accum_done, cudaEventDisableTiming));
         // Pre-signal so first prepare doesn't deadlock
         CUDA_CHECK(cudaEventRecord(slot.d2h_done, nullptr));
+    }
+    if (surogate_fork::grad_d2h_stream_enabled() && !mForkD2HStream) {
+        CUDA_CHECK(cudaStreamCreate(&mForkD2HStream));  // created like the side stream (fork ledger T14)
     }
 }
 
@@ -970,6 +979,7 @@ void DslGradStore::offload_layer_grads(int layer_idx, cudaStream_t compute_strea
 
     int slot_idx = mActiveGradSlot;
     auto& slot = mGradSlots[slot_idx];
+    if (mForkD2HStream) copy_stream = mForkD2HStream;  // off the weight-prefetch stream (fork ledger T14)
 
     // Record that backward (+ optional reduce) is complete on MainStream
     CUDA_CHECK(cudaEventRecord(slot.compute_done, compute_stream));
@@ -1069,6 +1079,21 @@ void DslGradStore::offload_non_block_grads(cudaStream_t stream) {
 }
 
 void DslGradStore::accumulate_staged_layer(void* tasks) {
+    if (surogate_fork::host_grad_accum_enabled()) {
+        // Fork ledger T14: the same bits as the loop below, vectorized and on OmpTeam teams of the rank's serial
+        // group (surogate_fork/cpu_step_kernels.h).
+        for (const auto& task : *static_cast<const std::vector<HostAccumTask>*>(tasks)) {
+            if (task.dtype == ETensorDType::FP32) {
+                surogate_fork::host_grad_add_f32(static_cast<float*>(task.dst),
+                                                 static_cast<const float*>(task.src),
+                                                 task.nelem,
+                                                 task.serial_group);
+            } else if (task.dtype == ETensorDType::BF16) {
+                surogate_fork::host_grad_add_bf16(task.dst, task.src, task.nelem, task.serial_group);
+            }
+        }
+        return;
+    }
     for (const auto& task : *static_cast<const std::vector<HostAccumTask>*>(tasks)) {
         if (task.dtype == ETensorDType::FP32) {
             auto* dst = static_cast<float*>(task.dst);

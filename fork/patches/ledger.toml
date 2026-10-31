@@ -442,6 +442,96 @@ conflict_history = [
 ]
 
 [[topic]]
+id = "T14"
+title = "cpu_training: opt-in parallel host gradient accumulation off the prefetch stream"
+commits = []
+switch = "SUROGATE_FORK_HOST_GRAD_ACCUM=1 and SUROGATE_FORK_GRAD_D2H_STREAM=1 (each default off, read once per process)"
+# On micro-steps after the first, every layer's staged BF16 gradients are added into the host gradients by
+# DslGradStore::accumulate_staged_layer, a single-threaded scalar loop in a cudaLaunchHostFunc on the copy stream
+# the executor passes (side_stream), which also carries gather_block's weight prefetch and the residual fetch, so
+# backward runs at host-loop speed (train-native #7, python-rl R2 step 1). SUROGATE_FORK_HOST_GRAD_ACCUM=1: the host
+# function runs host_grad_add_bf16/f32 (fork/native/src/cpu_step_kernels.cpp): upstream's expression with a
+# branch-free round to nearest even, vectorized (target_clones x86-64-v4/AVX2/baseline; the file is compiled with
+# -fno-math-errno -ffp-contract=off by fork/native/cmake/cpu_step_kernels.cmake) on an OmpTeam team, one region per
+# tensor. Same bits as upstream's loop: BF16 for all 2^32 operand pairs (step.sh, per ISA), FP32 up to the payload
+# of a NaN. The team is in the rank's serial group (omp_team.h; start_micro_step sets it on the rank thread, each
+# HostAccumTask carries its store), so the host function and the CPU optimizer on the rank thread, which never
+# overlap, do not halve each other's teams (T5's sharing rule would; cpu-step-contract and stepbench's group mode
+# show both). SUROGATE_FORK_GRAD_D2H_STREAM=1: create_streaming_events creates a stream of the store's own
+# (cudaStreamCreate, as the side stream) and offload_layer_grads issues the block-gradient D2H, d2h_done, the host
+# function and accum_done there instead of on the caller's copy stream; ordering stays event-based (compute_done,
+# reduce_done, d2h_done, mPendingD2HEvents) and all of a step's copies and additions stay on one stream, which the
+# per-micro-step reset of mPendingD2HEvents relies on. The stream is never destroyed, like the slot events
+# (DslGradStore has no destructor). Measured on the 4-vCPU VM (step.sh, medians of 3 rounds): one Qwen3-8B layer
+# 242 -> 29 ms with 4 threads (8.3x), 250 -> 96 ms on one (2.6x); in stepbench's group mode both teams keep 4
+# threads with the serial group and get 2 each without. GPU-unverified: dsl_grad_store.cpp is compile-checked for
+# sm_120a only; the 5090 checks are in fork/docs/performance.md ("cpu_training 主机端步"). Not done here: moving
+# the forward residual put (compiled_ops.cpp) to the D2H stream, a K-slab worker (R2 step 2), the GPU per-layer
+# norm (#7, GA=1 only).
+files = [
+    "csrc/src/runtime/dsl/dsl_grad_store.h",
+    "csrc/src/runtime/dsl/dsl_grad_store.cpp",
+]
+fork_files = [
+    "fork/native/cmake/cpu_step_kernels.cmake",   # shared with T15
+    "fork/native/cmake/fork_native.cmake",   # adds cpu_step_kernels.cpp to surogate-common (shared with T3, T5, T10, T15)
+    "fork/native/include/surogate_fork/cpu_step_kernels.h",   # shared with T15
+    "fork/native/src/cpu_step_kernels.cpp",   # shared with T15
+    "fork/native/include/surogate_fork/omp_team.h",   # serial groups (shared with T5)
+    "fork/native/openmp-contract/CMakeLists.txt",   # links the kernels into the probe library (shared with T5, T13, T15)
+    "fork/native/openmp-contract/cpu_step_check.cpp",   # shared with T13, T15
+    "fork/native/openmp-contract/team.cpp",   # shared with T5
+    "fork/native/openmp-contract/team_api.h",   # shared with T5
+    "fork/native/openmp-contract/team_check.cpp",   # shared with T5
+    "fork/native/bench/cpu-optimizer/stepbench.cpp",   # also measures T13 and T15
+    "fork/native/bench/cpu-optimizer/step.sh",
+    "fork/patches/tests/native/test_cpu_step_hooks.py",   # shared with T13, T15
+]
+tests = [
+    "fork/native/openmp-contract/cpu_step_check.cpp",
+    "fork/native/openmp-contract/team_check.cpp",
+    "fork/patches/tests/native/test_cpu_step_hooks.py",
+]
+conflict_history = [
+    "2026-10-31 reverse replay of T13 and T14 onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: dsl_grad_store.cpp 3/3/0, dsl_grad_store.h 1/1/0, all from T14's hunks against 00aef092 (#282, 2026-10-04), which introduced HostAccumTask and accumulate_staged_layer (T13 alone: 0/0/0)",
+]
+
+[[topic]]
+id = "T15"
+title = "cpu_training: opt-in vectorized CPU AdamW"
+commits = []
+switch = "SUROGATE_FORK_CPU_ADAMW_SIMD=1 (default off, read once per process)"
+# cpu_adamw.cpp's three element-wise steps (cpu_adamw_step, cpu_adamw_step_bf16, cpu_adamw_step_bf16_param, which
+# step_cpu_streaming calls per parameter) do not vectorize: std::sqrt keeps errno, and the BF16-master loop's host
+# __float2bfloat16 branches on the rounding remainder, which mispredicts for updated weights (about 20 ns/elem on
+# one core of this VM, against 4.8 ns/elem for the FP32-master loop). With the switch each computes its scalars as
+# before and calls adamw_step_* (cpu_step_kernels.cpp, T14's file and flags): the same expressions in the same
+# order, vectorized, on the calling thread's OmpTeam team, with the branch-free round. Same bits up to the payload
+# of a NaN (cpu-step-contract; stepbench hashes per ISA). test_cpu_step_hooks.py pins that the fork loops compute
+# upstream's expressions, so an upstream change to the AdamW arithmetic fails the pin instead of diverging.
+# Measured on the 4-vCPU VM (178M parameters, 4 threads, medians of 3 rounds): BF16 master 972 -> 64 ms (15x), FP32
+# master 243 -> 75 ms (3.2x), the latter at 66 GB/s, i.e. memory-bound. CPU only; the end-to-end step on a 5090 host
+# is unmeasured. python-rl R19 / train-native #9 (8-bit CPU state) would
+# replace this path for adamw_8bit and keep it as the FP32-state fallback.
+files = ["csrc/src/runtime/optimizers/cpu_adamw.cpp"]
+fork_files = [
+    "fork/native/cmake/cpu_step_kernels.cmake",   # shared with T14
+    "fork/native/include/surogate_fork/cpu_step_kernels.h",   # shared with T14
+    "fork/native/src/cpu_step_kernels.cpp",   # shared with T14
+    "fork/native/openmp-contract/cpu_step_check.cpp",   # shared with T13, T14
+    "fork/native/bench/cpu-optimizer/stepbench.cpp",   # shared with T14
+    "fork/native/bench/cpu-optimizer/step.sh",   # shared with T14
+    "fork/patches/tests/native/test_cpu_step_hooks.py",   # shared with T13, T14
+]
+tests = [
+    "fork/native/openmp-contract/cpu_step_check.cpp",
+    "fork/patches/tests/native/test_cpu_step_hooks.py",
+]
+conflict_history = [
+    "2026-10-31 reverse replay onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: cpu_adamw.cpp 0/0/0 (upstream last changed it on 2026-04-19, a7ebaa56; see T5)",
+]
+
+[[topic]]
 id = "T17"
 title = "graphed packed SFT: per-row documents in the cap-and-pad replay and capture"
 commits = ["b40ae9f7"]   # shared with T18

@@ -1,9 +1,12 @@
-"""Source pins of ledger topic T13 (the host side of the cpu_training step), runnable without CUDA.
+"""Source pins of ledger topics T13-T15 (the host side of the cpu_training step), runnable without CUDA.
 
 T13 drops the step-start memset of every host gradient (DslGradStore::start_micro_step) for HostGradOverwrites:
-micro-step 0's D2H copies are recorded and only the buffers they miss are zeroed, before their first reader. The CPU
-contract test (`fork/dev test openmp`, cpu-step-contract) checks the behaviour; these pins fail when a sync drops or
-reshapes a hunk, or when upstream changes code the topic relies on: who reads and writes the host gradients.
+micro-step 0's D2H copies are recorded and only the buffers they miss are zeroed, before their first reader. T14
+adds an opt-in vectorized, team-parallel host addition (SUROGATE_FORK_HOST_GRAD_ACCUM=1) and an opt-in D2H stream of
+the grad store's own (SUROGATE_FORK_GRAD_D2H_STREAM=1). T15 adds an opt-in vectorized CPU AdamW
+(SUROGATE_FORK_CPU_ADAMW_SIMD=1). The CPU contract test (`fork/dev test openmp`, cpu-step-contract) checks the
+behaviour; these pins fail when a sync drops or reshapes a hunk, or when upstream changes code the topics rely on: who
+reads and writes the host gradients, and the upstream loops the fork kernels must reproduce bit for bit.
 """
 
 import re
@@ -11,6 +14,13 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[4]
 GRAD_STORE = REPO / "csrc/src/runtime/dsl/dsl_grad_store.cpp"
+GRAD_STORE_H = REPO / "csrc/src/runtime/dsl/dsl_grad_store.h"
+CPU_ADAMW = REPO / "csrc/src/runtime/optimizers/cpu_adamw.cpp"
+KERNELS = REPO / "fork/native/src/cpu_step_kernels.cpp"
+KERNELS_H = REPO / "fork/native/include/surogate_fork/cpu_step_kernels.h"
+KERNELS_CMAKE = REPO / "fork/native/cmake/cpu_step_kernels.cmake"
+FORK_NATIVE = REPO / "fork/native/cmake/fork_native.cmake"
+STEPBENCH = REPO / "fork/native/bench/cpu-optimizer/stepbench.cpp"
 PERFORMANCE = REPO / "fork/docs/performance.md"
 
 
@@ -37,6 +47,8 @@ def block_after(code: str, opener: str) -> str:
             return code[start:end].strip()
     raise AssertionError(f"unbalanced braces after {opener!r}")
 
+
+LOOP = "for (std::size_t i = 0; i < n; ++i) {"
 
 # ---- T13 ------------------------------------------------------------------------------------------------------
 
@@ -94,9 +106,116 @@ def test_every_host_gradient_is_registered():
     ) in alloc
 
 
+# ---- T14 ------------------------------------------------------------------------------------------------------
+
+UPSTREAM_BF16_ADD = (
+    "for (std::size_t i = 0; i < task.nelem; ++i) { float val = static_cast<float>(dst[i]) + "
+    "static_cast<float>(src[i]); dst[i] = static_cast<nv_bfloat16>(val); }"
+)
+
+
+def test_the_host_function_dispatches_before_the_upstream_loop():
+    code = body(GRAD_STORE, r"void DslGradStore::accumulate_staged_layer\(")
+    fork = block_after(code, "if (surogate_fork::host_grad_accum_enabled()) {")
+    assert "surogate_fork::host_grad_add_f32(" in fork and "surogate_fork::host_grad_add_bf16(" in fork
+    assert fork.count("task.serial_group") == 2 and fork.endswith("return;")
+    assert code.index("host_grad_accum_enabled()") < code.index(UPSTREAM_BF16_ADD), "upstream's loop changed"
+
+
+def test_the_benchmark_times_upstreams_loop():
+    """stepbench.cpp's copy of the BF16 branch is what the T14 rows of performance.md compare against."""
+    bench = body(STEPBENCH, r"void upstream_accumulate_bf16\(")
+    assert UPSTREAM_BF16_ADD.replace("task.nelem", "nelem") in bench
+
+
+def test_tasks_carry_their_store_and_the_rank_thread_joins_its_group():
+    header = " ".join(GRAD_STORE_H.read_text(encoding="utf-8").split())
+    assert "const void* serial_group = nullptr;" in header
+    alloc = body(GRAD_STORE, r"void DslGradStore::allocate_streaming_buffers\(")
+    assert "cpu_it->second.DType, this});" in alloc
+    start = body(GRAD_STORE, r"void DslGradStore::start_micro_step\(")
+    assert "if (surogate_fork::host_grad_accum_enabled()) surogate_fork::set_omp_serial_group(this);" in start
+
+
+def test_the_d2h_stream_replaces_the_callers_copy_stream():
+    events = body(GRAD_STORE, r"void DslGradStore::create_streaming_events\(")
+    assert "if (surogate_fork::grad_d2h_stream_enabled() && !mForkD2HStream) {" in events
+    assert "cudaStreamCreate(&mForkD2HStream)" in events
+    layer = body(GRAD_STORE, r"void DslGradStore::offload_layer_grads\(")
+    swap = "if (mForkD2HStream) copy_stream = mForkD2HStream;"
+    assert layer.index(swap) < layer.index("cudaStreamWaitEvent(copy_stream, slot.compute_done, 0)")
+
+
+# ---- T15 ------------------------------------------------------------------------------------------------------
+
+ADAMW = {
+    # upstream function -> (fork entry point, fork serial kernel, the call's leading arguments)
+    "cpu_adamw_step": ("adamw_step_f32", "adamw_f32_serial", "(p, g, m, v, n,"),
+    "cpu_adamw_step_bf16": ("adamw_step_bf16_grad", "adamw_bf16_grad_serial", "(p, grad_bf16, m, v, n,"),
+    "cpu_adamw_step_bf16_param": (
+        "adamw_step_bf16_param",
+        "adamw_bf16_param_serial",
+        "(param_bf16, grad_bf16, m, v, n,",
+    ),
+}
+STEP_FIELDS = "{lr, beta1, beta2, bc1, bc2, eps, wd_factor, grad_scale}"
+
+
+def upstream_as_fork(loop: str) -> str:
+    """An upstream AdamW loop body in the fork kernel's spelling: the scalars live in `s`, BF16 goes by bits."""
+    loop = re.sub(r"\b(lr|beta1|beta2|bc1|bc2|eps|wd_factor|grad_scale)\b", r"s.\1", loop)
+    loop = loop.replace("static_cast<float>(p[i])", "bf16_to_f32(p[i])")
+    loop = loop.replace("static_cast<float>(g[i])", "bf16_to_f32(g[i])")
+    return loop.replace("p[i] = static_cast<nv_bfloat16>(pi);", "p[i] = f32_to_bf16(pi);")
+
+
+def test_each_adamw_step_dispatches_with_its_own_scalars():
+    for function, (entry, _, args) in ADAMW.items():
+        code = body(CPU_ADAMW, rf"void {function}\(")
+        fork = block_after(code, "if (surogate_fork::cpu_adamw_simd_enabled()) {")
+        assert fork == f"surogate_fork::{entry}{args} {STEP_FIELDS}); return;", (function, fork)
+        assert (
+            code.index("const float wd_factor") < code.index("cpu_adamw_simd_enabled()") < code.index("OmpTeam team(n)")
+        )
+
+
+def test_the_step_fields_are_declared_in_the_order_cpu_adamw_fills_them():
+    header = KERNELS_H.read_text(encoding="utf-8")
+    struct = re.search(r"struct AdamWStep \{(.*?)\};", header, re.S).group(1)
+    fields = re.findall(r"float (\w+);", struct)
+    assert "{" + ", ".join(fields) + "}" == STEP_FIELDS
+
+
+def test_the_fork_kernels_compute_the_upstream_expressions():
+    """When upstream changes its AdamW arithmetic (for example to filter NaNs), the fork kernel must follow."""
+    for function, (_, kernel, _) in ADAMW.items():
+        upstream = block_after(body(CPU_ADAMW, rf"void {function}\("), LOOP)
+        fork = block_after(body(KERNELS, rf"void {kernel}\("), LOOP)
+        assert upstream_as_fork(upstream) == fork, (function, upstream_as_fork(upstream), fork)
+
+
 # ---- build and documentation ----------------------------------------------------------------------------------
+
+
+def test_the_kernels_build_with_their_flags_in_surogate_common():
+    cmake = KERNELS_CMAKE.read_text(encoding="utf-8")
+    assert 'COMPILE_OPTIONS "-fno-math-errno;-ffp-contract=off"' in cmake
+    common = re.search(
+        r"function\(surogate_fork_configure_common target\)(.*?)endfunction\(\)",
+        FORK_NATIVE.read_text(encoding="utf-8"),
+        re.S,
+    )
+    assert "surogate_fork_add_cpu_step_kernels(${target})" in common.group(1)
 
 
 def test_the_topic_is_documented():
     doc = PERFORMANCE.read_text(encoding="utf-8")
     assert "HostGradOverwrites" in doc and "## cpu_training 主机端步" in doc
+
+
+def test_the_switches_are_documented():
+    doc = PERFORMANCE.read_text(encoding="utf-8")
+    source = KERNELS.read_text(encoding="utf-8")
+    for switch in ("SUROGATE_FORK_HOST_GRAD_ACCUM", "SUROGATE_FORK_GRAD_D2H_STREAM", "SUROGATE_FORK_CPU_ADAMW_SIMD"):
+        assert f'env_flag("{switch}")' in source
+        assert f"`{switch}=1`" in doc, switch
