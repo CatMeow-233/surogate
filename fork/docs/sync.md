@@ -248,6 +248,12 @@ git log --oneline HEAD..MERGE_HEAD -- <文件>                # 上游改了什�
 - 解决：以上游为准，再把每处的 `abs_max(...)` 放回量化之前。上游让生产者 kernel 自己写 amax（传入非空的 `abs_max_ptr` 并先清零）时，删去对应的一行；上游改为 delayed scaling 下也做预量化时，按新代码重新判断（那时 amax 应记录到 scaling state）。上游开始包含 `fp8_matmul.h` 或 `bf16_matmul.h` 时，测试失败，在它们的 JIT 分支补上同样的 `abs_max`。
 - 测试：`fork/patches/tests/native/test_fp8_prequant_amax.py`（`fork/dev test patches`，不需要 GPU；探针按源码原样提取三个预量化块，条件或缓冲的写法变了时它在提取或编译时失败，按新代码调整桩）；GPU 检查见 errata。
 
+### T28 训练路径 SharedModelServer 的 FIFO 接纳与客户端离开时中止
+
+- 文件：`surogate/grpo/shared_model.py`，五处：`__init__` 中局部导入 `surogate/_fork/shared_admission.py` 并建 `self.admission = Admission(settings)`；`do_POST` 调用 `owner.admit(body.get("model"), self.connection)`；`admit()` 多一个参数 `connection=None`，在 `with self.condition:` 内、上游的拒绝检查之前调用 `self.admission.wait(self, model, connection)`；`summary()` 加 `**self.admission.summary()`；`_generate` 的 token 循环在每步解码前调用 `self.admission.check_client()`。开关 `SUROGATE_SHARED_SERVER_QUEUE`、`SUROGATE_SHARED_SERVER_ABORT`。缺陷与证据见 [upstream-errata.md](upstream-errata.md#训练路径的-sharedmodelserver-在满载时拒绝-rolloutfork-已修复ledger-t28)。
+- 解决：以上游为准，再把这五处放回。`wait()` 依赖上游 `admit()` 在它之后仍按 `sleeping`、`closed`、`active >= capacity` 回 `Busy`，并在离开时 `notify_all()`；依赖 `begin_training()` 与 `close()` 设置 `sleeping` 并通知同一个 condition；依赖 `do_POST` 把 `ConnectionResetError` 当作客户端离开、不写响应（`ClientDisconnected` 是它的子类）。上游改动其中任何一点时按新代码调整 `shared_admission.py`，测试会指出哪一点。上游自己给这个服务加上排队时，比较两种做法，再决定是否删去 T28。
+- 测试：`fork/patches/tests/grpo/test_shared_admission.py`（`fork/dev test patches`，不需要 GPU），以及上游的 `tests/grpo/test_shared_model.py` 等在两种模式下都应通过。
+
 ### 移动过的上游笔记与删除的文件
 
 - 上游修改已移动的笔记：没有冲突，修改合入 `docs/upstream-notes/` 中的文件。

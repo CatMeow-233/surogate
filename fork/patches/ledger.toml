@@ -835,3 +835,35 @@ tests = ["fork/patches/tests/native/test_fp8_prequant_amax.py"]
 conflict_history = [
     "2026-10-31 reverse replay of b2426862 onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: fused_residual_rmsnorm.cpp 0/0/0, swiglu.cpp 0/0/0, matmul_swiglu.cpp 0/0/0",
 ]
+
+[[topic]]
+id = "T28"
+title = "SharedModelServer queues requests past its lanes and stops rollouts whose client left"
+commits = []
+switch = "SUROGATE_SHARED_SERVER_QUEUE=fifo (default, defect fix) | reject (upstream's admission: 429 at capacity, no disconnect checks); SUROGATE_SHARED_SERVER_ABORT=1 (default) | 0 (an admitted request runs to max_tokens after its client leaves; queued ones are still skipped); both read when the server is built"
+# Defect (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "训练路径的 SharedModelServer 在满载时拒绝 rollout"):
+# SharedModelServer.admit raised Busy (429) whenever max_concurrency lanes were busy, though the colocated run keeps
+# max_inflight_rollouts (batch_size) requests in flight against min(16, batch_size) lanes, and ignored the
+# max_pending_requests / pending_timeout_ms that capacity.py sizes for that load and native_colocate.py passes in the
+# settings. The SDK's ten retries (about 42-56 s) end in RateLimitError, verifiers stores it in the rollout, and the
+# scheduler counts it toward MAX_ROLLOUT_ATTEMPTS_PER_GROUP and reschedules; freed lanes go to refill requests first.
+# The fix lives in surogate/_fork/shared_admission.py: a FIFO of waiters under the server's condition, bounded by
+# max_pending_requests plus one per lane (an answered request holds its lane until do_POST leaves admit(), while its
+# client may already have sent the next request) and by pending_timeout_ms, refused (429) while training or closed
+# as before; a waiter whose
+# client closed its socket (cpp-httplib's is_socket_alive test, as the native server uses) is never admitted, and an
+# admitted request stops at its next token check (at most every 50 ms) once its client has gone.
+# shared_model.py keeps five hunks: in __init__ a local import and `self.admission = Admission(settings)`; do_POST
+# passes `self.connection` to admit(); admit() takes `connection=None` and first calls
+# `self.admission.wait(self, model, connection)` under the condition, before upstream's refusal checks, which still
+# refuse while training or closed; summary() adds the admission counters; _generate's token loop calls
+# `self.admission.check_client()` before each decode step. A client that left gets no response (ClientDisconnected is
+# a ConnectionResetError, which do_POST already drops).
+files = ["surogate/grpo/shared_model.py"]
+fork_files = [
+    "surogate/_fork/shared_admission.py",
+    "fork/patches/tests/grpo/test_shared_admission.py",
+    "fork/patches/bench/grpo_shared_admission.py",   # CPU emulation of one batch: reject vs fifo
+]
+tests = ["fork/patches/tests/grpo/test_shared_admission.py"]
+conflict_history = []

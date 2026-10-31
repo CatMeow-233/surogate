@@ -384,3 +384,22 @@ GPU 检查（未做）：在 5090 上用一个小的随机 Nemotron-H（结构�
 验证（没有 GPU）：`fork/patches/tests/native/test_fp8_prequant_amax.py`（`fork/dev test patches`）把三段预量化代码按源码原样编译，条件强制打开，主机桩的 `abs_max` 计算 max|x|，`quantize_with_abs_max` 记录它读到的 amax；槽位预先放着过期的值（0.25、0、100、0），四种调用都必须用张量自己的 amax 3.5 量化，`abs_max` 调用恰好一次且位于量化之前。用上游源码（`488e5f00`）运行时这 7 个测试失败（用到的是过期的值）。三个翻译单元按 sm_120a 配置的编译命令编译通过。
 
 GPU 检查（未做）：这条路径只有强制打开才能走到，例如做一个测试构建，让 `has_fp8_delayed_scaling()` 返回 false（或不创建 `FP8ScalingState`），在 5090 上用 Qwen3-0.6B、`recipe: fp8-hybrid` 跑一个前向。比较打开与不打开预量化时 QKV、MLPUp、MLPDown 输入的 FP8 字节和 scale：修复后应逐位相同，修复前不同（槽位中是分配时的内容或上一层的 amax）；再比较 3 步的 loss，修复后与不打开时在逐位或 FP8 噪声内相同。
+
+## 训练路径的 SharedModelServer 在满载时拒绝 rollout（fork 已修复：ledger T28）
+
+本节是例外：fork 修改了上游文件，修复记在 [ledger](../patches/ledger.toml) 的 T28。行号对应上游 `282f9901`；`surogate/grpo/shared_model.py`、`native_colocate.py`、`utils/capacity.py` 在 upstream/main `82d42c72` 上没有变化。
+
+现象：`grpo-colocate` 用训练路径的服务（`shared_execution()` 返回 `"training"`：MoE、GLM、非 Qwen 的模型，以及 LoRA 目标或工具模板不标准的 Qwen3/3.5）时，超出 `max_num_seqs` 的在途 rollout 立即得到 429，OpenAI SDK 退避重试，约 42-56 s 后放弃，rollout 丢失。默认配置就会触发：在途数是 `max_inflight_rollouts`（默认等于 `batch_size`），`max_num_seqs` 不设时取 `min(16, batch_size)`，所以 `batch_size` 大于 16 就会；上游示例（batch 8 对 `max_num_seqs` 8，或 4 对 4）只在 eval 与训练 rollout 同时进行时触发。原生的 Qwen SharedServer 不受影响，它的等待队列是 FIFO。
+
+证据：
+
+- `shared_model.py:196-199` 的 `admit()` 在 `active >= capacity` 时抛 `Busy`，`do_POST` 第 178 行把它映射为 429，不带 `Retry-After`。
+- `native_colocate.py:197-198` 把 `capacity.py` 为本次运行算出的 `max_pending_requests` 与 `pending_timeout_ms` 放进 settings，`SharedModelServer.__init__` 却只读 `max_concurrency`（第 69 行）。`capacity.py:89` 记录了上游在原生服务上测到的同一种失败：128 个在途请求对上限 24，丢失 259 个 rollout。
+- rollout 客户端是 OpenAI SDK 2.32，`utils/client.py:149` 设 `max_retries=10`；SDK 对 429 按 min(0.5·2^n, 8)·U(0.75, 1) 秒退避。verifiers 0.3.0 把最终的 `RateLimitError` 包装成 `vf.ModelError`，存进 rollout 的 `state["error"]`；调度器把它记为该组的一次失败并重新调度（`scheduler.py:685`），一组累计 `MAX_ROLLOUT_ATTEMPTS_PER_GROUP = 16`（第 56 行）次失败后被丢弃，连续丢组会抛 `RolloutFailureLoop` 中止运行。
+- 每完成一个 rollout，`_schedule_next_request`（第 380 行）立即补发新的请求，它比还在退避的原请求先到，拿走空出的 lane；GRPO 需要一组的全部 rollout，组于是零散地完成，batch 里大多是后来补发的组。
+- 批末 `Scheduler.cancel_inflight_rollouts` 关闭在途请求的连接，但服务端不检查连接，已经接纳的请求照样解码到结束，`begin_training()` 要等它们。
+- CPU 复现（`fork/patches/bench/grpo_shared_admission.py`：真实的 `SharedModelServer` HTTP 处理与 `admit()`、OpenAI SDK 的重试、`Scheduler.generate_batch`，只把每个 token 的解码换成 sleep；16 个 lane、128 个在途、16 组 × 8、补全长度 64-1536 对数均匀且 15% 到上限，SDK 的退避常数与每 token 6 ms 同比例缩为一半，2 个种子）：上游一批用 82-106 s，4383-5601 次 429，丢失 256-295 个原始 rollout，batch 中 16 个原始组只有 1 个；批末取消后 `begin_training()` 还等了 5.2-8.5 s，被取消的请求又解码了 5.8k-8.0k 个 token。不缩放时间常数（每 token 12 ms）的一次：155.6 s，4269 次 429，丢失 252 个原始 rollout，丢弃 4 组，batch 中没有一个原始组，`begin_training()` 等 16.4 s。
+
+修复（T28，开关见 ledger）：`surogate/_fork/shared_admission.py`。lane 全忙时请求按到达顺序排队，最多 `max_pending_requests` 个外加每个 lane 一个（已经应答的请求要到 `do_POST` 离开 `admit()` 才让出 lane，而它的客户端可能已经发出下一个请求），等待超过 `pending_timeout_ms` 时回 429；训练期间和关闭后仍立即回 429，`begin_training()` 与 `close()` 让所有等待者以 429 结束。客户端已经关闭连接的等待者不会被接纳，已接纳的请求在下一次 token 检查（最多每 50 ms 一次）时停止；判断方法与原生服务相同（cpp-httplib 的 `is_socket_alive`：套接字可读且 1 字节的 `MSG_PEEK` 读到 EOF 或出错）。按连接判断而不是由调度器触发全局中止，是因为验证 rollout 和 RULER judge 也走这个服务，没有人取消它们。`SUROGATE_SHARED_SERVER_QUEUE=reject` 恢复上游行为。同一复现中，修复后一批用 36.5-38.6 s，没有 429，丢失 0 个，batch 中原始组 15-16 个（缺的那一组里有到达上限的长 rollout，晚于一个补发的组完成），`begin_training()` 等 0.01-0.02 s，取消后只再解码 3-13 个 token；不缩放时间常数时 74.1 s，0 次 429，16 个原始组全在 batch 中，等 0.02 s。只排队、客户端离开后不停止（`SUROGATE_SHARED_SERVER_ABORT=0`）时，`begin_training()` 等 7.3-8.7 s，多解码 7.0k-9.3k 个 token。
+
+验证：`fork/patches/tests/grpo/test_shared_admission.py`（`fork/dev test patches`）驱动真实的 HTTP 处理、`admit()` 和 token 循环，其中标明的几项在上游的服务上失败（第二个请求立即得到 429；关闭 SDK 重试时 6 个请求中 4 个 `RateLimitError`；客户端离开后请求仍解码到 `max_tokens`）。上游的 `tests/grpo/test_shared_model.py`、`test_tool_protocol.py`、`test_sampling_args.py`、`test_routing_replay.py` 在两种模式下都通过。GPU 上未验证，5090 检查见 [performance.md](performance.md#grpo-训练路径服务的排队与中止ledger-t28)。

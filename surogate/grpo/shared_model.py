@@ -72,6 +72,9 @@ class SharedModelServer:
         self.condition = threading.Condition()
         self.compute_lock = threading.Lock()
         self.sleeping, self.closed, self.active = True, False, 0
+        from surogate._fork.shared_admission import Admission
+
+        self.admission = Admission(settings)  # FIFO admission, client-disconnect abort (ledger T28)
         self.version, self.adapter = int(settings.get("initial_policy_version", -1)), None
         if self.version < -1:
             raise ValueError("initial_policy_version must be at least -1")
@@ -151,7 +154,7 @@ class SharedModelServer:
                     if self.path not in ("/v1/chat/completions", "/v1/chat/completions/tokens"):
                         self.send_json(404, {"error": {"message": "unknown endpoint"}})
                         return
-                    with owner.admit(body.get("model")):
+                    with owner.admit(body.get("model"), self.connection):
                         request = owner.prepare(body)
                         callback = None
                         if body.get("stream"):
@@ -193,8 +196,9 @@ class SharedModelServer:
         self.thread.start()
 
     @contextmanager
-    def admit(self, model):
+    def admit(self, model, connection=None):
         with self.condition:
+            self.admission.wait(self, model, connection)  # waits for a lane in arrival order (ledger T28)
             if self.sleeping or self.closed or self.active >= self.capacity:
                 raise Busy("shared model is training or at request capacity; retry after publication")
             if model not in (self.model, self.adapter):
@@ -232,6 +236,7 @@ class SharedModelServer:
                         sleeping=self.sleeping, execution="training", persistent_decode=self.persistent_decode,
                         continuous_batching=self.scheduler is not None,
                         gpu_sampling=self.scheduler is not None and hasattr(self.trainer, "decode_batch_sample"),
+                        **self.admission.summary(),  # ledger T28
                         **(self.scheduler.summary() if self.scheduler else {}))
 
     def close(self):
@@ -387,6 +392,7 @@ class SharedModelServer:
                       logit_bias={int(token): float(bias) for token, bias in (request.get("logit_bias") or {}).items()})
         for step in range(request["maximum"]):
             positions[0] = len(prompt) + step - 1
+            self.admission.check_client()  # stops when the client has left (ledger T28)
             if gpu_sampling:
                 tokens = np.asarray(prompt if step == 0 else [ids[-1]], dtype=np.int32)
                 sampled = decode(tokens, step == 0, params | dict(

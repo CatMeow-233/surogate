@@ -261,3 +261,27 @@ ledger T25，开关 `SUROGATE_GPT_OSS_PREQUANT_SKIP_EXPERT_DGRAD=1`，默认关�
 
 代价没有在 GPU 上测量。按路线图的估计（GPT-OSS-20B 前向加重放的专家时间 10.9 ms/层），多出的 dgrad 约 +5 ms/层；`docs/reference/benchmarks.md` 中 gpt-oss-20B 的吞吐是带着跳过测的，与 fork 的默认设置不可直接比较。测量方法：在 5090 上用 `examples/sft/gpt-oss/gptoss-lora-mxfp4.yaml`（改为单卡，`ep_size: 1`）分别不设和设置开关，各跑 20 步，比较稳定后的步时间，并用 nsys 统计每层分组 GEMM 的个数与耗时（开关打开时每个 MoE 层少两个）。
 
+## GRPO 训练路径服务的排队与中止（ledger T28）
+
+训练路径的 `SharedModelServer`（MoE、GLM、非 Qwen 模型，以及 LoRA 目标或工具模板不标准的 Qwen3/3.5）原先在 lane 全忙时回 429，rollout 在 OpenAI SDK 的退避中丢失，补发的请求抢先拿到 lane；这是缺陷，记在 [upstream-errata.md](upstream-errata.md#训练路径的-sharedmodelserver-在满载时拒绝-rolloutfork-已修复ledger-t28)。修复在 `surogate/_fork/shared_admission.py`，默认打开：
+
+| 开关 | 取值 | 作用 |
+| --- | --- | --- |
+| `SUROGATE_SHARED_SERVER_QUEUE` | `fifo`（默认）、`reject` | `fifo`：lane 全忙时按到达顺序排队，上限 `max_pending_requests` 加每个 lane 一个，等待超过 `pending_timeout_ms` 回 429；`reject`：上游的接纳方式，不做任何连接检查 |
+| `SUROGATE_SHARED_SERVER_ABORT` | `1`（默认）、`0` | `1`：已接纳的请求在客户端关闭连接后的下一次 token 检查（最多每 50 ms 一次）停止；`0`：照样解码到结束（上游行为）。排队中的请求在客户端离开后总是被跳过，否则批末取消的请求会在打包间隙中拿到 lane |
+
+两个变量在服务构建时读取，取值不合法时构建报错。`max_pending_requests` 与 `pending_timeout_ms` 由 `surogate/grpo/utils/capacity.py` 按本次运行的在途数算出（`native_colocate.py` 传入），也可以在 `infer` 配置中显式设置；`max_pending_requests: 0` 表示不排队。每个阶段写入 `shared_weights.jsonl` 的服务摘要多了累计计数：`admission_refused_capacity`（因 lane 与队列都满回的 429，`reject` 模式下就是全部满载 429）、`admission_refused_timeout`、`admission_refused_training`（训练期间与关闭后的 429）、`admission_queued`、`admission_max_queued`、`admission_disconnected_waiting`（客户端离开、没有被接纳的等待者）和 `admission_aborted_running`（客户端离开后停止的请求）。
+
+CPU 测量（`fork/patches/bench/grpo_shared_admission.py`，复现参数见 errata；前三行各 2 个种子，SDK 的退避常数与每 token 的时间缩为一半，后两行不缩放、种子 0）：
+
+| 模式 | 一批的时间 | 满载 429 | 丢失的原始 rollout | 丢弃的组 | batch 中的原始组 | `begin_training()` 等待 | 取消后解码的 token |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `reject` | 82-106 s | 4383-5601 | 256-295 | 0-1 | 1/16 | 5.2-8.5 s | 5.8k-8.0k |
+| `fifo` | 36.5-38.6 s | 0 | 0 | 0 | 15-16/16 | 0.01-0.02 s | 3-13 |
+| `fifo` + `ABORT=0` | 38.2-38.6 s | 0 | 0 | 0 | 16/16 | 7.3-8.7 s | 7.0k-9.3k |
+| `reject`，不缩放 | 155.6 s | 4269 | 252 | 4 | 0/16 | 16.4 s | 6.7k |
+| `fifo`，不缩放 | 74.1 s | 0 | 0 | 0 | 16/16 | 0.02 s | 10 |
+
+队列最多有 113 个等待者，比 `max_pending_requests`（112）多一个：没有每 lane 一个的余量时，每批有 4-9 个请求在交接的瞬间看到队列已满而得到 429（重试后成功）。CPU 上的数字只说明调度行为：解码是 sleep，没有 GIL 下的真实解码开销，也没有 MoE 低并发轮次读专家的成本。没有改动、留作后续的：`ThreadingHTTPServer` 的 listen backlog 是 5，一批开始时上百个连接同时到达，可能有连接等 SYN 重传（约 1 s），未测量。
+
+5090 检查（未验证）：W-MoE-GRPO（约 10B 的 qwen3_moe LoRA，16 题 × 8，`max_tokens` 1536，`batch_size` 128，`max_num_seqs` 16）各跑 20 步 `fifo` 与 `SUROGATE_SHARED_SERVER_QUEUE=reject`（再加一组 `fifo` + `SUROGATE_SHARED_SERVER_ABORT=0`）。每步记录：`shared_weights.jsonl` 中 `admission_*` 计数的增量；orchestrator 日志中 “Rollout error … RateLimitError” 与 “Dropping group” 的条数；`scheduler/cancelled_rollouts`；`last_batch_generation_time`；`begin_training()` 的耗时，即 `train/cycle_duration_ms` 减去 `train/publish_duration_ms`、`train/pack_duration_ms`、`train/batch_wait_duration_ms`、`train/batch_receive_duration_ms` 与 `train/duration_ms`（余下的就是 `begin_training()` 和几行簿记）。期望 `fifo` 下没有满载 429、没有 RateLimitError 与丢组，`begin_training()` 在一轮解码之内返回。
