@@ -43,7 +43,7 @@ nsys stats --report cuda_gpu_mem_size_sum train-trace.nsys-rep
 
 ## 不能捕获的整步只预热一次
 
-`train_step_graphed` 在捕获整步 graph 之前，先 eager 跑一遍所有微步的前向和反向，再丢弃结果（`zero_grads`，恢复 RNG 状态），并按这一遍测得的高水位把 DSL stack 缩小一次。含捕获不安全 op 的模型（MoE 路由与 grouped GEMM、EP 的 dispatch/combine，见 `graph_executor.cpp` 的 `is_capture_unsafe_op_type`）从不捕获：每一步都走 eager 分支，`gs.captured` 一直为 false，所以上游每一步都多跑一遍被丢弃的前向+反向和一次流同步。受影响的是非 QLoRA、非预量化的 MoE SFT：`use_cuda_graphs` 默认开启，Python 侧没有为 MoE 关掉 graph 的规则。QLoRA、预量化、`offload_master` 等已经关掉 graph 的配置不受影响，发布的 MoE SFT 示例都是预量化的。
+`train_step_graphed` 在捕获整步 graph 之前，先 eager 跑一遍所有微步的前向和反向，再丢弃结果（`zero_grads`，恢复 RNG 状态），并按这一遍测得的高水位把 DSL stack 缩小一次。含捕获不安全 op 的模型（MoE 路由与 grouped GEMM、EP 的 dispatch/combine，见 `graph_executor.cpp` 的 `is_capture_unsafe_op_type`）从不捕获：每一步都走 eager 分支，`gs.captured` 一直为 false，所以上游每一步都多跑一遍被丢弃的前向+反向和一次流同步。受影响的是非 QLoRA、非预量化的 MoE SFT：`use_cuda_graphs` 默认开启，Python 侧没有为 MoE 关掉 graph 的规则。QLoRA、预量化、`offload_master`、`sequence_chunks > 1` 等已经关掉 graph 的配置不受影响（eager 分支不跑 warmup），`ep_size > 1` 保留 warmup（见下文）。发布的示例中受影响的是 GLM 的 BF16 dummy MoE 配置：`examples/sft/glm/dummy-full.yaml`、`dummy-lora.yaml` 与 `dummy-long-context.yaml`（模型由 `examples/sft/glm/create_dummy.py` 生成，4 个路由专家、每个 token 选 2 个；`recipe: bf16`、`sample_packing: true`、`ep_size` 为默认的 1，graph 保持开启）。其余 MoE 示例要么是 QLoRA 或预量化的 checkpoint，要么用 `sequence_chunks > 1` 或 `ep_size > 1`。
 
 ledger T20：`has_capture_unsafe_ops()` 在第一次 warmup 之前就已知（graph 在 `allocate_run_state` 中编译），所以这类模型只在第一次执行的步跑 warmup，stack 照旧在那里缩小一次，之后的步跳过它。判断在 `fork/native/include/surogate_fork/full_step_warmup.h` 的 `run_warmup` 中。warmup 不留下 eager 分支会用到的状态：梯度在微步 0 清零，RNG（包括 executor 自己的状态）被恢复，loss 缓冲在微步 0 重新初始化，FP8 记录的 amax 在 `begin_step` 中清零、历史只由优化器滚动，MoE 统计在微步 0 清零。因此结果应逐位相同，这只是读代码的结论。例外是专家并行：warmup 会推进 sticky EP plan 的年龄（`ep_strategy.cpp`，`ep_plan_refresh_interval` 默认 16），跳过后 plan 按不同的节奏刷新，结果仍正确但不再逐位相同，所以 `ep_size > 1` 时每步仍跑 warmup。EP 也想跳过时，可以用上游的 `SUROGATE_DSL_GRAPH_SKIP_WARMUP=1`，它对所有模型都跳过 warmup，也不再缩小 stack。
 
@@ -57,6 +57,8 @@ ledger T20：`has_capture_unsafe_ops()` 在第一次 warmup 之前就已知（gr
 - `nsys stats --report cuda_gpu_kern_sum`：每个优化器步的 GemmGrouped kernel 数减半。
 - 100 步的 loss 逐位相同，报告的 MoE 统计相同。
 - allocator 峰值（`debug_memory_breakdown`）在 ±1% 内，stderr 中仍然有一次 “DSL stack shrunk before full-step capture”。
+
+便宜的冒烟检查：用 `examples/sft/glm/create_dummy.py` 生成 dummy 模型（见 `examples/sft/glm/README.md`），以 `examples/sft/glm/dummy-lora.yaml` 跑默认与 `SUROGATE_FORK_FORCE_GRAPH_WARMUP=1` 各一次：10 步的 loss 与报告的 MoE 统计逐位相同。这只检查结果不变；dummy 模型太小，不用来测速。
 
 零代码对照：上游的 `SUROGATE_DSL_GRAPH_SKIP_WARMUP=1` 跳过包括第 0 步在内的全部 warmup 和 stack 缩小，stack 因此会大一些。
 
