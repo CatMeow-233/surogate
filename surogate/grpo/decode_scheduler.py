@@ -48,6 +48,9 @@ class DecodeScheduler:
         self.ids = itertools.count(1)
         self.lengths = {}
         self.decoding = set()
+        from surogate._fork.grpo_live_dispatch import LiveSessions
+
+        self.live = LiveSessions()  # sizes rounds by live sessions when enabled (ledger T12)
         self.closed = False
         self.decode_streak = 0
         self.rounds = self.batched_rounds = self.max_observed_batch = 0
@@ -60,6 +63,7 @@ class DecodeScheduler:
         with self.condition:
             if self.closed:
                 raise RuntimeError("decode scheduler is closed")
+            self.live.opened()
             return next(self.ids)
 
     def step(self, session, tokens, reset=False, sampling=None):
@@ -80,6 +84,7 @@ class DecodeScheduler:
         """Free a session. With routing=True, returns its captured expert routing (start, rows) or None."""
         future = Future()
         with self.condition:
+            self.live.released()
             if self.closed:
                 return None
             self.releases.append((session, future, cache, routing))
@@ -314,7 +319,7 @@ class DecodeScheduler:
                 self.condition.wait_for(lambda: self.closed or self.pending or self.releases)
                 if not self.closed and self.pending and not self.releases:
                     deadline = time.monotonic() + 0.001
-                    while len(self.pending) < self.max_batch and not self.releases and not self.closed:
+                    while len(self.pending) < self.live.round_size(self.max_batch) and not self.releases and not self.closed:
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
                             break

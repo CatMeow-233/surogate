@@ -9,7 +9,7 @@
 | 子包 | .py 文件 | 作用 |
 |---|---|---|
 | `surogate` | 2 | 包根：`__init__.py` 与 setuptools-scm 生成的 `_version.py` |
-| `surogate/_fork` | 6 | fork：Python 补丁调用的代码，随原生 wheel 发布（ledger T6、T7、T10、T11、T28） |
+| `surogate/_fork` | 7 | fork：Python 补丁调用的代码，随原生 wheel 发布（ledger T6、T7、T10–T12、T28） |
 | `surogate/cli` | 20 | `surogate` 命令及其子命令入口 |
 | `surogate/core` | 38 | 共享基础：配置、数据集、模型与分词器加载 |
 | `surogate/debug` | 16 | 调试与诊断（`surogate debug`） |
@@ -24,7 +24,7 @@
 | `surogate/train` | 24 | SFT 与预训练训练循环 |
 | `surogate/transplant` | 2 | 分词器移植（`surogate transplant-tokenizer`） |
 | `surogate/utils` | 22 | 通用工具：日志、系统信息、adapter 合并等 |
-| 合计 | 556 |  |
+| 合计 | 557 |  |
 
 ## 命令行入口
 

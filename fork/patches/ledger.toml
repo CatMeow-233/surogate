@@ -427,6 +427,24 @@ conflict_history = [
 ]
 
 [[topic]]
+id = "T12"
+title = "decode rounds sized by live sessions"
+commits = []
+switch = "SUROGATE_GRPO_LIVE_DISPATCH=1 (default off; read when the DecodeScheduler is built)"
+# decode_scheduler.py keeps four hunks: the LiveSessions counter built in __init__ (local import),
+# opened() in new_session, released() in release, and round_size(max_batch) in place of max_batch
+# in _run's 1 ms gather loop. Off, round_size is max_batch and the loop is upstream's.
+files = ["surogate/grpo/decode_scheduler.py"]
+fork_files = [
+    "surogate/_fork/grpo_live_dispatch.py",
+    "fork/patches/tests/grpo/test_decode_live_dispatch.py",
+]
+tests = ["fork/patches/tests/grpo/test_decode_live_dispatch.py"]
+conflict_history = [
+    "2026-10-31 reverse replay from 282f9901, conflict blocks at 90/30/14 days: decode_scheduler.py did not exist 90 days back (added 2026-09-10), 0/0 at 30/14 days",
+]
+
+[[topic]]
 id = "T13"
 title = "cpu_training: no step-start memset of the host gradients"
 commits = ["49f42a6d", "64770762"]
