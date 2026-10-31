@@ -87,7 +87,7 @@ fork CI（`.github/workflows/fork-ci.yml`）在每个分支的每次推送时运
 | 8. 检查 | `fork/dev check`；不带 `--fast` 时还运行 `fork/dev test patches`、`fork/dev test experimental`、`fork/dev test tlc`、`fork/dev test tools` 和 `fork/dev test cpu`，它们需要准备好的 `.venv`（或 `FORK_PY`）、uv，以及 download.pytorch.org（无法访问时设 `FORK_TORCH_INDEX=pypi`），见 [fork/README.md 的“首次准备环境”](../README.md#首次准备环境)。 | 退出码 4 |
 | 9. 发布 | `git push -u origin <同步分支>`；PR 还没有打开时 `gh pr create -R CatMeow-233/surogate --base main`，正文（`.git/fork-sync-pr.md`）是第 3 步的报告加上同步分支的提交列表；PR 已经打开时（例如 `--continue` 之后）推送就更新了它，不再新建。`--local` 跳过此步。 | 退出码 1 |
 | 10. 完成 | PR 的检查通过后运行 `fork/dev sync --finish`。它先 `git fetch origin main <同步分支>`，要求本地 `HEAD` 等于 `origin/<同步分支>` 和 PR 的 head（`gh pr view --json headRefOid`），并且包含 `origin/main`；再用 `gh api .../commits/<HEAD>/check-runs` 确认 `check`、`experimental`、`fork-tests`、`openmp-contract` 在这个提交上都已通过（同名检查重跑过时以最新一次为准）；然后 `git switch main`、`git merge --ff-only <HEAD>`、`git push origin <HEAD>:refs/heads/main`。推送的总是检查过的那个提交：本地还没推送的提交、比 PR head 旧的本地分支都不会进入 `main`。 | 任一条件不满足时退出码 4，列出原因或未通过的 job，`main` 不变 |
-| 11. GPU 复测 | 报告中出现 T1–T5、T6–T8 或 T10 的上游提交时，在 GPU 主机上运行 `fork/dev test gpu`，并在该 topic 的 `conflict_history` 末尾记一行（日期、上游 sha、结果）。出现 T17 或 T18 的上游提交时，再做 [errata](upstream-errata.md) 中对应一节的 GPU 检查；出现 T20 的，再做 [performance.md](performance.md#不能捕获的整步只预热一次) 中的检查。 | — |
+| 11. GPU 复测 | 报告中出现 T1–T5、T6–T8 或 T10 的上游提交时，在 GPU 主机上运行 `fork/dev test gpu`，并在该 topic 的 `conflict_history` 末尾记一行（日期、上游 sha、结果）。出现 T17–T19 的上游提交时，再做 [errata](upstream-errata.md) 中对应一节的 GPU 检查；出现 T20 的，再做 [performance.md](performance.md#不能捕获的整步只预热一次) 中的检查。 | — |
 
 `--continue` 在同步分支上重新执行第 6–9 步，已经完成的部分会跳过，所以修复之后可以反复运行。它按分支名 `sync/<日期>-<sha 前 8 位>` 找同步合并：同步分支第一父链上第二父提交以这 8 位开头、并且是 `upstream/main` 祖先的最新合并；找不到（例如 `git merge --abort` 之后）或该提交不在上游历史中时停下，不会把别的合并当作同步合并。
 
@@ -183,6 +183,12 @@ git log --oneline HEAD..MERGE_HEAD -- <文件>                # 上游改了什�
 - 文件：`csrc/src/binding/py_train.cpp`（`train_step_graphed` 中四处：文档扫描换成 `scan_micro_step_documents`；`gs.captured` 时的决定换成 `plan_captured_step`，不再合成 `{0, B*T}`；捕获前不带文档时调用 `enable_doc_masking_pad_to_max(0, micro_steps)`；删去两处 `cu.size() <= 1` 的死分支。另有一行 include。这个文件也属于 T1、T20）、`csrc/src/runtime/executor/graph_executor.{h,cpp}`（T17：`IGraphExecutor::set_row_doc_masking_for_capture` 及其实现，`enable_doc_masking_pad_to_max` 对 0 关闭 pad 模式、在捕获前扩大 `mCuSeqlensGpu`；T18：`set_doc_masking` 开头按 `pad_mode_route` 分派、`set_doc_masking_exact_outside_capture` 与它的两个缓冲、`stage_cu_seqlens_for_micro_step` 的超限异常、析构函数释放 fork 的设备缓冲。这两个文件也属于 T1）、`csrc/src/runtime/executor/causal_lm_execution_profile.cpp`（T17：`apply_doc_masking` 在 `compute_doc_masking` 返回空时先调用 `set_row_doc_masking_for_capture`）。逻辑在 `fork/native/include/surogate_fork/doc_mask_staging.h`。缺陷与证据见 [upstream-errata.md](upstream-errata.md#打包-sft-的整步-cuda-graph-在没有行内边界的微步上跨行或跨文档注意fork-已修复ledger-t17)。
 - 解决：以上游为准，再把上面各处放回。上游改写 cap-and-pad 时（例如按 T 而不是 B*T 固定 `max_seqlen`，或换成按 cap 分桶的 graph），检查三条规则仍然成立：带文档的 graph 在没有行内重置的步上读按行列表；捕获中没有行内重置的微步按 varlen 捕获；捕获中不分配设备缓冲。eager 调用超过 cap 时不得改写或重新分配 graph 引用的段与 `mCuSeqlensGpu`。`test_doc_mask_staging.py` 编译上游的函数原文，函数改名或签名变化时它在提取或编译时失败，按新代码调整测试中的桩。上游自己修好这些缺陷时，删去 fork 的对应部分。
 - 测试：`fork/patches/tests/native/test_doc_mask_staging.py`（`fork/dev test patches`，不需要 GPU）；`fork/native/tests/test-fork-doc-mask-staging.cpp`（`[doc-mask]`，在 `dsl-run-state-tests` 中，只用主机）；GPU 检查见 errata。
+
+### T19 MoE 路由统计不在重计算回放中累加
+
+- 文件：`csrc/src/runtime/ops/moe_topk.cpp`（`dispatch_moe_topk` 统计块的条件加上 `mInReplay ? nullptr :`）。
+- 解决：保留这个条件。上游新增别的统计点，或改变回放方式（例如回放跳过 MoETopK）时，按 `test_moe_stats_replay.py` 的 pin 重新判断；上游自己加了判断时删去 T19。
+- 测试：`fork/patches/tests/native/test_moe_stats_replay.py`；GPU 检查见 [errata](upstream-errata.md#moe-路由统计在重计算回放中重复累加fork-已修复ledger-t19)。
 
 ### T20 不能捕获的整步只预热一次（`SUROGATE_FORK_FORCE_GRAPH_WARMUP=1` 恢复上游）
 

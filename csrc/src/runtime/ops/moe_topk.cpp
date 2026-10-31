@@ -155,7 +155,9 @@ void CompiledExecutor::dispatch_moe_topk(const CompiledOp& op) {
     }
 
     // Accumulate MoE routing stats for monitoring (non-gradient path)
-    if (float* stats = mRunState.moe_stats_device()) {
+    // fork T19: not in the recompute replay, which re-runs this routing for the backward and would add every
+    // layer a second time (the summed aux/z losses read 2x; the per-layer averages divide by a doubled count).
+    if (float* stats = mInReplay ? nullptr : mRunState.moe_stats_device()) {
         if (probs.DType == ETensorDType::BF16) {
             if (softmax) {
                 moe_compute_routing_stats_from_logits(stats,

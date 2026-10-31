@@ -4,7 +4,7 @@
 
 | 节 | ledger topic |
 |---|---|
-| [避免冗余工作与交接](#避免冗余工作与交接) | T1、T3、T4、T6、T7、T8 |
+| [避免冗余工作与交接](#避免冗余工作与交接) | T1、T3、T4、T6、T7、T8、T19 |
 | [不能捕获的整步只预热一次](#不能捕获的整步只预热一次) | T20 |
 | [CPU 优化器并行](#cpu-优化器并行) | T5 |
 | [LoRA 融合输入梯度](#lora-融合输入梯度) | T2 |
@@ -39,6 +39,7 @@ nsys stats --report cuda_gpu_mem_size_sum train-trace.nsys-rep
 - Dispatch-PP 把两个常驻的边界张量作为一批读取：先分配主机端目标缓冲区再排队拷贝，整批只等待一次。这去掉了一个多余的显式完成栅栏；传输仍使用现有的主机边界协议，不是 P2P 或零拷贝。
 - 通用 FP8 MoE 反向不再分配只有前向 recipe 才使用的输入量化缓冲区。这节省了与 `routed_tokens * input_features` 成正比的对齐 scratch 及其统计量。它降低的是 stack 需求；已预留的 arena 不一定立即释放显存。
 - 全参数 MoE 权重反向在每个 expert 都有 token、且每个目标元素都会被 beta 为零的 GEMM 覆盖时，跳过对整个 dW 的清零。覆盖步中，空 expert 的梯度仍保持为零；累加时从不清除已有梯度。冻结的 LoRA base 不走这条 base 权重路径。
+- 重计算回放 MoE 层时不再计算路由统计（每个 MoE 层、每个微步少一次单 CTA 的 kernel）。这同时修复了 `aux_loss` 与 `z_loss` 报告为 2 倍的问题，见 [upstream-errata.md](upstream-errata.md#moe-路由统计在重计算回放中重复累加fork-已修复ledger-t19)。
 
 ## 不能捕获的整步只预热一次
 

@@ -157,3 +157,13 @@ vendored 代码位于 `csrc/src/third_party/`，但两处排除项仍写作旧�
 - T17 在不带文档的捕获之前关掉 pad 模式；带文档捕获之后 pad 模式保持开启，因为 graph 读那些段。
 
 验证：`fork/patches/tests/native/test_doc_mask_staging.py` 中 `test_eval_with_more_documents_than_the_cap_runs_exact_geometry`（cap 4 的 graph 之后用 8 个文档评估：注意力覆盖与 eager 相同，各段的存储不变，下一步的回放仍与 eager 相同）、`test_exact_geometry_leaves_the_buffers_a_graph_holds_alone`、`test_staging_more_documents_than_the_cap_throws_outside_a_capture`；用上游源码重跑时前一个失败（只覆盖前 8 个 token）。GPU 检查（未做；只有 R12 或手工打包的评估文件才有意义）：每个微步不超过 4 个文档时捕获，然后用每个微步 8 个文档的 batch 调用 `trainer.validate`，与 `use_cuda_graphs: false` 的 trainer 比较评估 loss，修复后应在 bf16 噪声内相等。
+
+## MoE 路由统计在重计算回放中重复累加（fork 已修复：ledger T19）
+
+本节同样是例外：fork 修改了上游文件。行号对应上游 `282f9901`。`moe_topk.cpp:158-192`（`dispatch_moe_topk` 中的统计块）没有判断 `mInReplay`。`recompute: true`（默认）时，反向对每一层调用 `replay_layer_forward`（`compiled_ops_execute.cpp:135`、`339-361`），它重新执行该层除损失 op 以外的全部前向 op，其中包括 MoETopK，统计 kernel 于是把每一层再加一次（`moe_losses.cu:384-394`、`532-542`、`688-698`：每次调用都给 slot 4 的层数加 1）。`get_moe_stats`（`dsl_run_state.cpp:1434-1458`）原样返回 slot 0 与 1，其余各项除以 slot 4。所以只有两个求和项 `aux_loss` 与 `z_loss` 报告为 2 倍；其余 8 个平均值（`expert_utilization`、`load_imbalance`、`active_experts`、最大与最小占比、`load_cv`、`router_entropy`、`router_confidence`）的层数也翻倍，在浮点舍入内不变。`recompute: false` 时统计正确。这条路径只用于监控，不影响梯度。`aux_loss` 与 `z_loss` 是 GA 个微步、所有 MoE 层的和，不是平均。
+
+roadmap 还说整步 warmup 也会重复计数，这不对：微步 0 的前向调用 `begin_step()`（`graph_executor.cpp:1962-1963`），它最后调用 `reset_moe_stats()`，warmup 累加的值在 Python 读取统计之前就被清掉。因此 T20 去掉 warmup 不改变任何报告的统计值。
+
+修复：回放中跳过统计块（`mInReplay ? nullptr : mRunState.moe_stats_device()`）。这也省去每个 MoE 层、每个微步一次单 CTA 的统计 kernel。
+
+验证：源码 pin `fork/patches/tests/native/test_moe_stats_replay.py`（守卫；回放在 `mInReplay` 为真时分派层内的 op，MoETopK 不被跳过；`get_moe_stats` 的求和与平均；微步 0 清零），在未修复的源码上第一项失败；`moe_topk.cpp` 按 sm_120a 配置的编译命令编译通过。GPU 检查（未做）：MoE SFT（例如 OLMoE-1B-7B，BF16 LoRA），固定 seed 与 batch，分别用 `recompute: true` 与 `false` 记录 `aux_loss` 与 `z_loss`：修复前两者之比为 2.0，修复后为 1.0；`expert_utilization` 与 `router_entropy` 在四次运行中都相同。
