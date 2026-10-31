@@ -20,6 +20,7 @@
 #include "kernels/kernel_utils.cuh"
 #include "kernels/kernels.h"
 #include "recipes/nvfp4/nvfp4_recipe.h"
+#include "surogate_fork/nvfp4_4o6.h"  // fork ledger T24
 #include "utilities/tensor.h"
 #include "utilities/utils.h"
 
@@ -116,6 +117,13 @@ void quantize_nvfp4_4o6_cutlass_auto_scale(uint8_t* out_fp4,
 
     const int num_scale_cols = div_ceil(K, kBlockSize);
 
+    // Fork ledger T24: encode with the stored block scale (SUROGATE_NVFP4_4O6_RN_LEGACY=1 runs the kernels below).
+    if (surogate_fork::nvfp4::four_over_six_rn_fixed()) {
+        surogate_fork::nvfp4::quantize_4o6(out_fp4, block_scales, global_amax, in, M, K, error_metric, stream);
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
+
     switch (error_metric) {
         case recipes::FourOverSixErrorMetric::MSE:
             nvfp4_4o6_sm100::quantize_4o6_cutlass_mse(out_fp4,
@@ -172,6 +180,13 @@ void quantize_nvfp4_4o6_cutlass_from_amax(uint8_t* out_fp4,
     // numerically and saves a full pass over [M, K] per quantized activation.
     const int num_scale_cols = div_ceil(K, kBlockSize);
 
+    // Fork ledger T24: encode with the stored block scale (SUROGATE_NVFP4_4O6_RN_LEGACY=1 runs the kernels below).
+    if (surogate_fork::nvfp4::four_over_six_rn_fixed()) {
+        surogate_fork::nvfp4::quantize_4o6(out_fp4, block_scales, global_amax, in, M, K, error_metric, stream);
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
+
     switch (error_metric) {
         case recipes::FourOverSixErrorMetric::MSE:
             nvfp4_4o6_sm100::quantize_4o6_cutlass_mse(out_fp4,
@@ -225,6 +240,14 @@ void quantize_nvfp4_4o6_stochastic_cutlass_auto_scale(uint8_t* out_fp4,
     abs_max(global_amax, in, (long)M * K, dp, stream);
 
     const int num_scale_cols = div_ceil(K, kBlockSize);
+
+    // Fork ledger T24: unbiased SR (SUROGATE_NVFP4_4O6_SR_LEGACY=1 runs the kernels below).
+    if (surogate_fork::nvfp4::four_over_six_sr_fixed()) {
+        surogate_fork::nvfp4::quantize_4o6_stochastic(
+            out_fp4, block_scales, global_amax, in, M, K, error_metric, seed, stream);
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
 
     switch (error_metric) {
         case recipes::FourOverSixErrorMetric::MSE:

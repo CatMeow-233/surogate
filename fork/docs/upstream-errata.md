@@ -295,3 +295,29 @@ GPU 检查（未做）：在 5090 上运行。
 2. 端到端：Qwen3-0.6B，LoRA，`recipe: fp8_hybrid`，`recompute: true`，`per_device_train_batch_size: 1`，`sequence_len: 16383`（BT 为奇数，日志中不出现 `Auto-setting lmhead_chunks`，保持 1 块；如果有地方要求偶数长度而报错，改用 `recompute: false`、`sequence_len: 16384`，显存未估计），训练 1 步；同一配置加环境变量 `SUROGATE_DISABLE_FP8_LMHEAD_T=1`（dX 走 BF16，不经过 `quant.cu`）作对照。期望：修复前出现非法地址错误或训练步不结束；修复后两次的 loss 相同（前向相同），grad norm 只差 E5M2 dlogits 带来的量化误差（估计相对差在 1e-2 以内，未确认）。两次 grad norm 逐位相同时说明没有走 FP8 dX 路径（例如 tied 的 head 没有进入缓存），检查不成立，改用 untied 的模型（如 Qwen3-8B 加 `SUROGATE_FP8_LMHEAD_T_MAX_MIB=1024`，显存未估计）。交叉熵 kernel 也处理这个 16,383 行的分块，所以这一项同时检查上一节的修复。
 
 在修复之前，受影响的配置可以设 `SUROGATE_DISABLE_FP8_LMHEAD_T=1`，或用 `lmhead_chunks ≥ 2`，避开这里；交叉熵 kernel 的回绕还要另外满足上一节的条件。
+
+## NVFP4 随机舍入与 Four Over Six 块比例的缺陷（fork 已修复：ledger T24）
+
+本节同样是例外：fork 修改了上游文件。行号对应上游 `282f9901`；`csrc/src/recipes/nvfp4/` 在 `488e5f00` 与上游 `82d42c72` 中相同。两处缺陷都在 NVFP4 recipe 的默认设置下出现（`fp4_backend: cutlass`、`fp4_four_over_six: true`，`surogate/core/config/sft_config.py:407-408`）。数值都来自 CPU 上逐运算重放 fp32 算术的模拟（`fork/patches/tests/native/test_nvfp4_4o6.py`；`rcp.approx` 按正确舍入的倒数模拟，二者相差不超过 1 ulp），GPU 上未确认。
+
+缺陷 1（SR）：`quantize_block_4o6_stochastic`（`quant_nvfp4_4o6_sm100.cu`）给缩放后的值加上固定的 `(b/256 - 0.5) * 0.5`（`:338`，b 是 8 位随机字段，噪声在 [-0.25, 0.25)），再用 `cvt.rn.satfinite.e2m1x2` 舍入到最近。E2M1 的间距在 [0, 2) 是 0.5，在 [2, 4) 是 1，在 [4, 6] 是 2，所以只有 [0, 2) 近似无偏：2.4 向上的概率是 76/256 而不是 0.4（期望 2.297），2.2 与 4.6 从不向上，2.8 与 5.4 总是向上；偏差最大为间距的 25%（[2, 4)）和 38%（[4, 6)），[0, 2) 上也有 -1/1024 的均值偏差。另外，值用未舍入的 `6/amax` 或 `4/amax` 编码（`:325`、`:336`），GEMM 却按存下的 E4M3 比例解码（`:353-357`），每块相差 sf/d，均方根 2.7%、范围 0.94–1.06，这是与种子无关的逐块偏差：只修正舍入时还剩 2.6e-2；改用按 RN 舍入的存储比例编码时 amax 会饱和，剩 0.8e-2–1.3e-2。随机数是每线程一个 LCG（`:503-508`），低字节只取决于种子与块号的低 8 位。触发：每个带权重梯度的稠密 matmul 的 wgrad 操作数 dout^T（`nvfp4_recipe.cpp:967-977`，经 `matmul.cpp:912` 与 `matmul_swiglu.cpp:511`），即全量训练；LoRA/QLoRA 冻结的基础权重（`skip_weight_grad`）、`fp4_backend: cudnn`、`fp4_four_over_six: false`（此时 wgrad 用标准的 Philox SR）与 MoE 专家（BF16）不经过这里。在 32×4096 的类 dout^T 张量（行比例对数正态，测试模块的 `dout_like(1234, ...)`）上，对随机字段取精确期望后 ||E[x̂]-x||/||x|| 为 5.3e-2（高斯）、4.2e-2（t(3)）、2.0e-2（0.2% 的 token 大 3e4 倍）；对种子取平均时停在 0.053 附近（4/16/64/256 个种子：0.070、0.058、0.054、0.053），说明是偏差而不是噪声。上游文档 `docs/guides/precision-and-recipes.md:119` 列出的 `no_fp4_stochastic_rounding` 没有任何代码读取，无法关掉 SR。
+
+缺陷 2（RN）：`quantize_block_4o6`（前向的输入与权重、wgrad 的 inp^T、FP4 权重缓存与流式权重）有同样的编码/解码不一致，并且把比例下限钳在 1/128（`:263`）：块比例低于 1/128（block amax < 全局 amax × 2^-15）的块按自身 amax 编码、按 1/128 解码，被放大 1/(128 d) 倍。在上面的离群 token 张量上，这些块（占 92%）的最小二乘增益为 1.98，相对误差 1.93；标准 NVFP4 kernel 用解码后的比例编码（`quant_nvfp4_cutlass.cu` 中的 `actual_decode`），4/6 论文（arXiv:2512.02010 表 2）也用 `fp8_e4m3(delta)` 编码。
+
+修复（T24，默认开启；两个开关都在进程内第一次调用时读取）：
+
+- SR（`SUROGATE_NVFP4_4O6_SR_LEGACY=1` 恢复上游 kernel）：`quant_nvfp4_4o6.cu` 的 `quantize_nvfp4_4o6_stochastic_cutlass_auto_scale` 在 `abs_max` 之后调用 `fork/native/src/nvfp4_4o6.cu` 的 `quantize_4o6_stochastic`。4/6 的选择不变（块的确定函数，不影响无偏）；存储比例取不小于 d·(1-2^-16) 的最小 E4M3 码（`e4m3_code_no_saturation`，256 与 384 保持精确），钳在 [2^-9, 448]，用存下的比例编码（`global_encode / sf`），因此没有值饱和；每个值按所在间距 s 向下取整到网格，以 k/256 的概率进一位，k = round_even(256·frac)（arXiv:2504.20634 的 SRC），每个值的 |E[q]-y| ≤ s/512，网格上的值精确，平均偏差为 0；随机数是每 16 个值一次 Philox4x32-10（计数器 (块号, 0, 0, 0)，密钥 (种子, 0x346F3653)），16 个字节各给一个值。张量上的精确期望偏差降到 4.1e-4（高斯）、4.0e-4（t(3)）、4.0e-4（离群），种子平均按 1/sqrt(N) 下降（4/16/64/256 个种子：0.072、0.036、0.018、0.009）。代价是单个种子的误差从 0.107 升到 0.142，这是无偏 SR 本身的方差。论文 2512.02010 附录 A.3 中“按 RN 选择再做 SR”的无偏做法（与这里相同）相对普通 NVFP4 没有训练收益，有偏的 4/6-on-SR 反而有，所以收敛效果未知，按结果记录。
+- RN（`SUROGATE_NVFP4_4O6_RN_LEGACY=1` 恢复上游 kernel）：`quantize_nvfp4_4o6_cutlass_auto_scale` 与 `_from_amax` 调用 `quantize_4o6`：两个候选各自用 RN 得到的 E4M3 比例编码，并按 GEMM 实际的解码（sf/global_encode）计算误差来选择，比例钳在 [2^-9, 448]。相对误差：高斯 9.03e-2 降到 8.73e-2，t(3) 8.98e-2 到 8.80e-2，离群 1.98e-2 到 1.27e-2；离群张量中低于 1/128 的块的增益从 1.98 回到 0.99。这改变所有 NVFP4 运行（包括 LoRA）的前向数值，需要在 GPU 上对比 loss。
+- 两个 4/6 kernel 多出的算术：每 16 个值一次 10 轮的 Philox（代替 4 步 LCG），SR 每块 1 次、RN 每块 4 次 IEEE 除法；寄存器数与上游相同（40），耗时没有在 GPU 上测量（见下文 GPU 检查第 3 项）。
+
+没有修复、另行记录：
+
+- 上游 4/6 kernel 文件 `quant_nvfp4_4o6_sm100.cu` 没有改动，作为 `*_LEGACY` 路径保留；`no_fp4_stochastic_rounding` 的文档行没有改（fork 不修改上游用户文档）。
+
+验证（没有 GPU）：`fork/patches/tests/native/test_nvfp4_4o6.py`（`fork/dev test patches`）用 numpy 逐运算模拟上游与 fork 的 kernel（E2M1 的 RN、E4M3 的 RN satfinite、LCG 与字节布局、Philox、4/6 的 MSE 选择与 nvcc 收缩的乘加、CUTLASS 的解码 q·sf·amax/1536），检查上面的数字；`fork/native/tests/host/nvfp4_4o6_check.cpp` 把 kernel 调用的 `surogate_fork/nvfp4_4o6_arith.h` 用主机编译器编译：Random123 的 Philox 已知答案、每个 E4M3 值及其相邻值与中点的 RN 编码、不饱和码是满足下限的最小码、SR 对 2^21 个点的 256 个字节取期望不超过 s/512、半步格点上平均偏差为 0，并以上游的抖动为反例；找到 CUDA 头文件时，还逐个比较 [2^-11, 512] 中每个 float 的 E4M3 编码与 `cuda_fp8.h` 的 `__nv_cvt_float_to_fp8`，以及 10 万个计数器上的 Philox 与 `curand_Philox4x32_10`；模拟与头文件对同一批请求逐值相同。源码 pin 检查上游启动函数在开关之后转给 fork kernel、fork kernel 调用的是检查过的算术、上游 4/6 kernel（模拟所依据的行）没有被改，以及文档中的开关名就是代码读取的名字。在 `488e5f00` 的源码上，主机检查无法编译（头文件不存在），pin 失败，上游 kernel 的模拟给出上面的偏差。fork kernel、`quant_nvfp4_4o6.cu` 和 GPU 测试按 sm_120a 的编译命令编译通过（fork 的 4/6 kernel 用 40 个寄存器，与上游相同），fork kernel 也为 sm_89 与 sm_100a 编译通过。
+
+GPU 检查（未做；5090，`fork/dev test native` 之后运行 `csrc/build/integration-tests '[nvfp4-4o6]'`，即 `fork/native/tests/test-fork-nvfp4-4o6.cu`）：
+
+1. SR：32×4096 的高斯 BF16 张量（行比例对数正态，固定种子），`quantize_nvfp4_4o6_stochastic_cutlass_auto_scale` 跑 1024 个种子，按 `cutlass_scale_index` 取块比例、按 q·sf·amax/1536 反量化求平均。期望前两个种子的 FP4 码与块比例与主机模型（同一头文件）至少 99.9% 相同，||E[x̂]-x||/||x|| 在 1024 个种子时 ≤ 6e-3，256 个种子的值至少是它的 1.6 倍。设 `SUROGATE_NVFP4_4O6_SR_LEGACY=1` 时该用例跳过；要看上游的数字，可以临时去掉跳过，期望约 5e-2 且不随种子数下降。
+2. RN：同样形状的高斯与离群张量，`quantize_nvfp4_4o6_cutlass_auto_scale` 的码与比例与主机模型至少 99.9% 相同，离群张量中低于 1/128 的块的最小二乘增益在 1±0.03 内。
+3. 训练 A/B：Qwen3-0.6B NVFP4 全量训练 500 步，比较默认、`SUROGATE_NVFP4_4O6_SR_LEGACY=1 SUROGATE_NVFP4_4O6_RN_LEGACY=1`、`fp4_four_over_six: false` 与 bf16 的 loss 曲线；再对 LoRA（只受 RN 影响）做同样的比较，并用 nsys 记录 4/6 量化 kernel 的耗时。结果记在 T24 的 `conflict_history` 中。

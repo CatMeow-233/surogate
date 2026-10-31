@@ -672,3 +672,44 @@ conflict_history = [
     "2026-10-31 reverse replay of 79165030 onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: fused_classifier.cu 0/0/0",
     "2026-10-31 reverse replay of 2cfc438f onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: quant.cu 0/0/0",
 ]
+
+[[topic]]
+id = "T24"
+title = "NVFP4 Four Over Six: unbiased SR, stored-scale encode"
+commits = []
+switch = "on by default (defect fixes); SUROGATE_NVFP4_4O6_SR_LEGACY=1 runs upstream's 4/6 SR kernel, SUROGATE_NVFP4_4O6_RN_LEGACY=1 upstream's 4/6 RN kernel (each read once per process)"
+# Defects (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "NVFP4 随机舍入与 Four Over Six 块比例的缺陷"):
+# (SR) quantize_block_4o6_stochastic (quant_nvfp4_4o6_sm100.cu) adds a fixed (b/256-0.5)*0.5 dither before
+# round-to-nearest, unbiased only where the E2M1 spacing is 0.5 (2.4 rounds up with p=76/256, not 0.4; bias up
+# to 25%/38% of the spacing on [2,4)/[4,6)), and encodes with the unrounded 6/amax or 4/amax while CUTLASS decodes
+# with the stored E4M3 scale (per-block factor sf/d, RMS 2.7%). Reached by the wgrad dout^T operand of every dense
+# recipe matmul with a weight gradient (full FT) under the defaults fp4_backend=cutlass, fp4_four_over_six=true.
+# CPU emulation of a 32x4096 dout^T-like tensor: ||E[x_hat]-x||/||x|| 5.3e-2 upstream (flat over seeds), 4.1e-4
+# fixed (1/sqrt(N) over seeds). (RN) quantize_block_4o6 has the same encode/decode mismatch and decodes blocks
+# whose scale is below its 1/128 clamp at 1/128 (inflated ~2x on a token-outlier tensor).
+# Fix: the 4/6 kernels live in fork/native/src/nvfp4_4o6.cu, compiled into surogate-common; the three launchers in
+# quant_nvfp4_4o6.cu call them after abs_max unless the legacy switch is set (upstream's kernel file is untouched
+# and stays the legacy path). SR: upstream's 4-vs-6 choice; the smallest E4M3 scale >= d(1-2^-16), clamped to
+# [2^-9, 448]; encode with the stored scale; SRC few-bit rounding (arXiv:2504.20634) on the local spacing, |E-y| <=
+# spacing/512; one Philox4x32-10 per 16 values. RN: both candidates encoded with and judged on their stored RN
+# scale, clamp [2^-9, 448]. Not fixed: the dead `no_fp4_stochastic_rounding` doc row (upstream doc).
+# Convergence effect unknown (2512.02010 App. A.3: unbiased SR on 4/6 showed no gain); GPU-unverified, the 5090
+# checks are in fork/native/tests/test-fork-nvfp4-4o6.cu and the errata.
+files = [
+    "csrc/src/recipes/nvfp4/kernels/quant_nvfp4_4o6.cu",       # SR, RN: dispatch to the fork kernels
+]
+fork_files = [
+    "fork/native/cmake/fork_native.cmake",   # compiles src/nvfp4_4o6.cu, attaches the GPU test (shared with T3, T5, T10)
+    "fork/native/include/surogate_fork/nvfp4_4o6.h",
+    "fork/native/include/surogate_fork/nvfp4_4o6_arith.h",
+    "fork/native/src/nvfp4_4o6.cu",
+    "fork/native/tests/host/nvfp4_4o6_check.cpp",
+    "fork/native/tests/test-fork-nvfp4-4o6.cu",
+    "fork/patches/tests/native/test_nvfp4_4o6.py",
+]
+tests = [
+    "fork/patches/tests/native/test_nvfp4_4o6.py",
+    "fork/native/tests/host/nvfp4_4o6_check.cpp",
+    "fork/native/tests/test-fork-nvfp4-4o6.cu",
+]
+conflict_history = []

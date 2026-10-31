@@ -8,12 +8,12 @@
 |---|---|---|
 | [cmake/fork_native.cmake](cmake/fork_native.cmake) | 挂接入口：定义 `surogate_fork_configure_common()`，并在 `csrc` 目录处理完毕后为测试目标补充设置 | T5 |
 | [cmake/training_openmp.cmake](cmake/training_openmp.cmake) | `surogate_enable_training_openmp()`：把 `OpenMP::OpenMP_CXX` 链接到训练库 | T5 |
-| [include/surogate_fork/](include/surogate_fork/) | fork 头文件，源码中写作 `#include "surogate_fork/<文件名>"`：`moe_weight_grad_policy.h`、`moe_weight_grad.h`（T3）、`omp_team.h`（T5，CPU 优化器各并行区的线程数和定序的范数求和）、`doc_mask_staging.h`（T17、T18，整步 graph 的文档掩码几何：每个微步的文档扫描、回放决定、捕获时按行 varlen、pad 模式超限的路由）、`full_step_warmup.h`（T20，整步 warmup 是否运行）、`cpu_adamw_checkpoint.h`（T21，`cpu_training` 的 CPU AdamW 矩的布局、checkpoint 容器与加载检查）、`pageable_host.h`（T21，写入器判断 pageable 主机内存） | T3、T5、T17、T18、T20、T21 |
-| [src/](src/) | 上游代码调用的 fork 源文件，由 `surogate_fork_configure_common()` 编译进 `surogate-common`；`moe_weight_grad.cpp`（T3，MoE 基础专家权重梯度）、`cpu_adamw_checkpoint.cpp`（T21，`cpu_training` 的 CPU AdamW 矩写进 checkpoint） | T3、T21 |
+| [include/surogate_fork/](include/surogate_fork/) | fork 头文件，源码中写作 `#include "surogate_fork/<文件名>"`：`moe_weight_grad_policy.h`、`moe_weight_grad.h`（T3）、`omp_team.h`（T5，CPU 优化器各并行区的线程数和定序的范数求和）、`doc_mask_staging.h`（T17、T18，整步 graph 的文档掩码几何：每个微步的文档扫描、回放决定、捕获时按行 varlen、pad 模式超限的路由）、`full_step_warmup.h`（T20，整步 warmup 是否运行）、`cpu_adamw_checkpoint.h`（T21，`cpu_training` 的 CPU AdamW 矩的布局、checkpoint 容器与加载检查）、`pageable_host.h`（T21，写入器判断 pageable 主机内存）、`nvfp4_4o6.h`（T24，Four Over Six kernel 的入口与开关）、`nvfp4_4o6_arith.h`（T24，E4M3 比例码、E2M1 随机舍入与 Philox，主机与设备共用） | T3、T5、T17、T18、T20、T21、T24 |
+| [src/](src/) | 上游代码调用的 fork 源文件，由 `surogate_fork_configure_common()` 编译进 `surogate-common`；`moe_weight_grad.cpp`（T3，MoE 基础专家权重梯度）、`cpu_adamw_checkpoint.cpp`（T21，`cpu_training` 的 CPU AdamW 矩写进 checkpoint）、`nvfp4_4o6.cu`（T24，NVFP4 Four Over Six 的 RN 与 SR kernel） | T3、T21、T24 |
 | [openmp-contract/](openmp-contract/) | 独立的 OpenMP 回归测试，只需主机 C++ 编译器和 OpenMP：接线（`check.cpp`）与线程数契约（`team_check.cpp`） | T5 |
 | [bench/cpu-optimizer/](bench/cpu-optimizer/) | `run.sh` 用训练库的编译命令编译 `cpu_adamw.cpp`（带与不带 OpenMP），按 NVML 的方式绑定 rank 线程，测 `cpu_training` 的优化器步耗时；结果记在 [performance.md](../docs/performance.md#cpu-优化器并行) | T5 |
-| [tests/](tests/) | fork 的 C++ 测试用例，编译进上游的 `dsl-run-state-tests`（T1、T10、T17）和 `integration-tests`（T2–T4） | T1–T4、T10、T17 |
-| [tests/host/](tests/host/) | 不进上游测试可执行文件的主机程序：`cpu_adamw_checkpoint.cpp` 由 `fork/patches/tests/native/test_cpu_adamw_checkpoint.py` 用主机编译器从生产源码构建，链接 libcudart，不用 GPU；`stubs.cpp` 替代它不链接的两个符号 | T21 |
+| [tests/](tests/) | fork 的 C++ 测试用例，编译进上游的 `dsl-run-state-tests`（T1、T10、T17）和 `integration-tests`（T2–T4、T24） | T1–T4、T10、T17、T24 |
+| [tests/host/](tests/host/) | 不进上游测试可执行文件的主机程序：`cpu_adamw_checkpoint.cpp` 由 `fork/patches/tests/native/test_cpu_adamw_checkpoint.py` 用主机编译器从生产源码构建，链接 libcudart，不用 GPU；`stubs.cpp` 替代它不链接的两个符号；`nvfp4_4o6_check.cpp` 由 `fork/patches/tests/native/test_nvfp4_4o6.py` 用主机编译器构建，检查 T24 kernel 调用的算术，不需要 CUDA（有 CUDA 头文件时多两项对照） | T21、T24 |
 | [release/](release/) | `build-wheel.sh` 在 CUDA 构建镜像中构建 fork 的原生 wheel；`VERSION` 是发布版本号；`plan.sh` 判断一次运行能否发布，并在发布前再检查一次，`test_plan.sh` 是它的测试（`fork/dev test release`）。由 `.github/workflows/native-release.yml` 使用，只有在 `main` 上手动运行并勾选 `publish` 才发布，推送不会发布；文件先传到草稿，由 `fork/tools/release_guard.py` 校验后才发布。见 [发布原生版本](../docs/build-and-release.md#发布原生版本) | — |
 
 各 topic 的提交、开关和冲突历史见 [ledger](../patches/ledger.toml)。
@@ -60,5 +60,5 @@ surogate_fork_configure_common(surogate-common)
 
 ```bash
 csrc/build/dsl-run-state-tests '[dispatch-pp],[tied-head],[doc-mask]'
-csrc/build/integration-tests '[fused-dx],[wgrad-zero],[recipe]'
+csrc/build/integration-tests '[fused-dx],[wgrad-zero],[recipe],[nvfp4-4o6]'
 ```

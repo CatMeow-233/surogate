@@ -7,13 +7,14 @@ include("${CMAKE_CURRENT_LIST_DIR}/training_openmp.cmake")
 # The fork include root stays PRIVATE so that consumers of surogate-common do
 # not pick it up; only targets that compile fork code get it. Fork sources that
 # upstream code calls (T3's expert weight gradients, T21's CPU AdamW checkpoint
-# state) are compiled into the library, so the fork tests link against the code
-# production runs.
+# state, T24's NVFP4 Four Over Six kernels) are compiled into the library, so the
+# fork tests link against the code production runs.
 function(surogate_fork_configure_common target)
     surogate_enable_training_openmp(${target})
     target_include_directories(${target} PRIVATE "${SUROGATE_FORK_NATIVE_DIR}/include")
     target_sources(${target} PRIVATE "${SUROGATE_FORK_NATIVE_DIR}/src/moe_weight_grad.cpp")
     target_sources(${target} PRIVATE "${SUROGATE_FORK_NATIVE_DIR}/src/cpu_adamw_checkpoint.cpp")
+    target_sources(${target} PRIVATE "${SUROGATE_FORK_NATIVE_DIR}/src/nvfp4_4o6.cu")   # T24: the 4/6 kernels
 endfunction()
 
 # The test targets are defined after the hook, so they are attached once the
@@ -27,6 +28,7 @@ function(_surogate_fork_attach_tests)
             "${SUROGATE_FORK_NATIVE_DIR}/tests/test-fork-moe-grouped-gemm.cu"
             "${SUROGATE_FORK_NATIVE_DIR}/tests/test-fork-lora-fused-dx.cu"
             "${SUROGATE_FORK_NATIVE_DIR}/tests/test-fork-fp8-quant.cpp"
+            "${SUROGATE_FORK_NATIVE_DIR}/tests/test-fork-nvfp4-4o6.cu"
         )
     endif()
     if(TARGET dsl-run-state-tests)
