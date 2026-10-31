@@ -2205,6 +2205,16 @@ void GenerationService::begin_shared_training() {
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
+        // No request is admitted again before publish_shared_adapter, which evicts every
+        // retained prefix right after its wake. Evicting them now skips a pinned backup and a
+        // restore of each used KV granule; SUROGATE_SHARED_SLEEP_KEEP_KV=1 keeps the old order
+        // (ledger T29).
+        static const bool keep_kv = [] {
+            const char* value = std::getenv("SUROGATE_SHARED_SLEEP_KEEP_KV");
+            return value != nullptr && std::string_view(value) != "" &&
+                   std::string_view(value) != "0";
+        }();
+        if (!keep_kv) { engine_->shrink_kv(); }
         engine_->sleep();
     } catch (...) {
         std::lock_guard lock(request_capacity_->mutex);

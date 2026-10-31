@@ -254,6 +254,12 @@ git log --oneline HEAD..MERGE_HEAD -- <文件>                # 上游改了什�
 - 解决：以上游为准，再把这五处放回。`wait()` 依赖上游 `admit()` 在它之后仍按 `sleeping`、`closed`、`active >= capacity` 回 `Busy`，并在离开时 `notify_all()`；依赖 `begin_training()` 与 `close()` 设置 `sleeping` 并通知同一个 condition；依赖 `do_POST` 把 `ConnectionResetError` 当作客户端离开、不写响应（`ClientDisconnected` 是它的子类）。上游改动其中任何一点时按新代码调整 `shared_admission.py`，测试会指出哪一点。上游自己给这个服务加上排队时，比较两种做法，再决定是否删去 T28。
 - 测试：`fork/patches/tests/grpo/test_shared_admission.py`（`fork/dev test patches`，不需要 GPU），以及上游的 `tests/grpo/test_shared_model.py` 等在两种模式下都应通过。
 
+### T29 原生 GRPO SharedServer 睡眠前释放保留的 KV
+
+- 文件：`csrc/src/serve/serve/generation_service.cpp`，`GenerationService::begin_shared_training` 中排空循环之后、`engine_->sleep();` 之前的一段：读取 `SUROGATE_SHARED_SLEEP_KEEP_KV` 的静态 `keep_kv`，以及 `if (!keep_kv) { engine_->shrink_kv(); }`。原因与 5090 检查见 [performance.md](performance.md#原生-grpo-sharedserver-睡眠前释放保留的-kvledger-t29)。
+- 解决：以上游为准，再把这一段放回 `sleep()` 之前、`try` 之内。这一改动成立的前提由 pin 检查：训练阶段 `acquire_request_lifetime` 与 `wake_up` 拒绝请求；`publish_shared_adapter` 在 `wake()` 之后、清除 `shared_training_` 之前调用 `shrink_kv()`；`ConcurrentExecutor::shrink_kv` 驱逐归档前缀与每个空闲的保留 lane；`ElasticKvRegion::sleep` 只备份仍有页的 granule。上游让 KV 跨过训练阶段保留（例如发布不再驱逐前缀）时，删去 T29；上游自己在睡眠前驱逐时，也删去 T29。
+- 测试：`fork/patches/tests/native/test_shared_sleep_kv.py`（`fork/dev test patches`，不需要 GPU）；行为只能在 GPU 上确认，见 performance.md。
+
 ### 移动过的上游笔记与删除的文件
 
 - 上游修改已移动的笔记：没有冲突，修改合入 `docs/upstream-notes/` 中的文件。

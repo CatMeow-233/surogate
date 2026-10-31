@@ -867,3 +867,21 @@ fork_files = [
 ]
 tests = ["fork/patches/tests/grpo/test_shared_admission.py"]
 conflict_history = []
+
+[[topic]]
+id = "T29"
+title = "the native GRPO SharedServer evicts retained KV before it sleeps"
+commits = []
+switch = "always on (removes dead work, identical results); SUROGATE_SHARED_SLEEP_KEEP_KV=1 restores upstream's order for A/B runs (read once per process)"
+# generation_service.cpp keeps one hunk in GenerationService::begin_shared_training: after the drain loop and inside
+# the try, a static `keep_kv` read from SUROGATE_SHARED_SLEEP_KEEP_KV and `if (!keep_kv) { engine_->shrink_kv(); }`
+# before `engine_->sleep();`. Upstream slept with the finished lanes' prefixes retained, so ElasticKvRegion::sleep
+# copied every used (granule, plane) span into a fresh cudaMallocHost buffer and publish_shared_adapter's wake mapped
+# and copied them back, then evicted them with shrink_kv() before reopening admission (acquire_request_lifetime and
+# wake_up refuse while shared_training_ is set), so no request could read the restored bytes. Evicting first drops
+# the same prefixes before the copy. Behaviour, timing and the cudaMallocHost/cudaFreeHost counts are GPU-unverified;
+# the 5090 check is in fork/docs/performance.md. The source pins also check the premises above.
+files = ["csrc/src/serve/serve/generation_service.cpp"]
+fork_files = ["fork/patches/tests/native/test_shared_sleep_kv.py"]
+tests = ["fork/patches/tests/native/test_shared_sleep_kv.py"]
+conflict_history = []
