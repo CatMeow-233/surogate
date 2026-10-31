@@ -616,7 +616,7 @@ conflict_history = [
 [[topic]]
 id = "T16"
 title = "serve: register the 128-wide 32q8, 40q8 and MHA 32q32 GQA shapes"
-commits = ["45bf39b7"]
+commits = ["45bf39b7", "c799b728"]
 switch = "SUROGATE_SERVE_GQA_FORK_SHAPES=1 (default off: 32q8/40q8 keep their pre-registration routes and 128/32q32 is refused as before, its KV pair withheld; on, 32q32 is served; int8 KV keeps the generic route with the switch on)"
 # Roadmap serve R1. Qwen3-4B/8B, Llama-3-8B, Mistral-7B (128/32q8) and Qwen3-14B (128/40q8) decode, verify and
 # 7-63-column prompt segments ran on the CUDA-core generic split-KV kernel (gqa_attention_generic.cu) on every GPU
