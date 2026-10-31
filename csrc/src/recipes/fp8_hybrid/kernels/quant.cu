@@ -78,7 +78,7 @@ __global__ void reduce_abs_max_kernel(float* __restrict__ result, const floatX* 
     }
     __syncthreads();
     float thread_abs_max = 0.f;
-    for (int i = vec_t::size * (blockIdx.x * blockDim.x + threadIdx.x); i < N;
+    for (long i = vec_t::size * (blockIdx.x * blockDim.x + threadIdx.x); i < N;
          i += blockDim.x * gridDim.x * vec_t::size) {
         vec_t values = vec_t::load(in + i);
         for (int j = 0; j < vec_t::size; ++j) {
@@ -135,7 +135,7 @@ __global__ void quantize_with_abs_max_kernel(nv_bfloat16* __restrict__ out,
         *scale_ptr = 1.f;
     }
 
-    for (int i = vec_t::size * (blockIdx.x * blockDim.x + threadIdx.x); i < N;
+    for (long i = vec_t::size * (blockIdx.x * blockDim.x + threadIdx.x); i < N;
          i += blockDim.x * gridDim.x * vec_t::size) {
         vec_t values = vec_t::load(in + i);
         bfv_t quants;
@@ -166,7 +166,7 @@ quantize_with_abs_max_kernel(
     using vec_t = GenericVector<floatX, 16 / sizeof(floatX)>;
     using i8v_t = GenericVector<std::int8_t, 16 / sizeof(floatX)>;
     float scale = (float)std::numeric_limits<std::int8_t>::max() / *abs_max;
-    for (int i = vec_t::size * (blockIdx.x * blockDim.x + threadIdx.x); i < N;
+    for (long i = vec_t::size * (blockIdx.x * blockDim.x + threadIdx.x); i < N;
          i += blockDim.x * gridDim.x * vec_t::size) {
         vec_t values = vec_t::load(in + i);
         i8v_t quants;
@@ -210,7 +210,7 @@ __global__ void quantize_with_abs_max_kernel(FloatOut* __restrict__ out,
     if (threadIdx.x == 0 && blockIdx.x == 0 && scale_ptr) {
         *scale_ptr = 1.f / scale;
     }
-    for (int i = vec_t::size * (blockIdx.x * blockDim.x + threadIdx.x); i < N;
+    for (long i = vec_t::size * (blockIdx.x * blockDim.x + threadIdx.x); i < N;
          i += blockDim.x * gridDim.x * vec_t::size) {
         vec_t values = vec_t::load(in + i);
         f8v_t quants;

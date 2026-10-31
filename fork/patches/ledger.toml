@@ -621,9 +621,9 @@ conflict_history = [
 
 [[topic]]
 id = "T23"
-title = "64-bit row offsets in the cross-entropy kernels"
+title = "64-bit element indices in the cross-entropy kernels and the FP8 abs-max/quantize loops"
 commits = ["79165030"]
-switch = "always on (defect fix); chunks of at most 2^31 logits read and write the same elements with the same float arithmetic"
+switch = "always on (defect fix); shapes whose indices did not wrap read and write the same elements with the same float arithmetic"
 # Defect (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "交叉熵 kernel 按 int 计算行偏移"):
 # fused_classifier.cu formed the logits/dlogits index as `row * P + i` in int at seven sites:
 # chunked_cross_entropy_forward_kernel (:680 the LSE loop, :699 the target logit), chunked_cross_entropy_backward_kernel
@@ -643,10 +643,31 @@ switch = "always on (defect fix); chunks of at most 2^31 logits read and write t
 # The CPU test compiles the four kernels and their helpers from the sources as host C++ with -fwrapv and runs
 # blocks of rows past 2^31 elements in a PROT_NONE reservation where only the row under test is accessible; it
 # fails on upstream's sources (each wrapped access faults up to 2^31 elements below the base, or in an earlier row).
-# Compiled for sm_120a; GPU behaviour is unverified (5090 check in the errata).
-files = ["csrc/src/kernels/fused_classifier.cu"]
-fork_files = ["fork/patches/tests/native/test_cross_entropy_row_offsets.py"]
-tests = ["fork/patches/tests/native/test_cross_entropy_row_offsets.py"]
+# Second part (errata "FP8 abs_max 与量化 kernel 的循环下标是 int"): with recipe fp8_hybrid and lmhead_chunks <= 1
+# the transposed FP8 lm_head cache is primed (frozen head, cache <= SUROGATE_FP8_LMHEAD_T_MAX_MIB, default 512 MiB),
+# and lm_head_dx_matmul runs abs_max and quantize_with_abs_max (E5M2) over the whole M x V dlogits chunk. quant.cu's
+# reduce_abs_max_kernel (:81) and the three quantize_with_abs_max_kernel loops (:138 FP32->BF16, :169 INT8, :213 FP8)
+# walked their `long N` elements with an `int i` grid-stride index (add.s32 then cvt.s64.s32 in the PTX): a thread
+# whose next index passes 2^31 - 1 wraps to about -2^31 and goes on reading (and the quantizer writing) below the
+# buffers; for N > 2^31 the loop never ends. The last vector's thread wraps from N >= 2^31 - S + vec, S = vec x
+# threads launched (RTX 5090, BF16: from 14,121 rows at V=151936, below the cross-entropy threshold), so the 1-chunk
+# fp8_hybrid LoRA configurations above were not fixed by the seven fused_classifier.cu sites alone. Fix: the four
+# loops use a `long` index, as quantize_with_delayed_scale_kernel (:666) already did. PTX for compute_120a: 11 of the
+# 20 entries are identical, the 9 changed ones are exactly the instances of these four kernels, their loops advance
+# with add.s64 and their float, conversion and memory op sequences are unchanged. The CPU test compiles the abs-max
+# and FP8 quantize kernels and the launchers' block/grid lines as host C++ with -fwrapv and runs one thread of a real
+# launch over PROT_NONE reservations in which only that thread's vectors are open; it fails on upstream's quant.cu
+# (16 cases fault about 2^31 elements below the input) and passes with the fix. Compiled for sm_120a; GPU behaviour
+# is unverified (5090 check in the errata).
+files = ["csrc/src/kernels/fused_classifier.cu", "csrc/src/recipes/fp8_hybrid/kernels/quant.cu"]
+fork_files = [
+    "fork/patches/tests/native/test_cross_entropy_row_offsets.py",
+    "fork/patches/tests/native/test_fp8_quant_grid_stride.py",
+]
+tests = [
+    "fork/patches/tests/native/test_cross_entropy_row_offsets.py",
+    "fork/patches/tests/native/test_fp8_quant_grid_stride.py",
+]
 conflict_history = [
     "2026-10-31 reverse replay of 79165030 onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: fused_classifier.cu 0/0/0",
 ]
