@@ -516,7 +516,7 @@ conflict_history = [
 [[topic]]
 id = "T21"
 title = "cpu_training checkpoints its CPU AdamW moments"
-commits = []
+commits = ["b5ca1061"]
 switch = "always on (defect fix): checkpoints hold the moments and a resume reads them; SUROGATE_FORK_CPU_ADAMW_SAVE_STATE=0 writes none (upstream's checkpoints), SUROGATE_FORK_CPU_ADAMW_ALLOW_MISSING_STATE=1 resumes from a checkpoint without them (upstream's zero moments); GPU optimizers unchanged"
 # Defect (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "cpu_training 的全量训练不保存 CPU AdamW
 # 的矩"): under cpu_training, AdamW8BitOptimizer::step routes every step to step_cpu_streaming, whose FP32 moments
@@ -566,5 +566,5 @@ tests = [
     "fork/patches/tests/native/test_tied_lm_head.py",
 ]
 conflict_history = [
-    "2026-10-31 reverse replay onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: adamw_8bit_optimizer.cpp 0/0/0 (T10 and T21 hunks), checkpoint.cpp 0/0/0, safetensors.cpp 0/0/0; upstream/main 82d42c72 has not changed the three files",
+    "2026-10-31 reverse replay of b5ca1061 onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: adamw_8bit_optimizer.cpp 0/0/0 (T10 and T21 hunks), checkpoint.cpp 0/0/0, safetensors.cpp 0/0/0; upstream/main 82d42c72 has not changed the three files",
 ]
