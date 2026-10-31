@@ -386,6 +386,7 @@ files = [
 fork_files = [
     "fork/native/cmake/fork_native.cmake",   # attaches the C++ test to dsl-run-state-tests (shared with T5)
     "fork/native/tests/test-fork-tied-lm-head.cpp",
+    "fork/native/src/cpu_adamw_checkpoint.cpp",   # build_layout: the CPU step's tied dedupe since T21 (shared with T21)
     "fork/patches/tests/native/test_tied_lm_head.py",
     "surogate/_fork/dispatch_pp_tied_head.py",
     "fork/patches/tests/native/test_dispatch_pp_tied_head.py",
