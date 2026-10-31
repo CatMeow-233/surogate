@@ -92,7 +92,16 @@ def test_baseline_keys_are_the_format_3_fields_and_legacy_values_are_frozen():
     # trained with it. Add new fields; do not edit these entries.
     assert dict(contract.LEGACY_VALUES) == {"projection_scale_rule": "constant"}
     assert contract.PERFORMANCE_KEYS == {"device", "gradient_checkpointing"}
+    # Part of the version-2 rule, like the classes above.
+    assert dict(contract.COMPARED_WHEN) == {"gradient_checkpointing": ("compile_model", True)}
     assert contract.CONTRACT_VERSION == 2
+
+
+def test_conditionally_compared_keys_are_performance_keys_conditioned_on_compared_keys():
+    compared = contract.BASELINE_KEYS | frozenset(contract.LEGACY_VALUES)
+    for key, (when, _value) in contract.COMPARED_WHEN.items():
+        assert key in contract.PERFORMANCE_KEYS, key
+        assert when in compared, when
 
 
 def test_recorded_version_1_fingerprints_still_verify():
@@ -129,6 +138,26 @@ def test_version_2_fingerprint_is_pinned_and_ignores_performance_keys():
         assert contract.fingerprint(_requested(RECORDED_488E5F00, **{key: value})) != V2_FINGERPRINT_488E5F00, key
 
 
+def test_compiled_runs_fingerprint_and_compare_gradient_checkpointing():
+    compiled = _requested(RECORDED_488E5F00, compile_model=True)
+    assert contract.compared_values(compiled)["gradient_checkpointing"] is True
+    assert "gradient_checkpointing" not in contract.compared_values(_requested(RECORDED_488E5F00))
+    without = contract.fingerprint({**compiled, "gradient_checkpointing": False})
+    assert without != contract.fingerprint(compiled)
+    assert contract.fingerprint({**compiled, "device": "auto"}) == contract.fingerprint(compiled)
+    # A version-1 record (it hashed every key) and a version-2 record of a compiled run.
+    for saved in (
+        {"config": compiled, "config_fingerprint": _independent_v1_fingerprint(compiled)},
+        {**contract.record(compiled), "config": compiled},
+    ):
+        contract.check_resume(saved, {**compiled, "device": "auto"})
+        with pytest.raises(ValueError, match=r"contract: gradient_checkpointing \(checkpoint true, requested false\)$"):
+            contract.check_resume(saved, {**compiled, "gradient_checkpointing": False})
+    damaged = {key: value for key, value in compiled.items() if key != "gradient_checkpointing"}
+    with pytest.raises(ValueError, match="lacks contract keys: gradient_checkpointing"):
+        contract.compared_values(damaged)
+
+
 def test_a_key_at_its_legacy_value_counts_as_unrecorded():
     constant = contract.fingerprint(_requested(RECORDED_488E5F00, projection_scale_rule="constant"))
     assert contract._FINGERPRINT_RULES[2](RECORDED_856BD86C) == constant
@@ -138,7 +167,7 @@ def test_a_key_at_its_legacy_value_counts_as_unrecorded():
 def test_version_1_checkpoints_resume_under_version_2_rules():
     current = {"config": RECORDED_488E5F00, "config_fingerprint": V1_FINGERPRINT_488E5F00}
     contract.check_resume(current, _requested(RECORDED_488E5F00))
-    # Performance keys were hashed by version 1 but are free to change now.
+    # Performance keys were hashed by version 1 but are free to change now (this run is not compiled).
     contract.check_resume(current, _requested(RECORDED_488E5F00, gradient_checkpointing=False, device="auto"))
     with pytest.raises(ValueError, match=r"seed \(checkpoint 42, requested 7\)"):
         contract.check_resume(current, _requested(RECORDED_488E5F00, seed=7))

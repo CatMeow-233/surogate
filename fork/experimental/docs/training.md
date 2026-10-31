@@ -316,12 +316,16 @@ accepted.
 
 On resume you may increase `max_steps`, change `save_every` and `output_dir`,
 point `train_jsonl` at another file with the same bytes, and change the
-performance-only keys `gradient_checkpointing` and `device`. `device` may change
-only within a device type (`cuda`, `cuda:1` and, on a GPU host, `auto` are
-interchangeable): the device type and dtype must stay the same. Any other
-configuration change, and different dataset contents, are rejected; the error
-names each key that differs, with its recorded and requested values. On CPU, a
-resume that toggles `gradient_checkpointing` continues bitwise as the
+performance-only keys `device` and, without `compile_model`,
+`gradient_checkpointing`. `device` may change only within a device type (`cuda`,
+`cuda:1` and, on a GPU host, `auto` are interchangeable): the device type and
+dtype must stay the same. With `compile_model: true`, `gradient_checkpointing`
+changes what the compiled graph saves or recomputes and how it fuses operations,
+so it changes the results (on CPU, after 3 steps of a tiny Llama, 4 of its 21
+weight tensors differ) and must stay the same. Any other configuration change,
+and different dataset contents, are rejected; the error names each key that
+differs, with its recorded and requested values. Without `compile_model`, a
+resume on CPU that toggles `gradient_checkpointing` continues bitwise as the
 uninterrupted run would. On a GPU this has not been measured yet; kernels whose
 results vary between runs can make the two differ as much as two uninterrupted
 runs differ from each other.

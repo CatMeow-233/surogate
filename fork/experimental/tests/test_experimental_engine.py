@@ -292,6 +292,7 @@ def _as_written_by_856bd86c(state):
     ids=["full", "lora-dropout"],
 )
 def test_resume_may_change_performance_switches_and_continues_bitwise(tmp_path, monkeypatch, adapter):
+    """Without compile_model; compiled runs compare gradient_checkpointing (next test)."""
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)  # device auto resolves to the CPU here
     config = tiny_config(tmp_path, "uninterrupted", max_steps=3, shuffle=True, gradient_checkpointing=True, **adapter)
     config.model_config["attention_dropout"] = 0.1  # recomputed forwards must replay the dropout masks
@@ -305,6 +306,29 @@ def test_resume_may_change_performance_switches_and_continues_bitwise(tmp_path, 
         assert_state_equal(uninterrupted[key], resumed[key])
     assert resumed["config_fingerprint"] == uninterrupted["config_fingerprint"]
     assert resumed["contract_version"] == contract.CONTRACT_VERSION
+
+
+def test_compiled_runs_refuse_a_gradient_checkpointing_change_on_resume(tmp_path, monkeypatch):
+    # Under torch.compile, checkpointing changes the compiled graph and with it the
+    # arithmetic (CPU: 4 of 21 weight tensors differ after 3 steps). The refusal reads
+    # only the recorded configuration, so compilation itself is replaced here.
+    compiled = []
+    monkeypatch.setattr(torch, "compile", lambda model: compiled.append(model) or model)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    config = tiny_config(tmp_path, "compiled", compile_model=True, gradient_checkpointing=True, max_steps=1)
+    first = run_training(config)
+    assert len(compiled) == 1
+    flipped = replace(config, gradient_checkpointing=False, max_steps=2)
+    pattern = r"contract: gradient_checkpointing \(checkpoint true, requested false\)$"
+    for output_dir in (str(tmp_path / "flipped"), config.output_dir):
+        with pytest.raises(ValueError, match=pattern):
+            run_training(replace(flipped, output_dir=output_dir), resume_from=first["checkpoint"])
+    resumed = run_training(replace(config, max_steps=2, device="auto"), resume_from=first["checkpoint"])
+    assert len(compiled) == 2
+    assert checkpoint(resumed)["config_fingerprint"] == checkpoint(first)["config_fingerprint"]
+    eager = contract.fingerprint(replace(config, compile_model=False).to_dict())
+    assert contract.fingerprint(replace(config, compile_model=False, gradient_checkpointing=False).to_dict()) == eager
+    assert contract.fingerprint(flipped.to_dict()) != checkpoint(first)["config_fingerprint"]
 
 
 def test_checkpoint_from_before_projection_scale_rule_resumes_in_place_only_with_the_constant_rule(tmp_path):
