@@ -4,6 +4,8 @@
 // cuDNN SDPA backend. Supports head_dim in [8, 128] divisible by 8,
 // full causal attention, dense (non-packed) sequences, BF16 tensors,
 // with a pre-allocated workspace. Fastest path when the shape fits.
+// Applies AttentionParams::softmax_scale (0 = 1/sqrt(Hs)) in both directions
+// (fork T22; upstream always used 1/sqrt(Hs), e.g. Gemma3-27B's global layers).
 
 #include <memory>
 #include <stdexcept>
@@ -85,7 +87,8 @@ public:
                                 p.Hq,
                                 p.Hkv,
                                 p.Hs,
-                                p.stream);
+                                p.stream,
+                                p.softmax_scale);
     }
 
     void backward(AttentionParams& p) override {
@@ -108,7 +111,8 @@ public:
                                      p.Hq,
                                      p.Hkv,
                                      p.Hs,
-                                     p.stream);
+                                     p.stream,
+                                     p.softmax_scale);
             return;
         }
 
@@ -137,7 +141,8 @@ public:
                                      p.Hq,
                                      p.Hkv,
                                      p.Hs,
-                                     p.stream);
+                                     p.stream,
+                                     p.softmax_scale);
         }
     }
 

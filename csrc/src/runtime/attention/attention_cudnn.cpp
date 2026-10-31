@@ -289,7 +289,7 @@ auto lookup_cache_or_build_graph_bwd(int B, int Hq, int Hkv, int T, int HS, cudn
  * @brief Executes the forward pass of scaled dot-product attention using cuDNN.
  *
  * Performs FlashAttention-style forward pass with causal masking. Attention scale
- * is computed as 1/sqrt(HS). Supports grouped-query attention when Hkv < Hq.
+ * is `scale`, or 1/sqrt(HS) when it is 0. Supports grouped-query attention when Hkv < Hq.
  *
  * @param[out] out Output tensor of shape (B, T, Hq, HS) in BF16.
  * @param[out] stats Statistics tensor of shape (B, Hq, T) in FP32, required for backward
@@ -304,6 +304,7 @@ auto lookup_cache_or_build_graph_bwd(int B, int Hq, int Hkv, int T, int HS, cudn
  * @param Hkv Number of key/value heads.
  * @param HS Head size (hidden dimension per head).
  * @param stream CUDA stream for asynchronous execution.
+ * @param scale Softmax scale (AttentionParams::softmax_scale); 0 selects 1/sqrt(HS).
  */
 void attention_forward_cudnn(nv_bfloat16* out,        // output: (B, T, Hq, HS)
                              float* stats,            // output for backward pass: (B, Hq, T)
@@ -315,7 +316,8 @@ void attention_forward_cudnn(nv_bfloat16* out,        // output: (B, T, Hq, HS)
                              int Hq,
                              int Hkv,
                              int HS,
-                             cudaStream_t stream) {
+                             cudaStream_t stream,
+                             float scale) {
     bool is_inference_only = (stats == nullptr);
 
     cuDNNCheck(cudnnSetStream(handle, stream));
@@ -327,7 +329,10 @@ void attention_forward_cudnn(nv_bfloat16* out,        // output: (B, T, Hq, HS)
     const void* devPtrQ = inp;
     const void* devPtrK = (inp + Hq * HS);
     const void* devPtrV = (inp + (Hq + Hkv) * HS);
-    float attn_scale_cpu = 1.0 / sqrtf(HS);
+    // fork T22: the op's softmax_scale (upstream always used 1/sqrt(HS)). attn_scale is a pass-by-value tensor read
+    // at every execute(), so the shape-keyed graph cache is unaffected. 1.f / sqrtf(HS) equals upstream's
+    // 1.0 / sqrtf(HS) for every HS up to 4096.
+    float attn_scale_cpu = scale != 0.0f ? scale : 1.f / sqrtf(HS);
     void* devPtrO = out;
 
     // Build variant pack
@@ -367,6 +372,7 @@ void attention_forward_cudnn(nv_bfloat16* out,        // output: (B, T, Hq, HS)
  * @param Hkv Number of key/value heads.
  * @param HS Head size (hidden dimension per head).
  * @param stream CUDA stream for asynchronous execution.
+ * @param scale Softmax scale, the value the forward was given; 0 selects 1/sqrt(HS).
  */
 void attention_backward_cudnn(nv_bfloat16* dqkvr,  // output
                               const float* stats,
@@ -380,7 +386,8 @@ void attention_backward_cudnn(nv_bfloat16* dqkvr,  // output
                               int Hq,
                               int Hkv,
                               int HS,
-                              cudaStream_t stream) {
+                              cudaStream_t stream,
+                              float scale) {
     // Get graph and tensors from cache (or generate it on first use)
     auto graph = lookup_cache_or_build_graph_bwd(B, Hq, Hkv, T, HS, handle);
 
@@ -391,7 +398,7 @@ void attention_backward_cudnn(nv_bfloat16* dqkvr,  // output
     void* devPtrO = (void*)o;
     void* devPtrdO = (void*)dout;
     void* devPtrStats = (void*)stats;
-    float attn_scale_cpu = 1.f / sqrtf(HS);
+    float attn_scale_cpu = scale != 0.0f ? scale : 1.f / sqrtf(HS);  // fork T22: as in the forward
 
     void* devPtrdQ = dqkvr;
     void* devPtrdK = (dqkvr + Hq * HS);

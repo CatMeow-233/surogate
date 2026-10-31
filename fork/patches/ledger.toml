@@ -571,3 +571,37 @@ tests = [
 conflict_history = [
     "2026-10-31 reverse replay of b5ca1061 onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: adamw_8bit_optimizer.cpp 0/0/0 (T10 and T21 hunks), checkpoint.cpp 0/0/0, safetensors.cpp 0/0/0; upstream/main 82d42c72 has not changed the three files",
 ]
+
+[[topic]]
+id = "T22"
+title = "cuDNN SDPA applies the op's softmax_scale"
+commits = []
+switch = "always on (defect fix); ops without an explicit softmax_scale are bit-identical"
+# Defect (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "cuDNN 注意力忽略 softmax_scale"):
+# CuDNNAttention::supports() never read AttentionParams::softmax_scale and forward()/backward() did not pass it on;
+# attention_cudnn.cpp fed cuDNN 1/sqrt(HS) in both directions (:330, :394). cuDNN outranks mem_eff and flash_varlen
+# (attention_backend.h), so every causal BF16 full-attention op with Hs <= 128 (multiple of 8) and no cu_seqlens ran
+# at 1/sqrt(Hs), whatever the op declared. Reached by text-only Gemma3-27B checkpoints (Gemma3ForCausalLM; head_dim
+# 128, query_pre_attn_scalar 168): the 10 global layers of 62, on every micro-step without in-row document
+# boundaries (unpacked SFT, one document per row, eval, the in-runtime decode prefill), logits x1.1456; packed
+# micro-steps went to flash_varlen at the declared scale. Synthetic Gemma4-style configs with a full layer at
+# Hs <= 128 had 1.0 replaced by 1/sqrt(Hs); published Gemma 3/4 sizes other than 27B never reach cuDNN.
+# Fix: a `float scale` parameter (0 = 1/sqrt(HS), otherwise verbatim, as the flash_varlen and custom wrappers) on
+# attention_forward_cudnn / attention_backward_cudnn (BF16 wrappers, FP32 and Tensor overloads); CuDNNAttention
+# passes p.softmax_scale to the forward, the backward and every chunk of a chunked backward. attn_scale was already a
+# pass-by-value graph tensor and the graph caches are keyed by shape, so graphs, workspace sizing and backend
+# selection do not change; cuDNN keeps these layers. An unset scale gives 1.f / sqrtf(HS), bit-equal to upstream's
+# forward 1.0 / sqrtf(HS) for every HS <= 4096. Left alone: flash_attention.cpp's MoeRolloutParity still nulls
+# cudnn_handle (its comment "cuDNN's wrapper fixes the softmax scale" is stale now; parity mode behaves as before).
+# The CPU test compiles the backend, the wrappers and AttentionParams from the sources against host stubs and checks
+# the attn_scale cuDNN's variant pack receives for the Gemma3-27B ops the real DSL emits; it fails on upstream's
+# sources. Compiled for sm_120a; the kernels are GPU-unverified (5090 check in the errata).
+files = [
+    "csrc/src/runtime/attention/attention_kernels.h",
+    "csrc/src/runtime/attention/attention_cudnn.cpp",
+    "csrc/src/runtime/attention/attention_custom.cu",
+    "csrc/src/runtime/attention/backend_cudnn.cpp",
+]
+fork_files = ["fork/patches/tests/native/test_cudnn_softmax_scale.py"]
+tests = ["fork/patches/tests/native/test_cudnn_softmax_scale.py"]
+conflict_history = []

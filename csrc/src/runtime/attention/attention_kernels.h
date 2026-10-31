@@ -23,6 +23,9 @@ typedef struct cublasContext* cublasHandle_t;
 
 struct Tensor;
 
+// cuDNN SDPA forward/backward. `scale` is the softmax scale (AttentionParams::softmax_scale): 0.0f → 1/sqrt(HS)
+// (default SDPA), non-zero → used verbatim (Gemma3 passes query_pre_attn_scalar**-0.5). The backward must be given
+// the forward's value. fork T22: upstream had no scale parameter and always applied 1/sqrt(HS).
 void attention_forward_cudnn(nv_bfloat16* out,        // output: (B, T, Nq, HS)
                              float* stats,            // output for backward pass: (B, Hq, T)
                              const nv_bfloat16* inp,  // input: (B, T, Hq + 2Hkv, HS) QKV
@@ -33,7 +36,8 @@ void attention_forward_cudnn(nv_bfloat16* out,        // output: (B, T, Nq, HS)
                              int Hq,
                              int Hkv,
                              int HS,
-                             cudaStream_t stream);
+                             cudaStream_t stream,
+                             float scale);
 
 void attention_forward_cudnn(float* out,        // output: (B, T, Nq, HS)
                              float* stats,      // output for backward pass: (B, Hq, T)
@@ -45,7 +49,8 @@ void attention_forward_cudnn(float* out,        // output: (B, T, Nq, HS)
                              int Hq,
                              int Hkv,
                              int HS,
-                             cudaStream_t stream);
+                             cudaStream_t stream,
+                             float scale);
 
 void attention_forward_cudnn(Tensor& out,        // output: (B, T, Nq, HS)
                              Tensor& stats,      // output for backward pass: (B, Hq, T)
@@ -57,7 +62,8 @@ void attention_forward_cudnn(Tensor& out,        // output: (B, T, Nq, HS)
                              int Hq,
                              int Hkv,
                              int HS,
-                             cudaStream_t stream);
+                             cudaStream_t stream,
+                             float scale);
 
 // Custom (non-cuDNN) attention forward using the in-tree kernel (supports FP32/BF16).
 // `scale` overrides the softmax scale. 0.0f → 1/sqrt(HS) (default SDPA).
@@ -137,7 +143,8 @@ void attention_backward_cudnn(nv_bfloat16* dqkv,
                               int Hq,
                               int Hkv,
                               int HS,
-                              cudaStream_t stream);
+                              cudaStream_t stream,
+                              float scale);
 void attention_backward_cudnn(Tensor& dqkv,
                               const Tensor& stats,
                               const Tensor& out,
@@ -150,7 +157,8 @@ void attention_backward_cudnn(Tensor& dqkv,
                               int Hq,
                               int Hkv,
                               int HS,
-                              cudaStream_t stream);
+                              cudaStream_t stream,
+                              float scale);
 
 // Flash Attention varlen forward (for document-level attention masking in packed sequences).
 // Q/K/V read from interleaved qkv buffer via strides; output written to out (total_q, Hq, HS).

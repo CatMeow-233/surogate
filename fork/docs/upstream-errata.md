@@ -207,3 +207,32 @@ GPU 上未确认，在 RTX 5090 上这样检查（`fork/dev build train` 之后�
 6. 用修复前的构建写出的 checkpoint 恢复：报错并提到 `SUROGATE_FORK_CPU_ADAMW_ALLOW_MISSING_STATE`；设为 1 后恢复并打印警告。
 7. 在 GPU 主机上运行 `fork/dev test patches -k cpu_adamw_checkpoint`（设 `CUDA_HOME`，构建过 `csrc/build` 时自动找到 `_deps`）：这时 `is_pageable_host` 走 `cudaPointerGetAttributes` 成功的分支。
 8. 可选：`Qwen/Qwen3-14B` 重复第 1、3 步，修复前在恢复时 OOM，修复后不分配设备状态。
+
+## cuDNN 注意力忽略 softmax_scale，Gemma3-27B 的全局层按 1/sqrt(128) 训练（fork 已修复：ledger T22）
+
+本节同样是例外：fork 修改了上游文件。行号对应上游 `282f9901`；这几个文件在 `488e5f00` 与上游 `82d42c72` 中相同。
+
+缺陷：flash_attention op 的 `softmax_scale` 为 0 时表示 kernel 默认的 1/sqrt(Hs)，非零时按原值使用（`graph_compiler.h:333-337`）。前向与反向的派发都把它放进 `AttentionParams::softmax_scale`（`flash_attention.cpp:475`、`681`），反向 op 从前向复制这个属性（`:932`）；mem_eff、flash_varlen、kvprefix 与 custom 都使用它。cuDNN 后端不用：`CuDNNAttention::supports()`（`backend_cudnn.cpp:35-63`）不检查它，`forward()`、`backward()` 不传递它，`attention_cudnn.cpp` 在前向与反向都把 `1/sqrtf(HS)` 写进 cuDNN 的 `attn_scale`（`:330`、`:394`）。注册表取第一个支持的后端，优先级为 kvprefix 110（只用于序列分块）> cuDNN 100 > mem_eff 95 > flash_varlen 90（`attention_backend.h:32-38`）。因此因果、BF16、Hs ≤ 128 且为 8 的倍数、没有滑动窗口、`cu_seqlens` 为空的 op 总是按 1/sqrt(Hs) 计算，与 op 声明的比例无关。
+
+触发：
+
+- 文本版 Gemma3-27B（`Gemma3ForCausalLM`，head_dim 128，`query_pre_attn_scalar` 168）。DSL 发出 `168**-0.5`（`surogate/dsl/blocks/gemma3.py:259-271`），HF 的 `modeling_gemma3.py` 同样用 `query_pre_attn_scalar**-0.5`。62 层中每 6 层有一个全局层，共 10 层走 cuDNN；滑动层（窗口 1024）cuDNN 不接受，由 flash_varlen 按正确的比例计算。cuDNN 用的是 0.0883883，不是 0.0771517，logits 放大 1.14564 倍，相当于 softmax 温度 0.873。前向与反向用同一个错误的比例，梯度与错误的前向自洽：训练的是另一个网络，与 HF、vLLM 推理时的网络不同，导出的 adapter 与 GRPO 训练端的 logprob 也随之偏离。
+- 只发生在没有行内文档边界的微步上，这时 `compute_doc_masking` 返回空，`cu_seqlens` 为空：不打包的 SFT、每行只有一个（截断或填充的）文档的打包批次、评估（`_write_padded_vectorized` 写的行）、`doc_masking: false`，以及运行时 decode 路径的 prefill（`flash_attention.cpp` 的 prefill 调用 `select(params).forward`，之后的 paged decode 用正确的比例，同一进程内 prefill 与 decode 不一致）。带行内边界的微步走 flash_varlen 或 mem_eff，比例正确，所以同一次训练会按批次内容混用两种比例。
+- 官方的 `google/gemma-3-27b-*` 是 `Gemma3ForConditionalGeneration`，没有原生 DSL 模型（见上文 T10 一节），只有文本版导出（`Gemma3ForCausalLM.save_pretrained`、社区的无视觉导出）会走到这里。不受影响：Gemma 3 的 270M/1B/4B/12B 与 EmbeddingGemma（head_dim 256，超过 cuDNN 的上限 128）、已发布的 Gemma 4（256/512）、DeepSeek V4（比例等于 1/sqrt(d)，且都是滑动窗口）。Gemma 4 风格的配置若有 Hs ≤ 128 的全注意力层，`softmax_scale=1.0` 会被换成 1/sqrt(Hs)；只有合成配置能走到这里。
+- 已有的绕行只覆盖窄情况：序列分块模式（kvprefix）；`MoeRolloutParity` 把 `cudnn_handle` 置空（`flash_attention.cpp:490`，注释写明 cuDNN 的封装固定了比例）；带行内边界的步。
+
+影响的估计（CPU 上的模拟，真实权重下的幅度未知）：GQA 因果注意力，Hq 32、Hkv 16、Hs 128，T=256，RMS 归一化的 Q/K 增益 1–2 时，每个受影响层注意力输出的相对 L2 误差为 8.8–15.8%，每行平均 KL 为 0.009–0.025 nats。
+
+修复（T22，始终开启）：
+
+- `attention_forward_cudnn` 与 `attention_backward_cudnn`（`attention_cudnn.cpp` 的 BF16 版本、`attention_custom.cu` 的 FP32 与 Tensor 重载、`attention_kernels.h` 中的声明）增加 `float scale` 参数，约定与 flash_varlen、custom 的封装相同：0 取 1/sqrt(HS)，非零按原值使用。`CuDNNAttention` 把 `p.softmax_scale` 传给前向、反向，以及分块反向（`AttBwdChunks > 1`）的每一块。
+- `attn_scale` 本来就是 pass-by-value 的图张量，每次 `execute()` 从 variant pack 读取，图缓存只以形状为键：不重建图，workspace 大小与后端选择都不变，这 10 层仍走 cuDNN。
+- 没有声明比例的 op 取 `1.f / sqrtf(HS)`，HS ≤ 4096 时与上游前向的 `1.0 / sqrtf(HS)` 逐位相同（逐个核对过），所以不声明比例的模型结果不变。
+- 没有改动：`flash_attention.cpp` 中 `MoeRolloutParity` 仍把 `cudnn_handle` 置空；它的注释（“cuDNN's wrapper fixes the softmax scale”）已经过时，parity 模式的行为不变。
+
+验证（没有 GPU）：`fork/patches/tests/native/test_cudnn_softmax_scale.py`（`fork/dev test patches`）把 `backend_cudnn.cpp` 的 `CuDNNAttention`、`attention_cudnn.cpp` 的 BF16 封装、`attention_custom.cu` 的 FP32 与 Tensor 重载，以及 `attention_backend.h` 的 `AttentionParams`、`AttentionBackend` 与优先级按源码原样编译；CUDA、cuDNN 与 cuDNN frontend 的图由主机桩代替，桩图在每次 `execute()` 时记录 variant pack 中的 `attn_scale`。测试用真实的 DSL 编译 Gemma3-27B 的文本配置，把 62 个 flash_attention op 逐个交给探针：不打包时 10 个全局层选中 cuDNN，前向与反向收到的比例必须等于 op 声明的 `168**-0.5`；打包时 cuDNN 拒绝；Hs 为 8–128 且不声明比例时与上游的值相同；1.0 按原值使用；分块反向的每一块用同一个比例；FP32 重载也传递比例。另外 pin 住修复依赖的上游代码：两个方向的派发都复制 `softmax_scale`，反向 op 继承这个属性，两个图构建函数中的 `attn_scale` 是 pass-by-value，缓存键不含比例。用上游源码（`488e5f00`）运行时，Gemma3-27B 的测试失败（收到 `0x1.6a09e6p-4`，即 1/sqrt(128)；声明的是 `0x1.3c0ca4p-4`），显式比例与分块反向的测试也失败，FP32 探针无法编译。改动的 3 个翻译单元和另外 7 个包含 `attention_kernels.h` 的翻译单元按 sm_120a 配置的编译命令编译通过。
+
+GPU 检查（未做）：在 5090 上用 transformers 构建一个随机权重的 `Gemma3ForCausalLM`：`Gemma3TextConfig(hidden_size=512, intermediate_size=1024, num_hidden_layers=6, num_attention_heads=4, num_key_value_heads=2, head_dim=128, query_pre_attn_scalar=168, sliding_window=64, layer_types=["sliding_attention"] * 5 + ["full_attention"], vocab_size=4096)`，`torch.manual_seed(0)`；把第 5 层的 `self_attn.q_norm.weight` 与 `k_norm.weight` 设为 1.0（增益 2，让 logits 足够大，随机初始化下温度的差别才看得出），转成 bf16 后 `save_pretrained`。按 `tests/test_onboarding_gemma4.py` 的方式建原生 trainer（`PretrainedConfig.from_pretrained`、`compile_model_for_hf`、`use_cuda_graphs=False`、LoRA rank 8），设 `SUROGATE_DEBUG_ATTN_SELECT=1` 与 `SUROGATE_DEBUG_ATTENTION_RUNTIME=1`。
+
+1. 前向：B=1、T=256，一条随机 token 序列，`trainer.validate(inputs, targets)`（`targets` 为左移一位的 `inputs`，末位 -100），与 HF（`attn_implementation="eager"`，bf16，`labels=inputs`）的 loss 比较。期望：`[ATTN] dir=fwd layer=5` 一行是 `backend=cudnn`、`packed=0`，其余各层是 `flash_varlen`；修复前两者的相对差远大于 bf16 噪声，修复后在 bf16 噪声内相等。对照：同一序列在 t=128 处重置 `position_ids`（第 5 层也走 flash_varlen），与 HF 分别计算两段的 loss 比较，修复前后都应相等，否则差异另有来源。
+2. 反向：同样两个 128 个 token 的文档，布局 A 为 B=2、T=128（每行一个文档，cuDNN），布局 B 为 B=1、T=256、`position_ids` 在 t=128 处重置（一行两个文档，flash_varlen 按声明的比例）；两种布局中每个文档的最后一个 target 都设为 -100。两个 trainer 用同一个 seed 初始化 LoRA，各做一次 `trainer.step` 与优化器更新（相同学习率），再对同一批数据 `validate`。期望：布局 A 中 `[ATTN] dir=bwd layer=5` 是 `backend=cudnn`；修复后两种布局的前向 loss 与更新后的 loss 都在 bf16 噪声内相等，修复前布局 A 的前向就已不同。

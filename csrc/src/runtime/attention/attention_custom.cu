@@ -357,6 +357,7 @@ cudaError_t attention_gpu_forward(floatX* out,
  * @param Hkv Number of key/value heads.
  * @param HS Head size.
  * @param stream CUDA stream for asynchronous execution.
+ * @param scale Softmax scale; 0 selects 1/sqrt(HS).
  */
 void attention_forward_cudnn(float* out,        // output: (B, T, Nq, HS)
                              float* stats,      // output for backward pass: (B, Hq, T)
@@ -368,8 +369,10 @@ void attention_forward_cudnn(float* out,        // output: (B, T, Nq, HS)
                              int Hq,
                              int Hkv,
                              int HS,
-                             cudaStream_t stream) {
-    attention_gpu_forward(out, stats, 1.f / sqrtf(HS), inp, B, T, Hq, Hkv, HS, /*window_size=*/0, stream);
+                             cudaStream_t stream,
+                             float scale) {
+    const float attn_scale = scale != 0.0f ? scale : 1.f / sqrtf(HS);  // fork T22: upstream always used 1/sqrt(HS)
+    attention_gpu_forward(out, stats, attn_scale, inp, B, T, Hq, Hkv, HS, /*window_size=*/0, stream);
 }
 
 /**
@@ -448,6 +451,7 @@ cudaError_t attention_gpu_backward(floatX* dqkv,
  * @param Hkv Number of key/value heads.
  * @param HS Head size.
  * @param stream CUDA stream for asynchronous execution.
+ * @param scale Softmax scale, the forward's; 0 selects 1/sqrt(HS).
  */
 void attention_backward_cudnn(float* dqkv,
                               const float* stats,
@@ -460,8 +464,10 @@ void attention_backward_cudnn(float* dqkv,
                               int Hq,
                               int Hkv,
                               int HS,
-                              cudaStream_t stream) {
-    attention_gpu_backward(dqkv, stats, 1.f / sqrtf(HS), out, dout, qkv, B, T, Hq, Hkv, HS, /*window_size=*/0, stream);
+                              cudaStream_t stream,
+                              float scale) {
+    const float attn_scale = scale != 0.0f ? scale : 1.f / sqrtf(HS);  // fork T22: upstream always used 1/sqrt(HS)
+    attention_gpu_backward(dqkv, stats, attn_scale, out, dout, qkv, B, T, Hq, Hkv, HS, /*window_size=*/0, stream);
 }
 
 /**
@@ -481,6 +487,7 @@ void attention_backward_cudnn(float* dqkv,
  * @param Hkv Number of key/value heads.
  * @param HS Head size.
  * @param stream CUDA stream for asynchronous execution.
+ * @param scale Softmax scale (AttentionParams::softmax_scale); 0 selects 1/sqrt(HS).
  * @throws std::logic_error If tensor dtype is not FP32 or BF16.
  */
 void attention_forward_cudnn(Tensor& out,        // output: (B, T, Hq, HS)
@@ -493,7 +500,8 @@ void attention_forward_cudnn(Tensor& out,        // output: (B, T, Hq, HS)
                              int Hq,
                              int Hkv,
                              int HS,
-                             cudaStream_t stream) {
+                             cudaStream_t stream,
+                             float scale) {
     std::byte* ws = workspace.get<std::byte>();
     if (out.DType == ETensorDType::FP32) {
         attention_forward_cudnn(out.get<float>(),
@@ -506,7 +514,8 @@ void attention_forward_cudnn(Tensor& out,        // output: (B, T, Hq, HS)
                                 Hq,
                                 Hkv,
                                 HS,
-                                stream);
+                                stream,
+                                scale);
     } else if (out.DType == ETensorDType::BF16) {
         attention_forward_cudnn(out.get<nv_bfloat16>(),
                                 stats.get<float>(),
@@ -518,7 +527,8 @@ void attention_forward_cudnn(Tensor& out,        // output: (B, T, Hq, HS)
                                 Hq,
                                 Hkv,
                                 HS,
-                                stream);
+                                stream,
+                                scale);
     } else {
         throw std::logic_error("attention_forward: unsupported dtype");
     }
@@ -617,6 +627,7 @@ void attention_backward_custom(Tensor& dqkv,
  * @param Hkv Number of key/value heads.
  * @param HS Head size.
  * @param stream CUDA stream for asynchronous execution.
+ * @param scale Softmax scale, the forward's; 0 selects 1/sqrt(HS).
  * @throws std::logic_error If tensor dtype is not FP32 or BF16.
  */
 void attention_backward_cudnn(Tensor& dqkv,
@@ -631,7 +642,8 @@ void attention_backward_cudnn(Tensor& dqkv,
                               int Hq,
                               int Hkv,
                               int HS,
-                              cudaStream_t stream) {
+                              cudaStream_t stream,
+                              float scale) {
     std::byte* ws = workspace.get<std::byte>();
     if (out.DType == ETensorDType::FP32) {
         attention_backward_cudnn(dqkv.get<float>(),
@@ -645,7 +657,8 @@ void attention_backward_cudnn(Tensor& dqkv,
                                  Hq,
                                  Hkv,
                                  HS,
-                                 stream);
+                                 stream,
+                                 scale);
     } else if (out.DType == ETensorDType::BF16) {
         // Argument order is now consistent: out, dout, qkv (matching header declaration)
         attention_backward_cudnn(dqkv.get<nv_bfloat16>(),
@@ -660,7 +673,8 @@ void attention_backward_cudnn(Tensor& dqkv,
                                  Hq,
                                  Hkv,
                                  HS,
-                                 stream);
+                                 stream,
+                                 scale);
     } else {
         throw std::logic_error("attention_backward: unsupported dtype");
     }
