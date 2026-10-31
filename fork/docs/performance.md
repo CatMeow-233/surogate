@@ -12,6 +12,7 @@
 | [GRPO 周期计时](#grpo-周期计时) | T6 |
 | [cpu_training 的 AdamW 状态 checkpoint](#cpu_training-的-adamw-状态-checkpoint) | T21 |
 | [GPT-OSS 预量化 LoRA 的专家输入梯度](#gpt-oss-预量化-lora-的专家输入梯度) | T25 |
+| [GRPO 训练路径 rollout 服务的主机开销](#grpo-训练路径-rollout-服务的主机开销) | T11、T12 |
 
 优化应针对完整的训练迭代，包括输入获取和通信。孤立的 kernel 改进只有在缩短关键路径时才有帮助。比较改动时，保持模型、recipe、序列长度、batch、硬件拓扑和质量目标不变。
 
@@ -411,3 +412,63 @@ dense Qwen3/Qwen3.5 的 `grpo-colocate` 用原生 SharedServer。每步进入训
 验证（没有 GPU）：源码 pin `fork/patches/tests/native/test_shared_sleep_kv.py`（`fork/dev test patches`）在改动前失败，并检查上面论证所依据的上游代码；改动在 upstream/main `82d42c72` 上同样适用，pin 也通过；`generation_service.cpp`（`sinfer_serve` 的主机翻译单元，按 sm_120a 配置）编译通过，`-Wall -Wextra` 下改动的几行没有警告。
 
 5090 检查（未验证）：W-0.6B-GRPO（Qwen3-0.6B LoRA colocate，`max_num_seqs` 16，`max_tokens` 1536）与 W-8B-GRPO 各跑 20 步，带与不带 `SUROGATE_SHARED_SLEEP_KEEP_KV=1`。每步记录：发布耗时 `train/publish_duration_ms`；`begin_training()` 耗时（同上一节的差值）；`engine: awake, restored X GiB` 一行，T29 下应少掉保留 KV 的那部分；`nsys profile --cuda-memory-usage=true` 后 `nsys stats -r cuda_api_sum` 中每步的 `cudaMallocHost`/`cudaFreeHost` 次数，应从约（有页的 granule 数 × 层数 × 2）降到约 0；主机锁页内存的峰值；发布后第一轮的前缀命中与 rollout token 应不变。成功标准：0.6B、C=16 时每步至少省 1 s。
+
+## GRPO 训练路径 rollout 服务的主机开销
+
+`shared_execution()`（`surogate/grpo/shared_model.py`）返回 `"training"` 的模型由 Python 的 `SharedModelServer` 生成 rollout：全部 MoE 与 GLM 模型、Qwen3/Qwen3.5 以外的稠密模型，以及 LoRA 目标或工具协议不标准的 Qwen。每个请求在一个 HTTP 处理线程中逐 token 运行 `_generate`，与 decode 调度线程和同进程的 orchestrator 共用一个 GIL；一个请求处理完自己这一步的 token 之后，才能把下一步交给调度器，所以每个 token 的主机工作直接落在 decode 轮次之间。
+
+### 非流式请求只在结束的那一步构造文本（T11）
+
+上游 `_generate` 每生成一个 token，都把整个 completion 重新解码一次、在全文中查找停止字符串、再对全文运行 `protocol.parse`：每个 token O(n)，每个请求 O(n²)。非流式请求（GRPO orchestrator 的请求都是非流式的）只用得到最后一步的结果：`message` 每步重建，只返回最后一个；`delta` 和 `emitted_fields` 只供流式回调使用；不结束的步上 `parse(final=False)` 只做字符串查找和切片，工具定义已由 `request_tools` 校验，不会抛异常。
+
+`surogate/_fork/grpo_detok.py` 的 `CompletionEnd.ends()` 判断一步是否结束 completion：这一步的 token 是停止 token，或这是允许的最后一步，或（与上游相同，从第 `minimum - 1` 步起）`tokenizer.decode(ids)` 中出现了停止字符串。不结束的步跳过文本块；结束的那一步照常运行上游的文本块（一次完整解码、停止截断、一次 `parse(final=True)`、构造 message），返回的就是上游自己的计算结果。
+
+| `SUROGATE_GRPO_DETOK` | 行为 |
+|---|---|
+| `final`（默认） | 如上。请求有停止字符串时，从第 `minimum - 1` 步起每步仍对全文解码一次来检查（解码开销与上游相同，但不再 parse）；没有停止字符串时，一步不做任何文本工作 |
+| `incremental` | 同 `final`；另外，tokenizer 是未改动的 transformers fast tokenizer 且 decoder 是 ByteLevel（Qwen、Llama 3、GLM、DeepSeek、GPT-OSS 等）时，停止字符串检查只解码最近一个完整字符之后的 token，只扫描一个与最长停止字符串等长的窗口。其他 tokenizer 用 `final` 的检查 |
+| `per_token` | 上游的逐 token 循环 |
+
+每个请求读取一次该变量，非法值使请求以 400 失败。流式请求（有回调）始终走上游循环。
+
+`final` 默认开启，因为它只去掉结果被丢弃的工作：对上游能完成的每个请求，token、文本、message、logprobs 和 finish reason 都与上游相同。唯一的差别出现在失败的情况：如果某个 tokenizer 的 `decode` 对 completion 的某个前缀抛异常、对完整的 completion 不抛，上游会在那一步失败，这里不会。HF fast tokenizer 不会出现这种情况：未知 id 被丢弃，非法 UTF-8 被替换。
+
+`incremental` 的结果等于上游的依据（tokenizers 0.23.3 的 Rust 源码与 transformers 5.21，推导写在 `_ByteLevelTail` 的 docstring 中）：`decode` 把每个 id 映射成 token 字符串后交给 decoder；ByteLevel decoder 把每个 token 各自转成字节，对整串字节做一次 `from_utf8_lossy`；一段字节的 lossy 解码若不以 U+FFFD 结尾，就停在完整字符的边界上，之后的字节与它无关。因此已提交部分的文本是之后每一步文本的前缀，而上一步文本中没有停止字符串，新出现的匹配只能从已提交文本的最后 `len(stop) - 1` 个字符或更晚处开始。窗口文本以 U+FFFD 结尾时（字符还没写完）继续累积 token；超过 16 个 token（一个不完整字符最多 4 个字节 token，只有连续的非法字节会到这里）时，这个请求改用全文检查。是否使用窗口由 `byte_level_backend()` 判断：类上与实例上都没有覆盖 `decode`/`_decode`，decoder 的类型恰好是 `tokenizers.decoders.ByteLevel`，transformers 不会对全文做 `clean_up_tokenization`，并用一段包含全部清理模式的探针文本确认 `tokenizer.decode` 与后端 `decode` 一致。这个论证依赖已安装的 tokenizers 与 transformers 的内部实现，而检查只看类和探针、看不到 Rust 代码，所以 `incremental` 默认关闭。
+
+### 按存活 session 决定 decode 轮次的大小（T12）
+
+`DecodeScheduler._run` 最多等 1 ms，直到有 `max_batch` 个待执行的步。存活的 session 少于 `max_batch` 时（每个 rollout 阶段的尾部，或 `max_concurrency` 高于实际并发时）这个数永远凑不够，每一轮都等满 1 ms。session 从 `new_session` 到 `release` 之间是存活的，每个 session 同时最多有一个待执行的步。`SUROGATE_GRPO_LIVE_DISPATCH=1` 时，所有存活 session 都交了一步（`min(max_batch, 存活数)`，至少 1）就开始一轮；截止时间以及遇到 release 或关闭时提前结束等待的规则不变，所以一轮等待的时间不会比上游长。等待期间新建的 session 交的步进入下一轮。
+
+该开关默认关闭，调度器在构造时读取一次：轮次形成的时刻不同，各轮的 batch 组成也就不同，而批量 decode kernel 对不同 batch 不保证逐位相同的结果。上游的轮次组成本来就取决于时序，同样的配置跑两次也可能不同。
+
+### 测量
+
+主机与上文 CPU 优化器的测量相同（4 vCPU KVM 虚拟机，Intel Xeon family 6 model 207，2.1 GHz，没有 GPU，与其他会话共用，测量期间 load average 0.3–2.5）。Python 3.12、tokenizers 0.23.3、transformers 5.21.0。tokenizer 由 `fork/patches/bench/grpo_rollout_host.py tokenizer <目录>` 生成：在检出目录的 markdown 和 `surogate/` 源码上训练的 32k ByteLevel BPE，使用 Qwen2 的切分正则和聊天、工具特殊 token；completion 是同一批文件（中英文 markdown 与 Python 代码）编码后的前 L 个 token。
+
+每个 token 的主机开销：`grpo_rollout_host.py per-token <目录>`，直接调用 `_generate`，采样器按脚本返回 token（没有调度器、没有 GPU），5 次的中位数，`logprobs=True`。“有停止字符串”的请求带 `["</answer>", "\n\n\n\n"]`，两者都不出现，所以每一步都要检查。三种模式在同一 L 下的响应摘要相同。
+
+| L（token） | 改动前的代码 | `per_token` | `final`，无停止字符串 | `final`，有停止字符串 | `incremental`，有停止字符串 |
+|---:|---:|---:|---:|---:|---:|
+| 1024 | 143 µs | 145 µs | 7.3 µs | 142 µs | 9.0 µs |
+| 2048 | 336 µs | 306 µs | 11.4 µs | 361 µs | 8.6 µs |
+| 4096 | 626 µs | 587 µs | 7.0 µs | 653 µs | 8.7 µs |
+
+“改动前的代码”是在改动之前的提交上用同样的输入测得的。另两次重复测量中 `final` 无停止字符串为 6.6–10.6 µs，`incremental` 有停止字符串为 8.4–14.3 µs（load average 到 3.5）；同一列不同 L 之间的差别是虚拟机的噪声，剩下的开销与 L 无关。`incremental` 第一次用到窗口时检查 tokenizer 一次（约 0.5 ms），结果按 tokenizer 缓存。剩余的约 7 µs 中，每个 token 的 `tokenizer.decode([token])`（logprob 条目里的 token 文本）约 2.9 µs，其余是采样参数字典、score 字典和脚本采样器本身。
+
+整个 rollout 路径：`grpo_rollout_host.py rollout <目录> <毫秒>`，16 个请求在真实线程上经 `generate()` 和真实的 `DecodeScheduler` 运行，一轮 GPU 计算用释放 GIL 的 `time.sleep` 代替（原生 decode 调用同样释放 GIL），每轮耗时固定：2.8 ms 是对 1B 稠密模型 B=16 一轮的估计，12.3 ms 是对每轮读取全部专家的约 10B 总参数 MoE 的估计（20 GB 权重 / 1.53 TB/s，加上 KV）。“等长”是 16 个请求都生成 1024 个 token；“不等长”是 256–1024 之间的固定随机长度，模拟 rollout 阶段的尾部。理想值假设每轮都包含全部存活请求。3 次的中位数：
+
+| 一轮 | 长度 | `per_token` | `final` | `final` + `SUROGATE_GRPO_LIVE_DISPATCH=1` |
+|---|---|---:|---:|---:|
+| 2.8 ms | 等长（理想 5714 tok/s） | 1704（29.8%） | 2938（51.4%） | 2860（50.0%） |
+| 2.8 ms | 不等长（理想 3669 tok/s） | 1393（38.0%） | 2005（54.6%） | 2158（58.8%） |
+| 12.3 ms | 等长（理想 1301 tok/s） | 759（58.3%） | 1042（80.1%） | 1056（81.2%） |
+| 12.3 ms | 不等长（理想 835 tok/s） | 576（68.9%） | 692（82.8%） | 706（84.5%） |
+
+文本改动使稠密模型的 rollout 快 1.4–1.7 倍，MoE 快 1.2–1.4 倍（不等长 / 等长）；剩下的差距主要是每个 token 一次的线程交接：每一步一个 `Future`、一次 `Condition` 通知和一次处理线程的唤醒（`DecodeScheduler.step`），这里没有改动它。存活 session 调度只在长度不等时起作用（等长一行的差别在噪声范围内），这一组数据中不等长时稠密 +7.6%、MoE +2.0%。同一模拟的另一组测量（同一台虚拟机，早些时候）得到稠密等长 1659 → 3022、不等长 1444 → 2070 → 2267，MoE 等长 781 → 1031、不等长 598 → 694 → 719 tok/s。
+
+### 在 RTX 5090 上尚未验证
+
+以上吞吐量都来自 CPU 模拟。T11 不改变 GPU 收到的任何调用：token 序列是采样器的输出，改动只影响两步之间主机做什么，因此等价性完全由 CPU 测试覆盖（`fork/patches/tests/grpo/test_shared_model_detok.py` 用随机生成的 completion 逐字段比较三种模式，包括拆开的多字节字符、非法 UTF-8、U+FFFD、特殊 token、跨 token 的停止字符串、`min_tokens`、停止 token、工具调用与 Harmony，并覆盖 SentencePiece 风格、WordPiece 和强制清理的 tokenizer）。需要在 5090 上测的是收益：
+
+1. 在一个走训练路径的模型上（例如约 10B 总参数的 qwen3_moe LoRA，`max_tokens` 1536，16 个 prompt × 8 个 rollout），用同一份配置运行 `surogate grpo-colocate --train <train.yaml> --infer <infer.yaml> --orch <orch.yaml>` 至少 50 步三次：一次设 `SUROGATE_GRPO_DETOK=per_token`，一次不设，一次不设并设 `SUROGATE_GRPO_LIVE_DISPATCH=1`。比较 `train/pack_duration_ms`（colocate 下主要是等 rollout）和 `train/cycle_duration_ms` 的中位数，以及有效 batch：每步生成的 completion token 数除以 `<output_dir>/shared_weights.jsonl` 中相邻两条 `rollouts` 记录的 `decode_rounds` 之差（含 prefill 轮次）。预期 MoE 的 rollout 至少快 1.15 倍、尾部的有效 batch 接近 `min(16, 存活数)`；1B 左右的非 Qwen 稠密模型至少快 1.5 倍。
+2. rollout 期间对服务进程运行 `py-spy dump --native --pid <pid>`：默认模式下处理线程的栈中不应出现 `tokenizer.decode` 解码整个 completion 或 `parse_output`。

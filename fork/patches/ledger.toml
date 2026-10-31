@@ -405,7 +405,7 @@ conflict_history = [
 [[topic]]
 id = "T11"
 title = "GRPO training-path server builds non-streaming text once"
-commits = []
+commits = ["0156497c", "eb61130a"]   # eb61130a: the window check no longer imports transformers.processing_utils
 switch = "SUROGATE_GRPO_DETOK=final (default; removes only per-token text work whose result is discarded) | incremental (also a ByteLevel window for stop strings) | per_token (upstream's loop); streaming requests always use upstream's loop"
 # shared_model.py keeps three hunks in SharedModelServer._generate: a local import of the fork
 # module, `view = completion_view(...)` before the token loop, and after `stopped = token in eos`
@@ -420,6 +420,7 @@ files = ["surogate/grpo/shared_model.py"]
 fork_files = [
     "surogate/_fork/grpo_detok.py",
     "fork/patches/tests/grpo/test_shared_model_detok.py",
+    "fork/patches/bench/grpo_rollout_host.py",   # shared with T12
 ]
 tests = ["fork/patches/tests/grpo/test_shared_model_detok.py"]
 conflict_history = [
@@ -429,7 +430,7 @@ conflict_history = [
 [[topic]]
 id = "T12"
 title = "decode rounds sized by live sessions"
-commits = []
+commits = ["595da1c6"]
 switch = "SUROGATE_GRPO_LIVE_DISPATCH=1 (default off; read when the DecodeScheduler is built)"
 # decode_scheduler.py keeps four hunks: the LiveSessions counter built in __init__ (local import),
 # opened() in new_session, released() in release, and round_size(max_batch) in place of max_batch
@@ -438,6 +439,7 @@ files = ["surogate/grpo/decode_scheduler.py"]
 fork_files = [
     "surogate/_fork/grpo_live_dispatch.py",
     "fork/patches/tests/grpo/test_decode_live_dispatch.py",
+    "fork/patches/bench/grpo_rollout_host.py",   # shared with T11
 ]
 tests = ["fork/patches/tests/grpo/test_decode_live_dispatch.py"]
 conflict_history = [
