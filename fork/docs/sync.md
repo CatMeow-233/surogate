@@ -222,7 +222,7 @@ git log --oneline HEAD..MERGE_HEAD -- <文件>                # 上游改了什�
 ### T24 NVFP4 Four Over Six 的 SR、存储比例编码与图重放的 SR 噪声
 
 - 文件：`csrc/src/recipes/nvfp4/kernels/quant_nvfp4_4o6.cu`（一行 `#include`；`quantize_nvfp4_4o6_cutlass_auto_scale` 与 `_from_amax` 在 `switch (error_metric)` 之前转给 `surogate_fork::nvfp4::quantize_4o6`，`quantize_nvfp4_4o6_stochastic_cutlass_auto_scale` 转给 `quantize_4o6_stochastic`，各自在 `*_LEGACY` 开关之后）、`quant_nvfp4_cutlass.cu`（一行 `#include`；`quantize_nvfp4_stochastic_cutlass_kernel` 与 `_auto_kernel` 末尾加 `bool graph_generation`，`curand_init` 的 offset 取 `surogate_fork::sr_graph::curand_offset(graph_generation)`；启动它们的三个函数在启动前取 `use_generation(stream)`，之后调用 `advance`）。kernel 本身在 `fork/native/src/nvfp4_4o6.cu`，算术在 `fork/native/include/surogate_fork/nvfp4_4o6_arith.h`。缺陷与证据见 [upstream-errata.md](upstream-errata.md#nvfp4-随机舍入与-four-over-six-块比例的缺陷fork-已修复ledger-t24)。
-- 反向回放：见 ledger 中 T24 的 `conflict_history`。
+- 反向回放：`quant_nvfp4_4o6.cu` 1/0/0，90 天的冲突块来自上游 `9f7d3705`（2026-08-02，新增 `quantize_nvfp4_4o6_cutlass_from_amax`，T24 在其中放了一处转发）；`quant_nvfp4_cutlass.cu` 0/0/0，上游最后一次修改在 2026-04。`quant_nvfp4_4o6_sm100.cu`（legacy 路径，fork 未改）上游最后一次修改也在 2026-04。
 - 解决：以上游为准，再把转发和代数参数放回；pin 按函数体定位，会指出缺了哪一处。上游修改 `quant_nvfp4_4o6_sm100.cu`（fork 没有改它，它是 legacy 路径，测试中的模拟按它的行建模）时，pin `test_upstream_kernels_are_what_the_emulation_models` 会失败：对照上游的新代码判断 fork kernel 是否还要跟进（4/6 的选择、线程布局和 CUTLASS 比例布局是从上游复制的），再更新模拟。上游自己修好 SR 的无偏性、编码比例或图中的种子时，删去 fork 的对应部分。上游给 SR kernel 增加启动函数时，同样传入代数并调用 `advance`。
 - 测试：`fork/patches/tests/native/test_nvfp4_4o6.py`（`fork/dev test patches`，不需要 GPU；主机检查需要 C++17 编译器，找到 CUDA 头文件时多两项对照）；GPU 主机上 `fork/dev test native`（`integration-tests '[nvfp4-4o6]'`）与 errata 中的训练 A/B。
 

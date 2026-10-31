@@ -676,7 +676,7 @@ conflict_history = [
 [[topic]]
 id = "T24"
 title = "NVFP4 Four Over Six: unbiased SR, stored-scale encode, fresh SR noise on graph replays"
-commits = []
+commits = ["af89ae9b", "33b73381"]   # af89ae9b: SR and RN; 33b73381: fresh SR noise on graph replays
 switch = "on by default (defect fixes); SUROGATE_NVFP4_4O6_SR_LEGACY=1 runs upstream's 4/6 SR kernel, SUROGATE_NVFP4_4O6_RN_LEGACY=1 upstream's 4/6 RN kernel, SUROGATE_NVFP4_SR_GRAPH_LEGACY=1 makes graph replays reuse the captured SR noise again (each read once per process)"
 # Defects (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "NVFP4 随机舍入与 Four Over Six 块比例的缺陷"):
 # (SR) quantize_block_4o6_stochastic (quant_nvfp4_4o6_sm100.cu) adds a fixed (b/256-0.5)*0.5 dither before
@@ -722,4 +722,6 @@ tests = [
     "fork/native/tests/host/nvfp4_4o6_check.cpp",
     "fork/native/tests/test-fork-nvfp4-4o6.cu",
 ]
-conflict_history = []
+conflict_history = [
+    "2026-10-31 reverse replay of af89ae9b and 33b73381 onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: quant_nvfp4_4o6.cu 1/0/0 (the 90-day point predates 9f7d3705, which added quantize_nvfp4_4o6_cutlass_from_amax, where one RN dispatch sits), quant_nvfp4_cutlass.cu 0/0/0",
+]
