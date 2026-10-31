@@ -185,12 +185,12 @@ git log --oneline HEAD..MERGE_HEAD -- <文件>                # 上游改了什�
 - 解决：以上游为准，再把上面各处放回。上游改写 cap-and-pad 时（例如按 T 而不是 B*T 固定 `max_seqlen`，或换成按 cap 分桶的 graph），检查三条规则仍然成立：带文档的 graph 在没有行内重置的步上读按行列表；捕获中没有行内重置的微步按 varlen 捕获；捕获中不分配设备缓冲。eager 调用超过 cap 时不得改写或重新分配 graph 引用的段与 `mCuSeqlensGpu`。`test_doc_mask_staging.py` 编译上游的函数原文，函数改名或签名变化时它在提取或编译时失败，按新代码调整测试中的桩。上游自己修好这些缺陷时，删去 fork 的对应部分。
 - 测试：`fork/patches/tests/native/test_doc_mask_staging.py`（`fork/dev test patches`，不需要 GPU）；`fork/native/tests/test-fork-doc-mask-staging.cpp`（`[doc-mask]`，在 `dsl-run-state-tests` 中，只用主机）；GPU 检查见 errata。
 
-### T19 MoE 路由统计不在重计算回放中累加
+### T19 MoE 路由统计不在重计算回放和分块训练的 KV sweep 中累加
 
-- 文件：`csrc/src/runtime/ops/moe_topk.cpp`（`dispatch_moe_topk` 统计块的条件加上 `mInReplay ? nullptr :`）。
+- 文件：`csrc/src/runtime/ops/moe_topk.cpp`（`dispatch_moe_topk` 统计块的条件加上 `(mInReplay || sequence_chunk_kv_sweep()) ? nullptr :`）。
 - 反向回放：无冲突。
-- 解决：保留这个条件。上游新增别的统计点，或改变回放方式（例如回放跳过 MoETopK）时，按 `test_moe_stats_replay.py` 的 pin 重新判断；上游自己加了判断时删去 T19。
-- 测试：`fork/patches/tests/native/test_moe_stats_replay.py`；GPU 检查见 [errata](upstream-errata.md#moe-路由统计在重计算回放中重复累加fork-已修复ledger-t19)。
+- 解决：保留这个条件。上游新增别的统计点，改变回放方式（例如回放跳过 MoETopK），或改写分块调度（阶段 A 不再设 `kv_sweep`，或清零不再只在序号 0）时，按 `test_moe_stats_replay.py` 的 pin 和其中的计数模型重新判断；上游给 `step_chunked` 的阶段 A 也设 `kv_sweep` 时，`test_step_chunked_does_not_mark_its_kv_sweep` 失败，删去这个 pin，并更新 errata 中“未修复”一段。上游自己加了判断时删去 T19。
+- 测试：`fork/patches/tests/native/test_moe_stats_replay.py`；GPU 检查见 [errata](upstream-errata.md#moe-路由统计在重计算回放和分块训练的-kv-sweep-中重复累加fork-已修复ledger-t19)。
 
 ### T20 不能捕获的整步只预热一次（`SUROGATE_FORK_FORCE_GRAPH_WARMUP=1` 恢复上游）
 

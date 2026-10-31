@@ -39,7 +39,7 @@ nsys stats --report cuda_gpu_mem_size_sum train-trace.nsys-rep
 - Dispatch-PP 把两个常驻的边界张量作为一批读取：先分配主机端目标缓冲区再排队拷贝，整批只等待一次。这去掉了一个多余的显式完成栅栏；传输仍使用现有的主机边界协议，不是 P2P 或零拷贝。
 - 通用 FP8 MoE 反向不再分配只有前向 recipe 才使用的输入量化缓冲区。这节省了与 `routed_tokens * input_features` 成正比的对齐 scratch 及其统计量。它降低的是 stack 需求；已预留的 arena 不一定立即释放显存。
 - 全参数 MoE 权重反向在每个 expert 都有 token、且每个目标元素都会被 beta 为零的 GEMM 覆盖时，跳过对整个 dW 的清零。覆盖步中，空 expert 的梯度仍保持为零；累加时从不清除已有梯度。冻结的 LoRA base 不走这条 base 权重路径。
-- 重计算回放 MoE 层时不再计算路由统计（每个 MoE 层、每个微步少一次单 CTA 的 kernel）。这同时修复了 `aux_loss` 与 `z_loss` 报告为 2 倍的问题，见 [upstream-errata.md](upstream-errata.md#moe-路由统计在重计算回放中重复累加fork-已修复ledger-t19)。
+- 重计算回放 MoE 层时，以及分块训练（`sequence_chunks > 1`）中 `train_step_graphed` 的 KV sweep 中，不再计算路由统计（每个回放或扫过的 MoE 层少一次单 CTA 的 kernel）。这同时修复了 `aux_loss` 与 `z_loss` 偏大的问题（重计算时为 2 倍；分块时第一个微步之后的每个微步再多计一次），见 [upstream-errata.md](upstream-errata.md#moe-路由统计在重计算回放和分块训练的-kv-sweep-中重复累加fork-已修复ledger-t19)。
 
 ## 不能捕获的整步只预热一次
 
