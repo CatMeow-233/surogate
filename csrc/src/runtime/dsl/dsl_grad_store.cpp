@@ -25,6 +25,8 @@
 #include "utilities/comm.h"
 #include "utilities/utils.h"
 
+#include "surogate_fork/host_grad_overwrites.h"
+
 namespace dsl {
 
 namespace {
@@ -292,17 +294,18 @@ void DslGradStore::start_micro_step(cudaStream_t stream, int micro_step, int tot
     mAccumulate = micro_step > 0;
     if (!mAccumulate) {
         zero_all(stream);
-        // Zero CPU gradient storage for streaming mode
+        // Streaming mode: this micro-step's D2H overwrites the CPU gradients, and those it does not reach are
+        // zeroed before their first reader (zero_rest below and in wait_all_offloads; fork ledger T13).
         if (mStreamGrads) {
-            for (auto& [name, cpu_grad] : mCpuGrads) {
-                std::memset(cpu_grad.Data, 0, cpu_grad.bytes());
-            }
+            mHostOverwrites->begin_step();
             // Zero the norm accumulator
             if (mLayerNormAccum.Data) {
                 CUDA_CHECK(cudaMemsetAsync(mLayerNormAccum.Data, 0, sizeof(float), stream));
             }
         }
     } else if (mStreamGrads) {
+        // CPU gradients that micro-step 0 did not overwrite start this micro-step's additions from zero (T13).
+        mHostOverwrites->zero_rest();
         // Zero only the norm accumulator (CPU grads keep accumulated values)
         if (mLayerNormAccum.Data) {
             CUDA_CHECK(cudaMemsetAsync(mLayerNormAccum.Data, 0, sizeof(float), stream));
@@ -811,6 +814,10 @@ void DslGradStore::allocate_streaming_buffers(const DslParamStore& params) {
         if (gpu_grad.Data) host_of_device.emplace(gpu_grad.Data, host);
         mCpuGrads.emplace(name, host);
     }
+    mHostOverwrites = std::make_shared<surogate_fork::HostGradOverwrites>();
+    for (const auto& [name, host] : mCpuGrads) {
+        mHostOverwrites->add(host.Data, host.bytes());
+    }
 
     // 2. Allocate CPU staging buffer (for micro-step > 0 accumulation)
     //    Sized for max layer; keyed by base_name
@@ -995,6 +1002,7 @@ void DslGradStore::offload_layer_grads(int layer_idx, cudaStream_t compute_strea
                                        grad_it->second.bytes(),
                                        cudaMemcpyDeviceToHost,
                                        copy_stream));
+            mHostOverwrites->overwritten(cpu_it->second.Data, grad_it->second.bytes());
         }
     } else {
         // Subsequent micro-steps: D2H to staging, then CPU accumulate in wait_all_offloads
@@ -1047,6 +1055,7 @@ void DslGradStore::offload_non_block_grads(cudaStream_t stream) {
                                        grad_it->second.bytes(),
                                        cudaMemcpyDeviceToHost,
                                        stream));
+            mHostOverwrites->overwritten(cpu_it->second.Data, grad_it->second.bytes());
         } else {
             // For non-block grads, accumulate was done on GPU via mAccumulateTensors
             // so GPU has the accumulated result. Just copy it.
@@ -1088,6 +1097,9 @@ void DslGradStore::wait_all_offloads(cudaStream_t stream) {
     // Synchronize to ensure all D2H is visible on CPU
     CUDA_CHECK(cudaStreamSynchronize(stream));
     mPendingD2HEvents.clear();
+    // With one micro-step, the CPU gradients it did not overwrite are zeroed here, before the optimizer reads
+    // them (fork ledger T13).
+    mHostOverwrites->zero_rest();
     // Micro-steps after the first were added into the CPU grads per layer, as
     // each staged copy landed (accumulate_staged_layer); the waits above cover them.
 }

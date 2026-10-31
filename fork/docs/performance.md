@@ -7,6 +7,7 @@
 | [避免冗余工作与交接](#避免冗余工作与交接) | T1、T3、T4、T6、T7、T8、T19 |
 | [不能捕获的整步只预热一次](#不能捕获的整步只预热一次) | T20 |
 | [CPU 优化器并行](#cpu-优化器并行) | T5 |
+| [cpu_training 主机端步](#cpu_training-主机端步) | T13 |
 | [LoRA 融合输入梯度](#lora-融合输入梯度) | T2 |
 | [GRPO 周期计时](#grpo-周期计时) | T6 |
 | [cpu_training 的 AdamW 状态 checkpoint](#cpu_training-的-adamw-状态-checkpoint) | T21 |
@@ -142,6 +143,22 @@ team 因而不超过调用线程掩码中的 CPU 数；同一组 CPU 上的几�
 ### OpenMP 测试
 
 独立的回归测试用 `fork/dev test openmp` 运行，需要 C++ 编译器和 OpenMP，但不需要 GPU 或 CUDA 头文件。`training-openmp-contract` 检查训练用的 OpenMP 辅助函数能让一个真实的双 worker 主机库生效，并得到精确的整数输出；运行时的线程数限制可能导致显式跳过。`training-openmp-team` 用同一个 OpenMP 辅助函数（`surogate_enable_training_openmp()`）编译 `omp_team.h`（该测试不设构建类型，优化级别与训练库的 `-O3` 不同），检查阈值、绑定线程的线程数及其 team 线程的掩码、共用与不相交掩码的分配规则和共享窗口，以及 `ordered_block_sum` 在 1–4 个线程下与串行分块顺序逐位相同。这两个测试都不编译 CUDA 训练库；`cpu_adamw.cpp` 中的并行区由源码 pin `fork/patches/tests/native/test_cpu_adamw_openmp.py`（`fork/dev test patches`）检查。
+
+## cpu_training 主机端步
+
+`cpu_training` 全参微调的主机在每个优化器步上做三件事：micro-step 0 开始时准备主机梯度；梯度累积步数 GA>1 时，从 micro-step 1 起把每层暂存到主机的 BF16 梯度加到主机梯度上；最后一个 micro-step 之后在 rank 线程上求范数并执行 CPU AdamW（线程数与范数的求和顺序见上节）。
+
+| 改动 | ledger | 开关 | 数值 |
+|---|---|---|---|
+| 删去 micro-step 0 对每个主机梯度的 memset | T13 | 始终开启（去掉的是冗余工作） | 主机梯度逐字节相同 |
+
+### 步开始的清零（T13）
+
+上游在 `DslGradStore::start_micro_step(0)` 中、micro-step 0 的反向排队之前，在 rank 线程上逐个 `std::memset` 全部主机梯度：Qwen3-8B 是 16.4 GB，桌面 CPU 的单核约 0.55–0.8 s；本机单线程 memset 约 8.6 GB/s（Llama 形状的 356 MB 用 41.5 ms），16.4 GB 约 1.9 s。这段时间里 rank 线程不排队反向，只有已经排队的前向能遮住它。而 micro-step 0 的 D2H（块梯度的 `offload_layer_grads`、其余梯度的 `offload_non_block_grads`）在任何读取之前就整块覆盖了这些缓冲。
+
+`fork/native/include/surogate_fork/host_grad_overwrites.h` 的 `HostGradOverwrites` 在排队每次这样的拷贝时记下它覆盖的缓冲；`zero_rest()` 每步至多一次，只清零没有被覆盖的缓冲，调用点在第一个读者之前：micro-step 1 起的 `start_micro_step`，以及只有一个 micro-step 时的 `wait_all_offloads`。全参微调中没有这样的缓冲；没有设备存储的非块梯度、或某层在 micro-step 0 没有卸载时才会有。主机梯度因此与 memset 路径逐字节相同：被覆盖的缓冲两种做法都是拷贝来的字节，其余缓冲两种做法在第一次被读之前都是零。清零不会与 GPU 竞争：拷进这些缓冲的 D2H 一次也没有排队（排队就会被记下），读它们的主机函数和优化器都在清零之后才排队或运行。主机梯度唯一的读者是 `step_cpu_streaming`，它在 `wait_all_offloads` 之后读；源码 pin `fork/patches/tests/native/test_cpu_step_hooks.py` 检查这一点，以及 grad store 中写入主机梯度的三处拷贝。`fork/dev test openmp` 中的 `cpu-step-contract` 在随机的 GA（1–4）、覆盖缺口、共用的 tied 缓冲和没有设备拷贝的缓冲上重放这个协议，与 memset 路径逐字节比较。
+
+尚未在 GPU 上验证：GPU 上的行为按构造不变（只少了主机上的 memset），`dsl_grad_store.cpp` 只在 sm_120a 的编译命令下编译检查过。在 RTX 5090 主机上，用 `examples/training/cpu-offload.yaml` 改为 `model: Qwen/Qwen3-8B`、`max_steps: 20`，在本分支和它的父提交上各运行一次 `surogate sft`：每步记录的 loss 与梯度范数应逐位相同（先用父提交连跑两次，确认这个配置本身可复现）；`step_seconds` 应减少，至多减少 memset 的时间（16.4 GB 除以主机单核的 memset 带宽），实际减少量取决于已排队的前向遮住了多少。
 
 ## RTX 5090 32 GB：稠密与 MoE 微调
 

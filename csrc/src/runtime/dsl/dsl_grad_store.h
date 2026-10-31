@@ -33,6 +33,10 @@ struct PhaseArenas;
 
 class NCCLCommunicator;
 
+namespace surogate_fork {
+class HostGradOverwrites;  // fork ledger T13 (fork/native/include/surogate_fork/host_grad_overwrites.h)
+}  // namespace surogate_fork
+
 namespace dsl {
 
 /// Configuration for gradient management (mirrors ModularGradientManager::Config)
@@ -286,6 +290,8 @@ private:
 
     // CPU pinned storage for ALL layers' gradients
     std::unordered_map<std::string, Tensor> mCpuGrads;
+    // Which of them micro-step 0's D2H has overwritten: start_micro_step zeroes only the others (fork ledger T13).
+    std::shared_ptr<surogate_fork::HostGradOverwrites> mHostOverwrites;
 
     // Double-buffered GPU gradient pool
     static constexpr int kNumGradSlots = 2;

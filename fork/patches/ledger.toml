@@ -402,6 +402,45 @@ conflict_history = [
     "2026-10-30 reverse replay of the dispatch-PP refusal call sites, conflict blocks at 90/30/14 days: surogate/train/trainer.py 0/0/0, surogate/grpo/trainer.py 0/0/0",
 ]
 
+# T11 and T12 are left to the parallel branch perf/grpo-detok, which claimed them first.
+[[topic]]
+id = "T13"
+title = "cpu_training: no step-start memset of the host gradients"
+commits = []
+switch = "always on (removes dead work; the host gradients are bit-identical)"
+# DslGradStore::start_micro_step(0) memset every host gradient (mCpuGrads) on the rank thread before micro-step 0's
+# backward: 16.4 GB for Qwen3-8B (about 0.55-0.8 s on one desktop core; 1.9 s at the 8.6 GB/s this VM's memset
+# reaches). That micro-step's D2H copies, offload_layer_grads for block gradients and offload_non_block_grads for
+# the rest, overwrite each buffer in full before anything reads it. HostGradOverwrites
+# (fork/native/include/surogate_fork/host_grad_overwrites.h) records each such copy as it is enqueued, and
+# zero_rest() zeroes only the buffers no copy covered (none in an FFT run; a non-block gradient without device
+# storage, or a layer whose offload was skipped, otherwise), once per step, at start_micro_step(k > 0) or in
+# wait_all_offloads, before the first reader. No copy into an uncovered buffer is in flight (it would have been
+# recorded) and its readers are enqueued only later, so the zeroing cannot race the GPU. cpu-step-contract
+# replays the protocol (coverage gaps, a tied buffer, a buffer without a device copy, GA 1-4) against the memset
+# path and gets the same bytes. Relies on step_cpu_streaming being the only reader of host gradients, after
+# wait_all_offloads, and on the three host-gradient copies of the grad store (test_cpu_step_hooks.py pins both).
+# Not a defect fix (no errata entry): the memset was redundant, not wrong. GPU behaviour is unchanged by
+# construction; dsl_grad_store.cpp is compile-checked for sm_120a only, and the 5090 check is in
+# fork/docs/performance.md ("cpu_training 主机端步").
+files = [
+    "csrc/src/runtime/dsl/dsl_grad_store.h",
+    "csrc/src/runtime/dsl/dsl_grad_store.cpp",
+]
+fork_files = [
+    "fork/native/include/surogate_fork/host_grad_overwrites.h",
+    "fork/native/openmp-contract/CMakeLists.txt",   # shared with T5
+    "fork/native/openmp-contract/cpu_step_check.cpp",
+    "fork/patches/tests/native/test_cpu_step_hooks.py",
+]
+tests = [
+    "fork/native/openmp-contract/cpu_step_check.cpp",
+    "fork/patches/tests/native/test_cpu_step_hooks.py",
+]
+conflict_history = [
+    "2026-10-31 reverse replay of the T13 hunks onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: dsl_grad_store.cpp 0/0/0, dsl_grad_store.h 0/0/0 (upstream rewrote the streaming functions in 00aef092, #282, 2026-10-04, outside these lines)",
+]
+
 [[topic]]
 id = "T17"
 title = "graphed packed SFT: per-row documents in the cap-and-pad replay and capture"

@@ -21,6 +21,9 @@ target_link_libraries(training-openmp-contract PRIVATE training-openmp-probe)
 add_executable(training-openmp-team team_check.cpp)
 target_link_libraries(training-openmp-team PRIVATE training-openmp-probe Threads::Threads)
 
+add_executable(cpu-step-contract cpu_step_check.cpp)
+target_include_directories(cpu-step-contract PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+
 enable_testing()
 add_test(NAME training-openmp-contract COMMAND training-openmp-contract)
 # An explicit user/runtime thread limit can prevent a second worker. Report that
@@ -29,3 +32,5 @@ set_tests_properties(training-openmp-contract PROPERTIES SKIP_RETURN_CODE 77)
 # Team sizes under CPU pinning, the serial threshold and the ordered norm (surogate_fork/omp_team.h). Checks
 # that need more CPUs than the process may use print "skipped" and the rest still run.
 add_test(NAME training-openmp-team COMMAND training-openmp-team)
+# The host-gradient overwrite protocol of the cpu_training step against the upstream memset (ledger T13).
+add_test(NAME cpu-step-contract COMMAND cpu-step-contract)
