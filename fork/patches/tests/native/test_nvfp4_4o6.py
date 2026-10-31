@@ -1,13 +1,15 @@
-"""Ledger topic T24 (NVFP4 Four Over Six quantization), runnable without a GPU.
+"""Ledger topic T24 (NVFP4 Four Over Six quantization and SR noise), runnable without a GPU.
 
 Upstream's 4/6 kernels (csrc/src/recipes/nvfp4/kernels/quant_nvfp4_4o6_sm100.cu at 282f9901, unchanged at
-488e5f00) have two defects; the fork's kernels in fork/native/src/nvfp4_4o6.cu replace them by default:
+488e5f00) have three defects; the fork's kernels in fork/native/src/nvfp4_4o6.cu replace them by default:
 
 - SR: the stochastic-rounding kernel (wgrad operand dout^T of every quantized dense matmul in full fine-tuning)
   adds a fixed [-0.25, 0.25) dither before round-to-nearest, which is unbiased only where the E2M1 spacing is 0.5,
   and encodes with the unrounded 6/amax or 4/amax while the GEMM decodes with the rounded E4M3 scale.
 - RN: the round-to-nearest kernel (forward operands, wgrad inp^T) has the same encode/decode mismatch, and
   decodes blocks whose scale is below its 1/128 clamp at 1/128 (inflated).
+- Graphs: under CUDA graphs (the default) every replay reuses the noise drawn at capture time; this also applies
+  to the standard Philox SR kernels in quant_nvfp4_cutlass.cu (the dgrad operand dout, LoRA included).
 
 What runs here:
 
@@ -22,10 +24,10 @@ What runs here:
    headers are found: CUDA_HOME, CUDA_PATH or /usr/local/cuda). Skipped without a C++17 compiler.
 3. The header and the emulation compute the same values, request by request.
 4. Source pins: the upstream launchers dispatch to the fork kernels behind the switches, the fork kernels call the
-   checked arithmetic, upstream's kernels (the legacy path the emulation models) are unedited, and the
-   documented switch names are the built ones.
+   checked arithmetic, upstream's kernels (the legacy path the emulation models) are unedited, the standard SR
+   kernels take the graph generation, and the documented switch names are the built ones.
 
-The GPU behaviour (the kernels compute what the emulation computes) is unverified here:
+The GPU behaviour (the kernels compute what the emulation computes, graph replays differ) is unverified here:
 fork/native/tests/test-fork-nvfp4-4o6.cu and fork/docs/upstream-errata.md give the RTX 5090 checks.
 """
 
@@ -403,6 +405,14 @@ def test_seed_average_converges_for_the_fork_and_plateaus_upstream():
     assert fk[2] < 0.03
 
 
+def test_graph_generation_changes_the_fork_noise_and_nothing_else():
+    x = dout_like(13, rows=8, cols=256)
+    q0, c0, _ = sr_fork(x, 5, generation=0)
+    q1, c1, _ = sr_fork(x, 5, generation=1)
+    assert np.array_equal(c0, c1) and not np.array_equal(q0, q1)
+    assert np.array_equal(q0, sr_fork(x, 5, generation=0)[0])
+
+
 def test_round_to_nearest_with_the_stored_scale():
     for kind, lower in (("gauss", 0.97), ("t3", 0.985), ("outliers", 0.95)):
         x = dout_like(14, kind=kind).astype(np.float64)
@@ -570,11 +580,14 @@ def test_the_fork_kernels_run_the_checked_arithmetic():
     assert "const float encode = global_encode / e4m3_value(scale_code);" in sr
     assert "q[i] = e2m1_stochastic(vals[g * 8 + i] * encode, sr_byte(random, g * 8 + i));" in sr
     kernel = body(src, r"__global__ void quantize_4o6_sr_kernel\(")
-    assert "sr_block_random(static_cast<uint32_t>(block), 0u, seed)" in kernel
+    assert "sr_block_random(static_cast<uint32_t>(block), sr_graph::generation(graph_generation), seed)" in kernel
     rn = body(src, r"void\s+quantize_block_rn\(")
     for c in ("6", "4"):
         assert f"code{c} = e4m3_code_rn(clamp_block_scale(amax * rcp_approx_ftz({c}.0f) * global_encode));" in rn
     assert "vals, global_encode / sf6, global_encode / sf4, sf6 / global_encode, sf4 / global_encode" in rn
+    launcher = body(src, r"void quantize_4o6_stochastic\(")
+    assert "const bool graph = sr_graph::use_generation(stream);" in launcher
+    assert launcher.rstrip().endswith("sr_graph::advance(graph, stream);")
     text = src.read_text(encoding="utf-8")
     assert "1103515245" not in text and "/ 256.0f - 0.5f" not in text  # no LCG, no fixed dither
 
@@ -597,6 +610,36 @@ def test_upstream_kernels_are_what_the_emulation_models():
     assert text.count("decode_scale = fminf(fmaxf(decode_scale, 1.0f / 128.0f), 480.0f);") == 2  # RN and SR
 
 
+@pytest.mark.parametrize("kernel", ["quantize_nvfp4_stochastic_cutlass_kernel", "quantize_nvfp4_stochastic_cutlass_auto_kernel"])
+def test_the_standard_sr_kernels_take_the_graph_generation(kernel):
+    path = KERNELS / "quant_nvfp4_cutlass.cu"
+    text = path.read_text(encoding="utf-8")
+    signature = re.search(rf"__global__ void {kernel}\(([^)]*)\)", text)
+    assert signature and collapse(signature.group(1)).endswith("unsigned int seed, bool graph_generation")
+    code = body(path, rf"__global__ void {kernel}\(")
+    assert (
+        "curand_init(seed, blockIdx.x * blockDim.x + threadIdx.x, "
+        "surogate_fork::sr_graph::curand_offset(graph_generation), &rng_state);" in code
+    )
+    launches = re.findall(rf"{kernel}<128>\s*<<<[^;]*;", text)
+    assert launches and all(collapse(launch).endswith("seed, graph);") for launch in launches)
+    for launch in launches:
+        launcher = text[: text.index(launch)].rsplit("\nvoid ", 1)[1]
+        launcher = collapse(launcher + text[text.index(launch) :].split("\n}\n", 1)[0])
+        assert "const bool graph = surogate_fork::sr_graph::use_generation(stream);" in launcher
+        assert launcher.endswith("CUDA_CHECK(cudaGetLastError()); surogate_fork::sr_graph::advance(graph, stream);")
+    assert '#include "surogate_fork/sr_graph_generation.cuh"' in text
+
+
+def test_the_graph_generation_is_inert_outside_captures():
+    header = NATIVE / "include/surogate_fork/sr_graph_generation.cuh"
+    assert "return use ? __ldcg(&g_generation) : 0u;" in body(header, r"uint32_t generation\(bool use\)")
+    use = body(header, r"inline bool use_generation\(cudaStream_t stream\)")
+    assert "if (!fresh_noise_enabled()) return false;" in use
+    assert "return status == cudaStreamCaptureStatusActive;" in use
+    assert "if (use) advance_generation_kernel<<<1, 1, 0, stream>>>();" in body(header, r"inline void advance\(")
+    assert "<< 34" in body(header, r"unsigned long long curand_offset\(bool use\)")
+
 
 def test_the_fork_source_and_gpu_test_are_built():
     cmake = (NATIVE / "cmake/fork_native.cmake").read_text(encoding="utf-8")
@@ -608,15 +651,17 @@ def test_the_fork_source_and_gpu_test_are_built():
     for call in (
         "quantize_nvfp4_4o6_stochastic_cutlass_auto_scale(",
         "quantize_nvfp4_4o6_cutlass_auto_scale(",
+        "quantize_nvfp4_stochastic_cutlass_auto_scale(",
+        "cudaStreamBeginCapture(",
     ):
         assert call in gpu, call
 
 
 def test_the_documented_switches_are_the_built_ones():
     built = set()
-    for path in (NATIVE / "src/nvfp4_4o6.cu",):
+    for path in (NATIVE / "src/nvfp4_4o6.cu", NATIVE / "include/surogate_fork/sr_graph_generation.cuh"):
         built |= set(re.findall(r'"(SUROGATE_NVFP4_[A-Z0-9_]+)"', path.read_text(encoding="utf-8")))
-    assert built == {"SUROGATE_NVFP4_4O6_SR_LEGACY", "SUROGATE_NVFP4_4O6_RN_LEGACY"}
+    assert built == {"SUROGATE_NVFP4_4O6_SR_LEGACY", "SUROGATE_NVFP4_4O6_RN_LEGACY", "SUROGATE_NVFP4_SR_GRAPH_LEGACY"}
     ledger = (REPO / "fork/patches/ledger.toml").read_text(encoding="utf-8")
     errata = (REPO / "fork/docs/upstream-errata.md").read_text(encoding="utf-8")
     for name in built:

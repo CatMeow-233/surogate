@@ -15,6 +15,7 @@
 // T24, RN: quantize_4o6 (forward operands and the wgrad inp^T operand): both 4/6 candidates encoded with their
 //   stored E4M3 scale and compared on what the GEMM decodes, scales clamped to [2^-9, 448]. Upstream
 //   (SUROGATE_NVFP4_4O6_RN_LEGACY=1) encoded with 6/amax or 4/amax but decoded with the rounded scale.
+// T24, graphs (sr_graph_generation.cuh): captured SR launches draw fresh noise on every graph replay.
 //
 // The switches are read once per process, at the first call.
 

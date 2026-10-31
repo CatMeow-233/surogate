@@ -23,6 +23,7 @@
 #include "utilities/tensor.h"
 #include "utilities/vec.cuh"
 #include "utilities/utils.h"
+#include "surogate_fork/sr_graph_generation.cuh"  // fork ledger T24
 
 #include <cuda_bf16.h>
 #include <cuda_fp4.h>
@@ -470,9 +471,13 @@ __global__ void quantize_nvfp4_stochastic_cutlass_kernel(uint8_t* __restrict__ o
                                                          int M,
                                                          int K,
                                                          int num_scale_cols,
-                                                         unsigned int seed) {
+                                                         unsigned int seed,
+                                                         bool graph_generation) {  // fork ledger T24
     curandStatePhilox4_32_10_t rng_state;
-    curand_init(seed, blockIdx.x * blockDim.x + threadIdx.x, 0, &rng_state);
+    curand_init(seed,
+                blockIdx.x * blockDim.x + threadIdx.x,
+                surogate_fork::sr_graph::curand_offset(graph_generation),
+                &rng_state);
 
     const int tile_row = blockIdx.x;
     const int tile_col = blockIdx.y;
@@ -636,9 +641,13 @@ __global__ void quantize_nvfp4_stochastic_cutlass_auto_kernel(uint8_t* __restric
                                                               int M,
                                                               int K,
                                                               int num_scale_cols,
-                                                              unsigned int seed) {
+                                                              unsigned int seed,
+                                                              bool graph_generation) {  // fork ledger T24
     curandStatePhilox4_32_10_t rng_state;
-    curand_init(seed, blockIdx.x * blockDim.x + threadIdx.x, 0, &rng_state);
+    curand_init(seed,
+                blockIdx.x * blockDim.x + threadIdx.x,
+                surogate_fork::sr_graph::curand_offset(graph_generation),
+                &rng_state);
 
     const int tile_row = blockIdx.x;
     const int tile_col = blockIdx.y;
@@ -998,9 +1007,11 @@ void quantize_nvfp4_stochastic_cutlass(uint8_t* out_fp4,
     dim3 grid(div_ceil(M, kNVFP4TileDim), div_ceil(K, kNVFP4TileDim));
     const int threads_per_block = 256;
 
+    const bool graph = surogate_fork::sr_graph::use_generation(stream);  // fork ledger T24
     quantize_nvfp4_stochastic_cutlass_kernel<128>
-        <<<grid, threads_per_block, 0, stream>>>(out_fp4, block_scales, in, M, K, num_scale_cols, seed);
+        <<<grid, threads_per_block, 0, stream>>>(out_fp4, block_scales, in, M, K, num_scale_cols, seed, graph);
     CUDA_CHECK(cudaGetLastError());
+    surogate_fork::sr_graph::advance(graph, stream);
 }
 
 // ============================================================================
@@ -1091,9 +1102,11 @@ void quantize_nvfp4_stochastic_cutlass_auto_scale(uint8_t* out_fp4,
     dim3 grid(div_ceil(M, kNVFP4TileDim), div_ceil(K, kNVFP4TileDim));
     const int threads_per_block = 256;
 
-    quantize_nvfp4_stochastic_cutlass_auto_kernel<128>
-        <<<grid, threads_per_block, 0, stream>>>(out_fp4, block_scales, global_amax, in, M, K, num_scale_cols, seed);
+    const bool graph = surogate_fork::sr_graph::use_generation(stream);  // fork ledger T24
+    quantize_nvfp4_stochastic_cutlass_auto_kernel<128><<<grid, threads_per_block, 0, stream>>>(
+        out_fp4, block_scales, global_amax, in, M, K, num_scale_cols, seed, graph);
     CUDA_CHECK(cudaGetLastError());
+    surogate_fork::sr_graph::advance(graph, stream);
 }
 
 /**
@@ -1114,9 +1127,11 @@ void quantize_nvfp4_stochastic_cutlass_from_amax(uint8_t* out_fp4,
     dim3 grid(div_ceil(M, kNVFP4TileDim), div_ceil(K, kNVFP4TileDim));
     const int threads_per_block = 256;
 
-    quantize_nvfp4_stochastic_cutlass_auto_kernel<128>
-        <<<grid, threads_per_block, 0, stream>>>(out_fp4, block_scales, global_amax, in, M, K, num_scale_cols, seed);
+    const bool graph = surogate_fork::sr_graph::use_generation(stream);  // fork ledger T24
+    quantize_nvfp4_stochastic_cutlass_auto_kernel<128><<<grid, threads_per_block, 0, stream>>>(
+        out_fp4, block_scales, global_amax, in, M, K, num_scale_cols, seed, graph);
     CUDA_CHECK(cudaGetLastError());
+    surogate_fork::sr_graph::advance(graph, stream);
 }
 
 /**

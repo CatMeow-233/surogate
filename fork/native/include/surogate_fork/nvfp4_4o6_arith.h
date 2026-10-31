@@ -168,7 +168,8 @@ SUROGATE_FORK_HD Philox4x32 philox4x32_10(uint32_t c0, uint32_t c1, uint32_t c2,
 constexpr uint32_t kSrKey1 = 0x346F3653u;  // "S6o4"
 
 /// The 16 random bytes of one 16-value block: element i takes byte i % 4 of word i / 4. counter =
-/// (block index, generation, 0, 0), key = (seed, kSrKey1); the kernel passes generation 0.
+/// (block index, generation, 0, 0), key = (seed, kSrKey1); the generation is 0 outside CUDA graphs and the
+/// replay count inside them (sr_graph_generation.cuh).
 SUROGATE_FORK_HD Philox4x32 sr_block_random(uint32_t block_index, uint32_t generation, uint32_t seed) {
     return philox4x32_10(block_index, generation, 0u, 0u, seed, kSrKey1);
 }

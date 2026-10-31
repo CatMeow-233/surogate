@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Four Over Six NVFP4 quantization (arXiv:2512.02010) with the fork's defect fixes (ledger T24: stochastic rounding,
-// round to nearest). Compiled into
+// round to nearest, fresh SR noise on graph replays). Compiled into
 // surogate-common by fork/native/cmake/fork_native.cmake and called from the upstream launchers in
 // csrc/src/recipes/nvfp4/kernels/quant_nvfp4_4o6.cu. Thread layout, the 4-vs-6 error metrics, the CUTLASS
 // scale layout and the PTX conversions are upstream's (quant_nvfp4_4o6_sm100.cu, 282f9901); the scale and
@@ -23,6 +23,7 @@
 #include "cutlass/arch/config.h"
 #include "recipes/nvfp4/nvfp4_recipe.h"
 #include "surogate_fork/nvfp4_4o6_arith.h"
+#include "surogate_fork/sr_graph_generation.cuh"
 
 namespace surogate_fork::nvfp4 {
 
@@ -292,13 +293,15 @@ __global__ void quantize_4o6_sr_kernel(uint8_t* __restrict__ out_fp4,
                                        int rows,
                                        int K,
                                        int num_scale_cols,
-                                       uint32_t seed) {
+                                       uint32_t seed,
+                                       bool graph_generation) {
     const int block = blockIdx.x * blockDim.x + threadIdx.x;
     if (block >= rows * num_scale_cols) return;
     const int row = block / num_scale_cols, scale_col = block % num_scale_cols;
     float vals[16];
     load_block(in, row, scale_col * kBlockSize, K, vals);
-    const Philox4x32 random = sr_block_random(static_cast<uint32_t>(block), 0u, seed);
+    const Philox4x32 random =
+        sr_block_random(static_cast<uint32_t>(block), sr_graph::generation(graph_generation), seed);
     uint8_t codes[8], scale;
     quantize_block_sr<M>(vals, global_encode_scale(global_amax), random, codes, scale);
     store_block(out_fp4, row, scale_col * kBlockSize, K, codes);
@@ -362,20 +365,22 @@ void quantize_4o6_stochastic(uint8_t* out_fp4,
     const int cols = (K + kBlockSize - 1) / kBlockSize;
     const int grid = grid_for(M, cols);
     if (grid == 0) return;
+    const bool graph = sr_graph::use_generation(stream);
     switch (metric_of(error_metric)) {
         case Metric::MSE:
             quantize_4o6_sr_kernel<Metric::MSE>
-                <<<grid, kThreads, 0, stream>>>(out_fp4, block_scales, global_amax, in, M, K, cols, seed);
+                <<<grid, kThreads, 0, stream>>>(out_fp4, block_scales, global_amax, in, M, K, cols, seed, graph);
             break;
         case Metric::L1:
             quantize_4o6_sr_kernel<Metric::L1>
-                <<<grid, kThreads, 0, stream>>>(out_fp4, block_scales, global_amax, in, M, K, cols, seed);
+                <<<grid, kThreads, 0, stream>>>(out_fp4, block_scales, global_amax, in, M, K, cols, seed, graph);
             break;
         case Metric::AbsMax:
             quantize_4o6_sr_kernel<Metric::AbsMax>
-                <<<grid, kThreads, 0, stream>>>(out_fp4, block_scales, global_amax, in, M, K, cols, seed);
+                <<<grid, kThreads, 0, stream>>>(out_fp4, block_scales, global_amax, in, M, K, cols, seed, graph);
             break;
     }
+    sr_graph::advance(graph, stream);
 }
 
 }  // namespace surogate_fork::nvfp4

@@ -1,4 +1,4 @@
-// NVFP4 Four Over Six quantization (fork ledger T24).
+// NVFP4 Four Over Six quantization and fresh SR noise on graph replays (fork ledger T24).
 // Built into integration-tests by fork/native/cmake/fork_native.cmake. Needs an SM100+ GPU (the RTX 5090 is
 // sm_120a); skipped otherwise. The CPU side of these topics is fork/patches/tests/native/test_nvfp4_4o6.py; this
 // file checks that the kernels compute what that emulation computes:
@@ -7,6 +7,8 @@
 //     converges to the input as 1/sqrt(seeds). Upstream's kernel (SUROGATE_NVFP4_4O6_SR_LEGACY=1) plateaus near
 //     5e-2 on this tensor.
 //   - RN: the codes and scales match the host model; blocks below upstream's 1/128 clamp decode at their size.
+//   - Graphs: a replayed capture of the 4/6 SR and the standard SR quantizer gives new codes on every replay,
+//     eager calls with one seed give identical codes.
 #include <catch2/catch_test_macros.hpp>
 
 #include <cuda_bf16.h>
@@ -38,6 +40,11 @@ bool have_sm100(cudaDeviceProp& prop) {
     if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) return false;
     if (cudaGetDeviceProperties(&prop, 0) != cudaSuccess) return false;
     return prop.major >= 10;
+}
+
+bool env_is_one(const char* name) {
+    const char* value = std::getenv(name);
+    return value && std::string_view(value) == "1";
 }
 
 template <typename T> struct Buffer {
@@ -317,4 +324,53 @@ TEST_CASE("4/6 RN matches the host model and decodes small blocks at their size"
         REQUIRE(small > x.size() / 32);
         CHECK(std::fabs(xy / xx - 1.0) <= 0.03);
     }
+}
+
+TEST_CASE("NVFP4 SR draws fresh noise on every CUDA graph replay", "[nvfp4-4o6][sr-graph][cuda]") {
+    cudaDeviceProp prop{};
+    if (!have_sm100(prop)) SKIP("needs an SM100+ GPU");
+    const bool fresh = !env_is_one("SUROGATE_NVFP4_SR_GRAPH_LEGACY");
+    constexpr int M = 128, K = 1024;
+    const std::vector<float> x = make_input(M, K, 29, false);
+    Device four(M, K, x), standard(M, K, x);
+    cudaStream_t stream;
+    require_cuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+    auto quantize = [&] {
+        quantize_nvfp4_4o6_stochastic_cutlass_auto_scale(four.codes.ptr, four.scales.ptr, four.amax.ptr, four.in.ptr,
+                                                         M, K, recipes::FourOverSixErrorMetric::MSE, 7u, prop, stream);
+        quantize_nvfp4_stochastic_cutlass_auto_scale(standard.codes.ptr, standard.scales.ptr, standard.amax.ptr,
+                                                     standard.in.ptr, M, K, 7u, prop, stream);
+    };
+    // Eager: one seed, one result.
+    quantize();
+    require_cuda(cudaStreamSynchronize(stream));
+    const auto eager_four = four.codes.get(), eager_standard = standard.codes.get();
+    quantize();
+    require_cuda(cudaStreamSynchronize(stream));
+    CHECK(four.codes.get() == eager_four);
+    CHECK(standard.codes.get() == eager_standard);
+    // Captured: every replay draws new noise (scales and amax are deterministic).
+    cudaGraph_t graph;
+    cudaGraphExec_t exec;
+    require_cuda(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
+    quantize();
+    require_cuda(cudaStreamEndCapture(stream, &graph));
+    require_cuda(cudaGraphInstantiate(&exec, graph, 0));
+    std::vector<std::vector<uint8_t>> four_codes, standard_codes, four_scales;
+    for (int replay = 0; replay < 3; ++replay) {
+        require_cuda(cudaGraphLaunch(exec, stream));
+        require_cuda(cudaStreamSynchronize(stream));
+        four_codes.push_back(four.codes.get());
+        standard_codes.push_back(standard.codes.get());
+        four_scales.push_back(four.scales.get());
+    }
+    for (int replay = 1; replay < 3; ++replay) {
+        INFO("replay " << replay << ", fresh noise expected: " << fresh);
+        CHECK((four_codes[replay] != four_codes[replay - 1]) == fresh);
+        CHECK((standard_codes[replay] != standard_codes[replay - 1]) == fresh);
+        CHECK(four_scales[replay] == four_scales[0]);
+    }
+    cudaGraphExecDestroy(exec);
+    cudaGraphDestroy(graph);
+    cudaStreamDestroy(stream);
 }
