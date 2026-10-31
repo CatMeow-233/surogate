@@ -575,17 +575,22 @@ conflict_history = [
 [[topic]]
 id = "T22"
 title = "cuDNN SDPA applies the op's softmax_scale"
-commits = ["7523eb3b"]
+commits = ["7523eb3b", "7b5b5f1b"]   # 7b5b5f1b: the GPU check's dump comparison script and its tests
 switch = "always on (defect fix); ops without an explicit softmax_scale are bit-identical"
 # Defect (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "cuDNN 注意力忽略 softmax_scale"):
 # CuDNNAttention::supports() never read AttentionParams::softmax_scale and forward()/backward() did not pass it on;
 # attention_cudnn.cpp fed cuDNN 1/sqrt(HS) in both directions (:330, :394). cuDNN outranks mem_eff and flash_varlen
 # (attention_backend.h), so every causal BF16 full-attention op with Hs <= 128 (multiple of 8) and no cu_seqlens ran
 # at 1/sqrt(Hs), whatever the op declared. Reached by text-only Gemma3-27B checkpoints (Gemma3ForCausalLM; head_dim
-# 128, query_pre_attn_scalar 168): the 10 global layers of 62, on every micro-step without in-row document
+# 128, query_pre_attn_scalar 168), Google's google/medgemma-27b-text-it among them (per its model card and a
+# third-party transcription of its config.json; huggingface.co is unreachable here): the 10 global layers of 62, on every micro-step without in-row document
 # boundaries (unpacked SFT, one document per row, eval, the in-runtime decode prefill), logits x1.1456; packed
 # micro-steps went to flash_varlen at the declared scale. Synthetic Gemma4-style configs with a full layer at
 # Hs <= 128 had 1.0 replaced by 1/sqrt(Hs); published Gemma 3/4 sizes other than 27B never reach cuDNN.
+# Resume: no format changes, but a pre-T22 checkpoint or adapter of such a model resumed after T22 runs its global
+# layers at 168**-0.5 from the resume step (loss/logprob jump on micro-steps without in-row boundaries; native eval,
+# always unpacked, and the prefill change too). Only packed micro-steps with in-row boundaries compare across the
+# fix; no switch restores the old scale (finish such a run with a pre-T22 wheel).
 # Fix: a `float scale` parameter (0 = 1/sqrt(HS), otherwise verbatim, as the flash_varlen and custom wrappers) on
 # attention_forward_cudnn / attention_backward_cudnn (BF16 wrappers, FP32 and Tensor overloads); CuDNNAttention
 # passes p.softmax_scale to the forward, the backward and every chunk of a chunked backward. attn_scale was already a
