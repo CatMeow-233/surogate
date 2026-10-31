@@ -19,7 +19,7 @@
 | `csrc/src/third_party` | 第三方 | 228 | vendored 代码，不做格式化 |
 | `csrc/src/tokenizer` | 共享 | 9 | 分词器，训练与服务各编译一次（见下文“接缝”） |
 | `csrc/src/utilities` | 训练 | 33 | 分配器、GPU 信息等工具 |
-| `fork/native` | fork | 47 | fork 的 CMake 挂接、头文件、C++ 测试，以及编译进 `surogate-common` 的源文件（`fork/native/src`） |
+| `fork/native` | fork | 52 | fork 的 CMake 挂接、头文件、C++ 测试，以及编译进 `surogate-common` 的源文件（`fork/native/src`）和服务引擎 `sinfer_ops` 的源文件（`fork/native/serve`） |
 
 ## CMake 目标
 
@@ -181,6 +181,7 @@
 | `integration-tests` | PRIVATE | `"${SUROGATE_FORK_NATIVE_DIR}/include"` | `fork/native/cmake/fork_native.cmake` |
 | `dsl-run-state-tests` | PRIVATE | `"${SUROGATE_FORK_NATIVE_DIR}/include"` | `fork/native/cmake/fork_native.cmake` |
 | `_surogate` | PRIVATE | `"${SUROGATE_FORK_NATIVE_DIR}/include"` | `fork/native/cmake/fork_native.cmake` |
+| `sinfer_ops` | PRIVATE | `"${SUROGATE_FORK_NATIVE_DIR}/include"` | `fork/native/cmake/fork_native.cmake` |
 | `training-openmp-probe` | PRIVATE | `${CMAKE_CURRENT_SOURCE_DIR}/../include` | `fork/native/openmp-contract/CMakeLists.txt` |
 | `cpu-step-contract` | PRIVATE | `${CMAKE_CURRENT_SOURCE_DIR}/../include` | `fork/native/openmp-contract/CMakeLists.txt` |
 

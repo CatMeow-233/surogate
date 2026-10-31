@@ -70,6 +70,15 @@ using Gqa128_16q2  = GqaGeometry<128, 16, 2, 2>; // minicpm5
 // reason the other four-KV-head shapes take it -- four KV heads reach the registry's modal
 // KVHeads*DecodeSplits at scale 1, and the grid takes its parallelism from that dimension.
 using Gqa128_32q4  = GqaGeometry<128, 32, 4, 1>; // qwen3-30b-a3b
+// Fork (CatMeow-233/surogate, ledger T16): three 128-wide shapes that used to reach the generic
+// CUDA-core kernel (the first two) or be refused (the third). Their decode translation units are
+// fork/native/serve/gqa_attention_decode_<name>.cu, added to sinfer_ops by
+// fork/native/cmake/fork_native.cmake, and they leave their old routes only under
+// SUROGATE_SERVE_GQA_FORK_SHAPES=1 (fork/native/include/surogate_fork/gqa_fork_shapes.h).
+// DecodeSplitScale 1: eight and thirty-two KV heads give the grid its parallelism.
+using Gqa128_32q8  = GqaGeometry<128, 32, 8, 1>;  // qwen3-4b, qwen3-8b, llama-3-8b
+using Gqa128_40q8  = GqaGeometry<128, 40, 8, 1>;  // qwen3-14b
+using Gqa128_32q32 = GqaGeometry<128, 32, 32, 1>; // multi-head 128 (llama-2-7b)
 // DecodeSplitScale 1: the grid is (KVHeads, splits, batch) and the registry's
 // modal KVHeads*DecodeSplits is about 340, which four KV heads reach at scale 1 --
 // the same reasoning, and the same answer, as the other four-KV-head shape above.
@@ -147,6 +156,9 @@ using Gqa128_32q16 = GqaGeometry<128, 32, 16, 1>; // gemma-3-27b
     X(Gqa128_16q8)                                                                                 \
     X(Gqa128_16q2)                                                                                 \
     X(Gqa128_32q4)                                                                                 \
+    X(Gqa128_32q8)                                                                                 \
+    X(Gqa128_40q8)                                                                                 \
+    X(Gqa128_32q32)                                                                                \
     X(Gqa64_32q4)                                                                                 \
     X(Gqa64_32q8)                                                                                 \
     X(Gqa256_4q1)                                                                                  \

@@ -55,3 +55,51 @@ function(_surogate_fork_attach_binding)
     endif()
 endfunction()
 cmake_language(DEFER DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" CALL _surogate_fork_attach_binding)
+
+# The serve engine's op library is defined after the hook too, inside if(SUROGATE_BUILD_SERVE), and
+# exists only in a serve build. T16: the small-T decode units of the GQA shapes the fork registers in
+# csrc/src/serve/ops/kernel/gqa_attention_geometry.cuh join sinfer_ops beside upstream's, and the
+# fork include root gives its wrapper and prompt launcher surogate_fork/gqa_fork_shapes.h. Without
+# them a serve build fails: the registry declares each unit extern (an undefined reference at link)
+# and the two sources include the header.
+function(_surogate_fork_attach_serve)
+    if(TARGET sinfer_ops)
+        target_include_directories(sinfer_ops PRIVATE "${SUROGATE_FORK_NATIVE_DIR}/include")
+        target_sources(sinfer_ops PRIVATE
+            "${SUROGATE_FORK_NATIVE_DIR}/serve/gqa_attention_decode_gqa128_32q8.cu"
+            "${SUROGATE_FORK_NATIVE_DIR}/serve/gqa_attention_decode_gqa128_40q8.cu"
+            "${SUROGATE_FORK_NATIVE_DIR}/serve/gqa_attention_decode_gqa128_32q32.cu"
+        )
+    endif()
+    # T16's GPU cases (serve tests only). sinfer_gqa_fork_shapes_test compiles upstream's GQA test
+    # harness with the three fork shapes' cases (tests/test-fork-gqa-shapes.cpp); it copies
+    # sinfer_gqa_attention_test's include directories, options and libraries, lands beside it and
+    # joins serve-tests. ctest runs it with SUROGATE_SERVE_GQA_FORK_SHAPES=0 and =1, and
+    # upstream's own test with =1 (its unset run is upstream's sinfer_gqa_attention_test).
+    if(TARGET sinfer_gqa_attention_test)
+        add_executable(sinfer_gqa_fork_shapes_test EXCLUDE_FROM_ALL
+            "${SUROGATE_FORK_NATIVE_DIR}/tests/test-fork-gqa-shapes.cpp")
+        foreach(property INCLUDE_DIRECTORIES COMPILE_DEFINITIONS COMPILE_OPTIONS LINK_LIBRARIES)
+            get_target_property(value sinfer_gqa_attention_test ${property})
+            if(value)
+                set_property(TARGET sinfer_gqa_fork_shapes_test PROPERTY ${property} "${value}")
+            endif()
+        endforeach()
+        get_target_property(test_dir sinfer_gqa_attention_test BINARY_DIR)
+        set_target_properties(sinfer_gqa_fork_shapes_test PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${test_dir}")
+        if(TARGET serve-tests)
+            add_dependencies(serve-tests sinfer_gqa_fork_shapes_test)
+        endif()
+        add_test(NAME sinfer_gqa_fork_shapes_test COMMAND sinfer_gqa_fork_shapes_test)
+        add_test(NAME sinfer_gqa_fork_shapes_on_test COMMAND sinfer_gqa_fork_shapes_test)
+        add_test(NAME sinfer_gqa_attention_fork_shapes_on_test COMMAND sinfer_gqa_attention_test)
+        set_tests_properties(sinfer_gqa_fork_shapes_test sinfer_gqa_fork_shapes_on_test
+            sinfer_gqa_attention_fork_shapes_on_test PROPERTIES SKIP_RETURN_CODE 77)
+        set_tests_properties(sinfer_gqa_fork_shapes_test PROPERTIES
+            ENVIRONMENT "SUROGATE_SERVE_GQA_FORK_SHAPES=0")
+        set_tests_properties(sinfer_gqa_fork_shapes_on_test sinfer_gqa_attention_fork_shapes_on_test
+            PROPERTIES ENVIRONMENT "SUROGATE_SERVE_GQA_FORK_SHAPES=1")
+    endif()
+endfunction()
+cmake_language(DEFER DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" CALL _surogate_fork_attach_serve)

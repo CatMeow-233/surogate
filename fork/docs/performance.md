@@ -13,6 +13,7 @@
 | [cpu_training 的 AdamW 状态 checkpoint](#cpu_training-的-adamw-状态-checkpoint) | T21 |
 | [GPT-OSS 预量化 LoRA 的专家输入梯度](#gpt-oss-预量化-lora-的专家输入梯度) | T25 |
 | [GRPO 训练路径 rollout 服务的主机开销](#grpo-训练路径-rollout-服务的主机开销) | T11、T12 |
+| [服务端 GQA 形状注册](#服务端-gqa-形状注册) | T16 |
 
 优化应针对完整的训练迭代，包括输入获取和通信。孤立的 kernel 改进只有在缩短关键路径时才有帮助。比较改动时，保持模型、recipe、序列长度、batch、硬件拓扑和质量目标不变。
 
@@ -477,3 +478,87 @@ dense Qwen3/Qwen3.5 的 `grpo-colocate` 用原生 SharedServer。每步进入训
 3. 第 1 项的三次运行中 orchestrator 的请求不固定 seed，token 不可逐位比较，比较分布：每步 reward 均值和 completion 长度在三次之间应无系统差异。
 4. 并发为 1 时与上游逐位相同：用一个走训练路径的真实 checkpoint（例如 qwen3_moe）和它的 tokenizer，按 `tests/grpo/test_shared_model_gpu.py` 中 `_check_policy` 的方式建 trainer 和 `SharedModelServer`，但 `max_concurrency=1`；对同一组 prompt（至少 8 个，`max_tokens` 不少于 256，其中一半带 `stop` 和 `tools`）用固定的 `seed`、`temperature=1`、`logprobs=True`、`top_logprobs=5` 逐个请求 `/v1/chat/completions`，一次设 `SUROGATE_GRPO_DETOK=per_token`、一次不设（模式按请求读取，可以在同一个进程中两次请求之间切换），要求 `token_ids`、`logprobs`、`message` 和 `finish_reason` 完全相同。
 5. 默认模式（不设 `SUROGATE_GRPO_DETOK`）下运行经过 `SharedModelServer` 的上游 GPU 测试：`SUROGATE_SHARED_CASES=all .venv/bin/python -m pytest -q --slow tests/grpo/test_shared_model_gpu.py tests/grpo/test_tool_protocol_gpu.py tests/grpo/test_routing_capture_gpu.py`，再设 `SUROGATE_GRPO_LIVE_DISPATCH=1` 运行一次 `tests/grpo/test_shared_model_gpu.py`。其中 `_check_policy` 要求两个并发的生成与单独一次生成的 `token_ids` 相同、`max_decode_batch >= 2`，并且 rollout 的 logprobs 与打包打分一致。这些测试标记为 `slow`，`fork/dev test gpu` 中的 `make test-py` 不带 `--slow`，不会运行它们。
+
+## 服务端 GQA 形状注册
+
+ledger T16，开关 `SUROGATE_SERVE_GQA_FORK_SHAPES=1`，默认关闭。
+
+上游的 GQA 形状注册表（`csrc/src/serve/ops/kernel/gqa_attention_geometry.cuh` 的 `SINFER_GQA_FOR_EACH_GEOMETRY`）没有收录 128 宽的 32q/8kv 与 40q/8kv。在 Hopper 以外的 GPU（RTX 5090、GB10）上，这两种形状的解码、验证（MTP/DFlash 最多 16 列）和 7–63 列的 prompt 段都走通用 CUDA-core kernel（`gqa_attention_generic.cu` 的 `gqa_generic_split_kernel`）：每个 (列, query head, split) 一个 CTA，同一个 KV head 的 K/V 按 query head 各读一遍（G=4 时 L2 到 SM 的流量是 KV 本身的 4 倍），用 FP32 FMA 计算，且 `q_heads × 列数` 达到 2 × SM 数（5090 上 340）后不再切分历史。64 列及以上的 prompt 已经走 tensor-core prompt kernel，不受影响。128 宽的 MHA 32q/32kv（Llama-2-7B 一类）此前没有任何 128 宽的注册形状带 32 个 KV head，直接报“unregistered head geometry”。
+
+fork 按上游的注册方式加入三个形状：在 `Gqa128_32q4` 之后加 `using` 与 `X()` 行，每个形状一个 small-T 解码翻译单元。翻译单元放在 `fork/native/serve/`，由 `fork/native/cmake/fork_native.cmake` 的 `_surogate_fork_attach_serve()` 加入 `sinfer_ops`（`csrc/CMakeLists.txt` 不改）。路由由 `fork/native/include/surogate_fork/gqa_fork_shapes.h` 决定，上游按“是否注册”分路由的三处都读它：`wrapper/gqa_attention.cpp` 的 `optimized_decode_shape` 与 `generic_takes`，以及 `launcher/gqa_attention_prefill.cu` 的 `dispatch_prompt_geometry`。
+
+| 形状 | 模型 | 开关关闭（默认） | 开关打开，BF16 或 e4m3 KV | 开关打开，int8 KV |
+|---|---|---|---|---|
+| `Gqa128_32q8` | Qwen3-4B、Qwen3-8B、Llama-3-8B、Mistral-7B | 与注册前相同：通用 kernel；64 列起用 KV 几何 `Gqa128_16q8` 的 prompt kernel | small-T tensor-core kernel（GQA 组装进 MMA 的行，KV 每个 head 只读一次；固定的 key 分区与 reducer），7–63 列走 split-KV tile，多 prompt 的轮次可以打包；64 列起仍是 prompt kernel | 与关闭相同 |
+| `Gqa128_40q8` | Qwen3-14B | 同上 | 同上；组大小 5，small-T 直接服务宽度 1–6 和 8，更宽的验证轮按 6 列分块或拆成 prompt tile | 与关闭相同 |
+| `Gqa128_32q32` | Llama-2-7B 一类的 128 宽 MHA | 注册前被拒绝；现在走未注册 query group 的路线（通用 kernel，64 列起 prompt kernel） | 同第一行 | 与关闭相同 |
+
+- int8 KV 无论开关都留在通用 kernel：int8 的 small-T 解码 kernel 只服务 256 宽、组大小 4–8 的形状（`gqa_attention_decode_launch.cuh` 的 `kGqaI8DecodeRegistered`），否则会抛异常；通用 kernel 在 128 宽上服务 int8。按代码阅读，上游自己的 128 宽注册形状（Qwen3-0.6B 的 16q8、Qwen3-30B-A3B 的 32q4 等）在 int8 KV 的第一步解码就会抛这个异常；fork 没有改动这一点。
+- 数值：开关打开后输出的低位会变化。通用 kernel 的 P 保持 FP32，tensor-core kernel 在 P·V 之前把 P 舍入为 BF16。key 分区按绝对位置固定（与已注册形状相同），所以 batch 不变性保持；`--batch-invariant` 下通用 kernel 不切分历史，注册路线照常按这些固定分区切分。
+- Hopper：BF16 KV 的解码与验证行仍走 FA3（`fa3_takes_rows` 不看注册表），FA3 能接的 prompt 也仍走 FA3；开关改变的是 e4m3 KV 的行、FA3 不接的窄 prompt 段和带 mask 的段，以及 `--batch-invariant` 下的所有宽度。
+- 不在范围内：其他未注册的组（例如 Qwen2.5-7B 的 28q/4kv、Qwen3-32B 的 64q/8kv）照旧走通用 kernel。
+
+预期收益来自代码阅读和计数（路线图 serve R1，未在 GPU 上测量）：Qwen3-8B、BF16 KV、16 条 4K rollout 时每步注意力约 7–14 ms 降到约 5.5–6 ms，解码约 1.1–1.6 倍；在 30K 历史上追加 40 个 token 的一轮约 30–180 ms 降到 3–5 ms。
+
+内存的四个方面：
+
+- 分配：运行时没有新的分配调用。开关打开后，注意力 workspace 按已注册形状的公式预留（`gqa_attention_workspace_capacity_bytes` 的 small-T 分支，与其他已注册形状相同），而不是通用 kernel 的公式。small-T 的 FP32 partial 约为 4·D·H_q·W·S·B 字节，S 是 envelope 最大可见 key 处的固定分区数（默认分区表下 4K 为 32、32K 为 65、128K 为 112）；通用 kernel 只在 `q_heads × 列数` 小于 2 × SM 数时才切分，B·W 较大时不需要 partial。按这个公式（代码算术，未在 GPU 上核对），Qwen3-8B（D=128，H_q=32）在 32K 上下文、16 条 lane 的解码约 17 MB，验证宽度 4 时约 68 MB。以引擎启动时报告的内存摘要为准，需要在 GPU 上记录开关 0/1 两个值。
+- 存活时间、峰值：运行时不变（workspace 预留在启动时确定）。
+- 构建：每个 `X()` 行除了解码单元，还会让 `gqa_attention_prefill.cu` 与 `gqa_attention_decode.cu` 为该形状实例化一套 kernel；本机的编译时间与目标文件大小见下文“本机编译检查”。
+- 吞吐：解码 tok/s，见下文的 5090 检查。
+
+### 验证
+
+无 GPU 时：`fork/dev test patches` 中的 `fork/patches/tests/native/test_gqa_fork_shapes.py` 从上游源码中截取 `optimized_decode_shape`、`generic_takes`、`gqa_generic_attention_serves` 和 `dispatch_prompt_geometry` 的原文，与真实的注册表头文件和 fork 头文件一起用主机编译器编译成探针，在开关未设置、为 `0` 及其他值、为 `1` 时运行：注册表含这三个形状且 `(128, 8)` 的第一个匹配仍是 `Gqa128_16q8`；开关关闭时三个形状的路线与未注册的组相同；打开时 BF16/e4m3 走注册路线、int8 不走；其他形状两种设置下路线相同。它还检查每个 `X()` 行在某个 CMake 源列表中恰好有一个解码单元、下面三个 ctest 条目的接线，以及本节写有开关与 GPU 检查命令。这些 kernel 与受影响的翻译单元已为 sm_120a 编译（见下文），没有在 GPU 上运行。
+
+GPU 测试。上游的 `sinfer_gqa_attention_test` 只覆盖 32q/8kv（qwen3_8b 的几组用例），不覆盖 40q/8kv 和 128 宽 MHA。`fork/native/tests/test-fork-gqa-shapes.cpp` 把上游的测试源文件原样编译进来（只把它的 `main` 改名），对三个形状跑同类用例：解码与验证宽度（追加 A1、读缓存 A3）、7–63 列与 64 列以上的 prompt、跨页和跨分区的历史、滑动窗口、带 mask 列与重排 table row 的 batch、e4m3 缓存（追加与读缓存逐位相同），以及 int8 的 batch 行（两种设置下都走通用 kernel），全部对照该文件的双精度参考；另外仿照上游的 `verify_packed_prompt_invariance` 检查多 prompt 打包：开关打开时打包的输出和缓存与各段单独调用逐位相同，关闭时不打包。`fork_native.cmake` 把它构建为 `sinfer_gqa_fork_shapes_test`（与上游测试同目录，属于 `serve-tests`），并登记三个 ctest 条目：`sinfer_gqa_fork_shapes_test`（开关为 0）、`sinfer_gqa_fork_shapes_on_test` 与 `sinfer_gqa_attention_fork_shapes_on_test`（上游测试，开关为 1）。
+
+### 本机编译检查
+
+2026-10-31，4 vCPU 虚拟机，无 GPU，nvcc 13.1.115，GCC 13.3，`SUROGATE_SERVE_CUDA_ARCHS=120a`（只编 sm_120a；默认的 `89;90a;120a` 大约是三倍），与其他会话共用机器。在仓库外配置一个临时构建目录（`cmake -S csrc`，打开 `SUROGATE_BUILD_SERVE`、`SUROGATE_SERVE_TESTS` 与 `SUROGATE_SERVE_BENCH`），只编译受影响的翻译单元，之后删除。
+
+| 翻译单元 | 注册前 | 注册后 |
+|---|---|---|
+| `gqa_attention_prefill.cu` | user 15 分 39 秒，17.32 MB | user 17 分 16 秒（+10%），18.92 MB（+9%） |
+| `gqa_attention_decode.cu` | user 5.2 秒，136 KB | 约 7 秒，150 KB |
+| `fork/native/serve/` 三个解码单元 | — | 各约 200 秒（3 个并行），4.35–4.59 MB |
+| `wrapper/gqa_attention.cpp`、`gqa_attention_generic.cu`、`test_gqa_attention.cpp`、`test-fork-gqa-shapes.cpp` | | 编译通过 |
+
+ptxas（`--resource-usage`）给新解码单元中 small-T kernel 的寄存器是 244–255，spill store 最多 80 B（40q8；32q8 为 76 B，32q32 为 40 B），上游已注册的 `Gqa128_32q4` 单元是 244–255 与 76 B。`fork_native.cmake` 的接线在该构建目录中确认：三个解码单元在 `sinfer_ops` 的编译命令中，`sinfer_gqa_fork_shapes_test` 属于 `serve-tests`，三个 ctest 条目带各自的环境变量。没有链接，也没有在 GPU 上运行。
+
+RTX 5090 上（`make serve-test-build` 的构建目录 `csrc/build-serve`，`SERVE_TEST_CUDA_ARCH=120a`）：
+
+```bash
+make serve-test-build
+# 正确性：四个条目都应通过（上游测试开关关闭的一次就是它原有的条目）。
+cd csrc/build-serve && ctest -R '^sinfer_gqa_(attention|fork_shapes)' --output-on-failure && cd -
+# 等价的手动运行，每次都应打印 PASS：
+csrc/build-serve/serve_tests/sinfer_gqa_attention_test
+SUROGATE_SERVE_GQA_FORK_SHAPES=1 csrc/build-serve/serve_tests/sinfer_gqa_attention_test
+SUROGATE_SERVE_GQA_FORK_SHAPES=0 csrc/build-serve/serve_tests/sinfer_gqa_fork_shapes_test
+SUROGATE_SERVE_GQA_FORK_SHAPES=1 csrc/build-serve/serve_tests/sinfer_gqa_fork_shapes_test
+
+# 速度：同一构建，只切换开关；锁定或记录 SM 时钟，每组至少 3 次，冷缓存。
+# B>1 时 bench 只接受 W<=16，所以解码行与 40 token 的一轮分两条命令。
+cmake -S csrc -B csrc/build-serve -DSUROGATE_SERVE_BENCH=ON
+cmake --build csrc/build-serve --target sinfer_causal_softmax_attention_bench
+B=csrc/build-serve/serve_bench/sinfer_causal_softmax_attention_bench
+for s in 0 1; do
+  SUROGATE_SERVE_GQA_FORK_SHAPES=$s $B --entry append --geometry d128-h32-kv8 --kv-dtype bf16 \
+    --tokens 1 --batch 1,16,32 --context 4096,32768 --execution graph --cache cold \
+    --csv-out gqa_fork_shapes_decode_$s.csv
+  SUROGATE_SERVE_GQA_FORK_SHAPES=$s $B --entry append --geometry d128-h32-kv8 --kv-dtype bf16 \
+    --tokens 40 --batch 1 --context 32768 --execution graph --cache cold \
+    --csv-out gqa_fork_shapes_turn_$s.csv
+  # int8 留在通用 kernel：两种设置的时间应在噪声内相同。
+  SUROGATE_SERVE_GQA_FORK_SHAPES=$s $B --entry append --geometry d128-h32-kv8 --kv-dtype int8 \
+    --tokens 1 --batch 16 --context 4096 --execution graph --cache cold \
+    --csv-out gqa_fork_shapes_int8_$s.csv
+done
+```
+
+bench 只有 32q/8kv 这一个 128 宽的组（`d128-h32-kv8`）；40q/8kv 与 MHA 的速度在端到端运行中测量。在同一张卡上还应记录：
+
+- ncu 对 `gqa_generic_split_kernel` 与 small-T kernel 的 `lts__t_sectors_srcunit_tex.sum`（相对于 KV 本身的字节数，预期由约 4 倍降到约 1 倍）、`dram__bytes_read.sum`、`smsp__pcsamp_warps_issue_stalled_long_scoreboard` 的采样占比和 `sm__pipe_tensor_op_hmma_cycles_active`。
+- 端到端：Qwen3-8B，16 条并发 4K rollout，开关 0/1 各一次，记录解码 tok/s、nsys 中注意力 kernel 的时间占比、引擎启动时报告的 workspace，以及 rollout 与 trainer 的平均 |Δ logprob|；Qwen3-14B 与一个 128 宽 MHA 模型各做一次开关 0/1 的解码 tok/s。
+- 成功标准（路线图 R1）：16 × 4K、BF16 KV 下解码 tok/s ≥ 1.15 倍；L2 到 SM 的 sector ≤ KV 本身的 1.3 倍；30K 历史上 40 token 一轮的注意力 ≤ 10 ms；int8 KV 照常服务。

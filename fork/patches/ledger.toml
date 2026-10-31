@@ -614,6 +614,60 @@ conflict_history = [
 ]
 
 [[topic]]
+id = "T16"
+title = "serve: register the 128-wide 32q8, 40q8 and MHA 32q32 GQA shapes"
+commits = []
+switch = "SUROGATE_SERVE_GQA_FORK_SHAPES=1 (default off: the shapes keep the routes they took before registration; int8 KV keeps them with the switch on)"
+# Roadmap serve R1. Qwen3-4B/8B, Llama-3-8B, Mistral-7B (128/32q8) and Qwen3-14B (128/40q8) decode, verify and
+# 7-63-column prompt segments ran on the CUDA-core generic split-KV kernel (gqa_attention_generic.cu) on every GPU
+# but Hopper: one CTA per (column, query head, split), so a KV head's keys are read once per query head; FP32 FMAs.
+# 128/32q32 (Llama-2-7B class MHA) was refused: no registered 128-wide shape carried 32 KV heads.
+# gqa_attention_geometry.cuh gains three `using` lines and three X() lines, placed after Gqa128_32q4 so that
+# Gqa128_16q8 stays the first (128, 8) entry and the KV-cache append kernels keep their instantiation. The decode
+# units are fork/native/serve/gqa_attention_decode_<name>.cu, attached to sinfer_ops by
+# fork_native.cmake _surogate_fork_attach_serve (deferred, guarded by if(TARGET sinfer_ops)), so csrc/CMakeLists.txt
+# keeps its exact two-line diff. surogate_fork::gqa_fork_shape_keeps_generic_route (gqa_fork_shapes.h) is read at the
+# three places upstream routes on registration: optimized_decode_shape and generic_takes (wrapper/gqa_attention.cpp)
+# and dispatch_prompt_geometry (launcher/gqa_attention_prefill.cu, which now takes the cache dtype; its three calls
+# pass cache.dtype). With the switch off a fork shape routes exactly as an unregistered query group: generic kernel,
+# KV-geometry prompt dispatch, no packed prompts. With it on, BF16 and e4m3 caches take the small-T tensor-core
+# kernels, chunked small-T and prompt tiles, and pack prompts (gqa_attention_packs_prompt). An int8 cache stays on the
+# generic route either way: kGqaI8DecodeRegistered is 256-wide only, so the small-T launcher would throw.
+# Output bits change with the switch on (P rounded to BF16 before P V; the generic kernel keeps FP32); the fixed key
+# partitions keep batch invariance. Build time: every X() line also instantiates the prefill kernels
+# (gqa_attention_prefill.cu) and the decode dispatch for the shape. GPU tests: sinfer_gqa_fork_shapes_test
+# (fork/native/tests/test-fork-gqa-shapes.cpp compiles upstream's test_gqa_attention.cpp with its main renamed, so
+# a sync that renames the harness's helpers breaks this file's build, loudly), built and registered with ctest by
+# _surogate_fork_attach_serve with the switch 0 and 1, plus upstream's sinfer_gqa_attention_test with the switch 1.
+# Compiled for sm_120a without a GPU; kernel behaviour and speed are GPU-unverified (5090 checks in
+# fork/docs/performance.md, "服务端 GQA 形状注册").
+# Not a defect fix (no errata entry). Observed, not changed: upstream's own 128-wide shapes (Qwen3-0.6B's 16q8,
+# Qwen3-30B-A3B's 32q4, ...) have no int8 decode kernel either, and by code reading throw at their first int8
+# decode step.
+files = [
+    "csrc/src/serve/ops/kernel/gqa_attention_geometry.cuh",
+    "csrc/src/serve/ops/wrapper/gqa_attention.cpp",
+    "csrc/src/serve/ops/launcher/gqa_attention_prefill.cu",
+]
+fork_files = [
+    "fork/native/cmake/fork_native.cmake",   # _surogate_fork_attach_serve (shared with T3, T5, T10)
+    "fork/native/include/surogate_fork/gqa_fork_shapes.h",
+    "fork/native/serve/gqa_attention_decode_gqa128_32q8.cu",
+    "fork/native/serve/gqa_attention_decode_gqa128_40q8.cu",
+    "fork/native/serve/gqa_attention_decode_gqa128_32q32.cu",
+    "fork/native/tests/test-fork-gqa-shapes.cpp",
+    "fork/patches/tests/native/test_gqa_fork_shapes.py",
+]
+tests = [
+    "fork/patches/tests/native/test_gqa_fork_shapes.py",
+    "fork/native/tests/test-fork-gqa-shapes.cpp",           # sinfer_gqa_fork_shapes_test, ctest with the switch 0 and 1
+    "csrc/src/testing/serve/ops/test_gqa_attention.cpp",   # upstream's sinfer_gqa_attention_test, ctest also with the switch 1
+]
+conflict_history = [
+    "2026-10-31 reverse replay of the T16 hunks from 282f9901, conflict blocks at 90/30/14 days: all three files absent 90 days back; gqa_attention_geometry.cuh 0/0, gqa_attention_prefill.cu 0/0, gqa_attention.cpp 1/0 (at 30 days upstream had not yet written the FA3 and generic-route functions around generic_takes, cc33da57..c3019cf1)",
+]
+
+[[topic]]
 id = "T17"
 title = "graphed packed SFT: per-row documents in the cap-and-pad replay and capture"
 commits = ["b40ae9f7"]   # shared with T18

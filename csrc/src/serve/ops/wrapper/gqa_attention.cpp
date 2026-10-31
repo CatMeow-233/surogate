@@ -9,6 +9,7 @@
 #include "ops/gqa_sm90/gqa_fa3.h"
 #include "ops/kernel/gqa_attention_geometry.cuh"
 #include "ops/launcher/gqa_attention.h"
+#include "surogate_fork/gqa_fork_shapes.h" // fork T16
 
 #include <algorithm>
 #include <cmath>
@@ -40,6 +41,7 @@ bool optimized_decode_shape(std::int32_t dim, std::int32_t queries, std::int32_t
     // Keep the new 8q4 shape's existing INT8 support through the prompt kernel:
     // the INT8 decode schedule cannot distribute a query group of two.
     return gqa_shape_is_registered(dim, queries, kv) &&
+           !surogate_fork::gqa_fork_shape_keeps_generic_route(dim, queries, kv, dtype == DType::I8) &&
            !(dtype == DType::I8 && dim == 256 && queries == 8 && kv == 4);
 }
 
@@ -659,7 +661,9 @@ void launch_fa3_rows(const Tensor& q, const Tensor& positions, const Tensor& val
 bool generic_takes(std::int32_t head_dim, std::int32_t q_heads, std::int32_t kv_heads,
                    DType cache_dtype, const GqaBlockMask& selection) {
     return !selection.words && !selection.image_end &&
-           !gqa_shape_is_registered(head_dim, q_heads, kv_heads) &&
+           (!gqa_shape_is_registered(head_dim, q_heads, kv_heads) ||
+            surogate_fork::gqa_fork_shape_keeps_generic_route(head_dim, q_heads, kv_heads,
+                                                              cache_dtype == DType::I8)) &&
            detail::gqa_generic_attention_serves(head_dim, cache_dtype);
 }
 

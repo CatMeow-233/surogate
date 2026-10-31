@@ -7,6 +7,7 @@
 #include "ops/kernel/gqa_attention_prefill_bf16.cuh"
 #include "ops/kernel/gqa_attention_prefill_i8.cuh"
 #include "core/device.h" // CUDA_CHECK
+#include "surogate_fork/gqa_fork_shapes.h" // fork T16
 
 #include <atomic>
 #include <cstddef>
@@ -112,8 +113,9 @@ bool device_is_sm12x() noexcept {
 }
 
 template <typename Visitor>
-void dispatch_prompt_geometry(int dim, int queries, int kv, Visitor&& visitor) {
-    if (gqa_shape_is_registered(dim, queries, kv)) {
+void dispatch_prompt_geometry(int dim, int queries, int kv, DType dtype, Visitor&& visitor) {
+    if (gqa_shape_is_registered(dim, queries, kv) &&
+        !surogate_fork::gqa_fork_shape_keeps_generic_route(dim, queries, kv, dtype == DType::I8)) {
         gqa_dispatch_geometry(dim, queries, kv, visitor);
     } else {
         gqa_dispatch_kv_geometry(dim, kv, visitor);
@@ -414,7 +416,7 @@ void gqa_attention_prompt_attention_launch(const Tensor& q, const Tensor& positi
     const GqaPrefillDirectMetadata metadata{
         .table  = static_cast<const std::int32_t*>(cache.block_table.data),
         .window = sliding_window};
-    dispatch_prompt_geometry(q.ne[0], q.ne[1], cache.num_kv_heads, [&]<typename Geometry>() {
+    dispatch_prompt_geometry(q.ne[0], q.ne[1], cache.num_kv_heads, cache.dtype, [&]<typename Geometry>() {
         gqa_attention_prompt_attention_launch_for<Geometry>(q, positions, scale, cache, metadata,
                                                             out, stream, selection);
     });
@@ -468,7 +470,7 @@ void gqa_attention_prompt_cached_launch(const Tensor& q, const Tensor& positions
             .table_stride = cache.block_tables.ne[0],
             .window       = sliding_window,
         };
-        dispatch_prompt_geometry(q.ne[0], q.ne[1], cache.num_kv_heads, [&]<typename Geometry>() {
+        dispatch_prompt_geometry(q.ne[0], q.ne[1], cache.num_kv_heads, cache.dtype, [&]<typename Geometry>() {
             gqa_attention_prompt_attention_launch_for<Geometry>(q, positions, scale, cache,
                                                                 metadata, out, stream, selection);
         });
@@ -555,7 +557,7 @@ void gqa_attention_prompt_launch(const Tensor& q, const Tensor& k, const Tensor&
             .table_stride = cache.block_tables.ne[0],
             .window       = sliding_window,
         };
-        dispatch_prompt_geometry(q.ne[0], q.ne[1], cache.num_kv_heads, [&]<typename Geometry>() {
+        dispatch_prompt_geometry(q.ne[0], q.ne[1], cache.num_kv_heads, cache.dtype, [&]<typename Geometry>() {
             gqa_kv_append_launch_for<Geometry>(k, v, positions, cache, metadata, stream);
             gqa_attention_prompt_attention_launch_for<Geometry>(q, positions, scale, cache,
                                                                 metadata, out, stream, selection);
