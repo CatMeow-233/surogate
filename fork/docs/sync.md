@@ -230,21 +230,21 @@ git log --oneline HEAD..MERGE_HEAD -- <文件>                # 上游改了什�
 ### T25 GPT-OSS 预量化 LoRA 计算冻结专家的输入梯度
 
 - 文件：`csrc/src/runtime/ops/moe_grouped_gemm_gate_up.cpp` 与 `moe_grouped_gemm_down.cpp`（各一行 `#include "surogate_fork/gpt_oss_prequant_dgrad.h"`；`dispatch_moe_grouped_gemm_gate_up_backward` 与 `dispatch_moe_grouped_gemm_down_backward` 中 `skip_base_backward` 的条件末尾加 `&& surogate_fork::gpt_oss_prequant_skip_expert_dgrad_requested()`）。开关 `SUROGATE_GPT_OSS_PREQUANT_SKIP_EXPERT_DGRAD` 默认关闭，打开时恢复上游的跳过。缺陷与证据见 [upstream-errata.md](upstream-errata.md#gpt-oss-预量化-checkpoint-的-lora-训练跳过冻结专家的输入梯度fork-已修复ledger-t25)。
-- 反向回放：见 ledger 中 T25 的 `conflict_history`。
+- 反向回放：0/0/0。90 天内上游改过这两个文件各 7 次（同一组提交：`820c0071`、`c4e174e6`、`cb11e489`、`5c5a6e6e`、`5b6e6f06`、`b05de03e`、`735b8e8f`），30 天内 2 次（`820c0071`、`c4e174e6`），14 天内没有；都不在 `skip_base_backward` 的两行和 include 区附近。
 - 解决：以上游为准，再把条件末尾的开关调用和 `#include` 放回。上游改写这两个反向函数时，确认冻结专家的 dgrad 在 LoRA + 预量化 + GPT-OSS 时仍然执行（探针会提取 `skip_base_backward` 的定义；变量改名或不再只控制清零分支时测试失败，按新代码调整）。上游自己去掉这个跳过时，删去 T25 和开关头文件。
 - 测试：`fork/patches/tests/native/test_gpt_oss_prequant_dgrad.py`（`fork/dev test patches`，不需要 GPU）；GPU 检查见 errata。
 
 ### T26 MoE 的 FP8 权重缓存拒绝可训练的专家权重
 
 - 文件：`csrc/src/runtime/executor/compiled_ops.cpp`（`CompiledExecutor::attach_moe_fp8_cache` 中环境变量与形状检查之后、查找缓存之前的 `if (mWeights.is_trainable(weight_name)) return;` 及两行注释）。缺陷与证据见 [upstream-errata.md](upstream-errata.md#moe-的-fp8-权重缓存不拒绝可训练的专家权重fork-已修复ledger-t26)。
-- 反向回放：见 ledger 中 T26 的 `conflict_history`。
+- 反向回放：0/0/0。90 天内上游改过 `compiled_ops.cpp` 7 次（`cb11e489`、`582946b6`、`5c5a6e6e`、`5b6e6f06`、`b05de03e`、`735b8e8f`、`c6a099f9`），都不在 `attach_moe_fp8_cache` 中；30 天与 14 天内没有。
 - 解决：以上游为准，再把这个 guard 放回查找与分配之前。上游给缓存加上优化器步之后的失效（或自己拒绝可训练权重）时，删去 T26。上游让通用 `moe_grouped_gemm` 产生权重梯度（errata 中未修复的那一处）时，T26 必须保留。
 - 测试：`fork/patches/tests/native/test_moe_fp8_cache_trainable.py`（`fork/dev test patches`，不需要 GPU；探针按源码原样编译函数体，函数改名或用到新的成员时它在编译时失败，按新代码补桩）；GPU 检查见 errata。
 
 ### T27 FP8 生产者侧预量化自己计算 amax
 
 - 文件：`csrc/src/runtime/ops/fused_residual_rmsnorm.cpp`（`dispatch_fused_residual_rmsnorm`）、`csrc/src/runtime/ops/swiglu.cpp`（`dispatch_swiglu` 的 3D 分支）、`csrc/src/runtime/ops/matmul_swiglu.cpp`（`dispatch_matmul_swiglu`）：预量化块中 `quantize_with_abs_max` 之前各加一行 `abs_max(...)` 和两行注释。这些块目前不可达，当前运行逐位不变。缺陷与证据见 [upstream-errata.md](upstream-errata.md#fp8-的生产者侧预量化使用没有计算过的-amax潜在缺陷fork-已加-guardledger-t27)。
-- 反向回放：见 ledger 中 T27 的 `conflict_history`。
+- 反向回放：0/0/0。90 天内上游改过 `fused_residual_rmsnorm.cpp` 2 次（`582946b6`、`282c6412`）、`matmul_swiglu.cpp` 1 次（`9f7d3705`），`swiglu.cpp` 没有改过，都不在预量化块中；30 天与 14 天内三个文件都没有改动。
 - 解决：以上游为准，再把每处的 `abs_max(...)` 放回量化之前。上游让生产者 kernel 自己写 amax（传入非空的 `abs_max_ptr` 并先清零）时，删去对应的一行；上游改为 delayed scaling 下也做预量化时，按新代码重新判断（那时 amax 应记录到 scaling state）。上游开始包含 `fp8_matmul.h` 或 `bf16_matmul.h` 时，测试失败，在它们的 JIT 分支补上同样的 `abs_max`。
 - 测试：`fork/patches/tests/native/test_fp8_prequant_amax.py`（`fork/dev test patches`，不需要 GPU；探针按源码原样提取三个预量化块，条件或缓冲的写法变了时它在提取或编译时失败，按新代码调整桩）；GPU 检查见 errata。
 
