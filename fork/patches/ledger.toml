@@ -402,7 +402,7 @@ conflict_history = [
 [[topic]]
 id = "T17"
 title = "graphed packed SFT: per-row documents in the cap-and-pad replay and capture"
-commits = []
+commits = ["b40ae9f7"]   # shared with T18
 switch = "always on (defect fix)"
 # Defects (upstream 282f9901; errata "打包 SFT 的整步 CUDA graph ..."): after a full-step capture with documents,
 # (1) a step without in-row position resets staged cu_seqlens {0, B*T} (py_train.cpp:1600-1606), one document over
@@ -433,12 +433,14 @@ tests = [
     "fork/patches/tests/native/test_doc_mask_staging.py",
     "fork/native/tests/test-fork-doc-mask-staging.cpp",
 ]
-conflict_history = []
+conflict_history = [
+    "2026-10-31 reverse replay of b40ae9f7's upstream-file hunks onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: py_train.cpp 1/1/0 (the include line, next to the serve/core/unified_memory.h include upstream added in 7026ba31, #302, 2026-10-07), graph_executor.h 0/0/0, graph_executor.cpp 0/0/0, causal_lm_execution_profile.cpp 0/0/0",
+]
 
 [[topic]]
 id = "T18"
 title = "cap-and-pad pad mode: an eager call over the cap runs exact geometry"
-commits = []
+commits = ["b40ae9f7"]   # shared with T17
 switch = "always on (defect guard)"
 # Defect (latent, upstream 282f9901; errata "整步 graph 的 pad 模式不会关闭 ..."): pad mode stays on after a capture
 # with documents, and an eager set_doc_masking (validate, a warmup after a shape change) with more documents than the
@@ -457,12 +459,14 @@ fork_files = [
     "fork/patches/tests/native/test_doc_mask_staging.py",         # shared with T17
 ]
 tests = ["fork/patches/tests/native/test_doc_mask_staging.py"]
-conflict_history = []
+conflict_history = [
+    "2026-10-31 reverse replay of b40ae9f7 (shared with T17) onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: graph_executor.h 0/0/0, graph_executor.cpp 0/0/0",
+]
 
 [[topic]]
 id = "T19"
 title = "MoE routing statistics are not accumulated in the recompute replay"
-commits = []
+commits = ["402f7add"]
 switch = "always on (defect fix; removes one stats kernel per MoE layer per micro-step under recompute)"
 # Defect (upstream 282f9901; errata "MoE 路由统计在重计算回放中重复累加"): with recompute on, replay_layer_forward
 # re-runs MoETopK and its stats block (moe_topk.cpp:158-192) added every layer again: aux_loss and z_loss (raw sums)
@@ -471,12 +475,14 @@ switch = "always on (defect fix; removes one stats kernel per MoE layer per micr
 files = ["csrc/src/runtime/ops/moe_topk.cpp"]
 fork_files = ["fork/patches/tests/native/test_moe_stats_replay.py"]
 tests = ["fork/patches/tests/native/test_moe_stats_replay.py"]
-conflict_history = []
+conflict_history = [
+    "2026-10-31 reverse replay of 402f7add onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: moe_topk.cpp 0/0/0",
+]
 
 [[topic]]
 id = "T20"
 title = "full-step warmup runs once for a model that never captures"
-commits = []
+commits = ["191109e8"]
 switch = "on by default (removes duplicated, discarded work); SUROGATE_FORK_FORCE_GRAPH_WARMUP=1 restores upstream; ep_size > 1 keeps upstream's warmup"
 # Upstream ran train_step_graphed's discarded eager fwd+bwd warmup on every step for capture-unsafe models (MoE, EP),
 # which never capture. has_capture_unsafe_ops() is valid from allocate_run_state, so after one warmup (which keeps the
@@ -494,4 +500,6 @@ fork_files = [
     "fork/patches/tests/native/test_full_step_warmup.py",
 ]
 tests = ["fork/patches/tests/native/test_full_step_warmup.py"]
-conflict_history = []
+conflict_history = [
+    "2026-10-31 reverse replay of 191109e8 together with b40ae9f7 (T20's include sits next to T17's) onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: py_train.cpp 1/1/0 (T17's include-line block, no other), py_train.h 0/0/0",
+]

@@ -181,18 +181,21 @@ git log --oneline HEAD..MERGE_HEAD -- <文件>                # 上游改了什�
 ### T17、T18 整步 graph 的文档掩码（cap-and-pad）
 
 - 文件：`csrc/src/binding/py_train.cpp`（`train_step_graphed` 中四处：文档扫描换成 `scan_micro_step_documents`；`gs.captured` 时的决定换成 `plan_captured_step`，不再合成 `{0, B*T}`；捕获前不带文档时调用 `enable_doc_masking_pad_to_max(0, micro_steps)`；删去两处 `cu.size() <= 1` 的死分支。另有一行 include。这个文件也属于 T1、T20）、`csrc/src/runtime/executor/graph_executor.{h,cpp}`（T17：`IGraphExecutor::set_row_doc_masking_for_capture` 及其实现，`enable_doc_masking_pad_to_max` 对 0 关闭 pad 模式、在捕获前扩大 `mCuSeqlensGpu`；T18：`set_doc_masking` 开头按 `pad_mode_route` 分派、`set_doc_masking_exact_outside_capture` 与它的两个缓冲、`stage_cu_seqlens_for_micro_step` 的超限异常、析构函数释放 fork 的设备缓冲。这两个文件也属于 T1）、`csrc/src/runtime/executor/causal_lm_execution_profile.cpp`（T17：`apply_doc_masking` 在 `compute_doc_masking` 返回空时先调用 `set_row_doc_masking_for_capture`）。逻辑在 `fork/native/include/surogate_fork/doc_mask_staging.h`。缺陷与证据见 [upstream-errata.md](upstream-errata.md#打包-sft-的整步-cuda-graph-在没有行内边界的微步上跨行或跨文档注意fork-已修复ledger-t17)。
+- 反向回放：`py_train.cpp` 1/1/0，是 include 行与上游 `7026ba31`（#302，2026-10-07）新增的 `serve/core/unified_memory.h` include 相邻；`graph_executor.{h,cpp}` 与 `causal_lm_execution_profile.cpp` 无冲突。
 - 解决：以上游为准，再把上面各处放回。上游改写 cap-and-pad 时（例如按 T 而不是 B*T 固定 `max_seqlen`，或换成按 cap 分桶的 graph），检查三条规则仍然成立：带文档的 graph 在没有行内重置的步上读按行列表；捕获中没有行内重置的微步按 varlen 捕获；捕获中不分配设备缓冲。eager 调用超过 cap 时不得改写或重新分配 graph 引用的段与 `mCuSeqlensGpu`。`test_doc_mask_staging.py` 编译上游的函数原文，函数改名或签名变化时它在提取或编译时失败，按新代码调整测试中的桩。上游自己修好这些缺陷时，删去 fork 的对应部分。
 - 测试：`fork/patches/tests/native/test_doc_mask_staging.py`（`fork/dev test patches`，不需要 GPU）；`fork/native/tests/test-fork-doc-mask-staging.cpp`（`[doc-mask]`，在 `dsl-run-state-tests` 中，只用主机）；GPU 检查见 errata。
 
 ### T19 MoE 路由统计不在重计算回放中累加
 
 - 文件：`csrc/src/runtime/ops/moe_topk.cpp`（`dispatch_moe_topk` 统计块的条件加上 `mInReplay ? nullptr :`）。
+- 反向回放：无冲突。
 - 解决：保留这个条件。上游新增别的统计点，或改变回放方式（例如回放跳过 MoETopK）时，按 `test_moe_stats_replay.py` 的 pin 重新判断；上游自己加了判断时删去 T19。
 - 测试：`fork/patches/tests/native/test_moe_stats_replay.py`；GPU 检查见 [errata](upstream-errata.md#moe-路由统计在重计算回放中重复累加fork-已修复ledger-t19)。
 
 ### T20 不能捕获的整步只预热一次（`SUROGATE_FORK_FORCE_GRAPH_WARMUP=1` 恢复上游）
 
 - 文件：`csrc/src/binding/py_train.cpp`（`train_step_graphed` 中 `warmup_full_graph` 改由 `run_warmup` 决定；warmup 块在流同步之后设置 `gs.fork_warmup_done`；一行 include）、`csrc/src/binding/py_train.h`（`sFullStepGraphState::fork_warmup_done`，`reset_capture` 不清它）。逻辑在 `fork/native/include/surogate_fork/full_step_warmup.h`。
+- 反向回放：与 T17 一起回放，`py_train.cpp` 1/1/0，与 T17 是同一个 include 块；`py_train.h` 无冲突。
 - 解决：以上游为准，再放回这几行。stack 缩小必须仍在 warmup 块中（第一次执行的步）；warmup 之后对 `has_capture_unsafe_ops()` 的检查保留，作为编译图为空时的后备。上游让 warmup 留下 eager 分支会用到的状态时（例如新的每步计数器），重新判断跳过是否仍逐位相同，不相同就像 EP 那样保留 warmup。上游自己去掉这次重复时删去 T20。
 - 测试：`fork/patches/tests/native/test_full_step_warmup.py`；GPU 检查见 [performance.md](performance.md#不能捕获的整步只预热一次)。
 
