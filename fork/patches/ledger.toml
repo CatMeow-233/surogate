@@ -595,14 +595,20 @@ switch = "always on (defect fix); ops without an explicit softmax_scale are bit-
 # cudnn_handle (its comment "cuDNN's wrapper fixes the softmax scale" is stale now; parity mode behaves as before).
 # The CPU test compiles the backend, the wrappers and AttentionParams from the sources against host stubs and checks
 # the attn_scale cuDNN's variant pack receives for the Gemma3-27B ops the real DSL emits; it fails on upstream's
-# sources. Compiled for sm_120a; the kernels are GPU-unverified (5090 check in the errata).
+# sources. Compiled for sm_120a; the kernels are GPU-unverified. The 5090 check (errata) dumps the global layer's
+# attention tensors (SUROGATE_DEBUG_ATTENTION_DUMP_LAYER) and t22_attention_dump_check.py compares out, lse and
+# d_qkv with float64 references at both scales (~0.2% vs ~7% / ~14% on its tiny model); the loss cannot tell the
+# scales apart there (defect 2e-4-9e-4 against bf16 noise up to 1e-3). The result goes in conflict_history.
 files = [
     "csrc/src/runtime/attention/attention_kernels.h",
     "csrc/src/runtime/attention/attention_cudnn.cpp",
     "csrc/src/runtime/attention/attention_custom.cu",
     "csrc/src/runtime/attention/backend_cudnn.cpp",
 ]
-fork_files = ["fork/patches/tests/native/test_cudnn_softmax_scale.py"]
+fork_files = [
+    "fork/patches/tests/native/test_cudnn_softmax_scale.py",
+    "fork/patches/tests/native/t22_attention_dump_check.py",
+]
 tests = ["fork/patches/tests/native/test_cudnn_softmax_scale.py"]
 conflict_history = [
     "2026-10-31 reverse replay of 7523eb3b onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: attention_kernels.h 0/0/0, attention_cudnn.cpp 0/0/0, attention_custom.cu 0/0/0, backend_cudnn.cpp 0/0/0",

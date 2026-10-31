@@ -18,6 +18,7 @@ probe does not compile there (no scale parameter). The kernels themselves are GP
 for T22 in fork/docs/upstream-errata.md gives the 5090 check.
 """
 
+import importlib.util
 import json
 import os
 import re
@@ -463,3 +464,94 @@ def test_the_cudnn_graphs_take_the_scale_at_execute_time():
         assert ".set_is_pass_by_value(true)" in scale and ".set_uid(Attn_scale_UID)" in scale
         assert "set_attn_scale(attn_scale)" in code
         assert "softmax_scale" not in code and "scale" not in code[code.index("auto key") : code.index("auto it")]
+
+
+# The GPU check (errata T22) reads the attention dumps flash_attention.cpp writes for one layer and decides which
+# scale the kernel applied; the tests below run that checker on dumps of an independent kernel (torch SDPA) and pin
+# the dump names and format it reads.
+DUMP_CHECK = Path(__file__).with_name("t22_attention_dump_check.py")
+
+
+def dump_check():
+    spec = importlib.util.spec_from_file_location("t22_attention_dump_check", DUMP_CHECK)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def write_kernel_dumps(directory: Path, scale: float, *, backward: bool, layer: int = 5) -> None:
+    """What a bf16 kernel applying `scale` would leave in SUROGATE_DEBUG_DUMP_DIR, in the native layouts:
+    qkv [B, T, Hq + 2 Hkv, Hs], out / d_out [B, T, Hq, Hs], lse [B, Hq, T]; q/k RMS-normalised with gain 2."""
+    torch = pytest.importorskip("torch")
+    F = torch.nn.functional
+    B, T, hq, hkv, hs = 1, 128, 4, 2, 128
+    gen = torch.Generator().manual_seed(0)
+
+    def bf16(x):
+        return x.to(torch.bfloat16).float()
+
+    def gain2(x):
+        return 2 * x / x.pow(2).mean(-1, keepdim=True).sqrt()
+
+    q = bf16(gain2(torch.randn(B, hq, T, hs, generator=gen)))
+    k = bf16(gain2(torch.randn(B, hkv, T, hs, generator=gen)))
+    v = bf16(torch.randn(B, hkv, T, hs, generator=gen))
+    d_out = bf16(torch.randn(B, hq, T, hs, generator=gen))
+    leaves = [t.clone().requires_grad_(True) for t in (q, k, v)]
+    out = F.scaled_dot_product_attention(*leaves, is_causal=True, scale=scale, enable_gqa=True)
+    scores = scale * (q @ k.repeat_interleave(hq // hkv, 1).transpose(-1, -2))
+    lse = torch.logsumexp(scores.masked_fill(torch.ones(T, T, dtype=torch.bool).triu(1), float("-inf")), -1)
+    qkv = torch.cat([q, k, v], 1).transpose(1, 2)
+    tensors = {"qkv": qkv, "out": bf16(out.detach()).transpose(1, 2), "lse": lse}
+    if backward:
+        out.backward(d_out)
+        d_qkv = torch.cat([t.grad for t in leaves], 1).transpose(1, 2)
+        tensors.update(qkv_bwd=qkv, d_out=d_out.transpose(1, 2), d_qkv=bf16(d_qkv))
+    for name, tensor in tensors.items():
+        stem = directory / f"attn_live.layer{layer}.{name}"
+        data = tensor.detach().float().contiguous().numpy()
+        data.tofile(f"{stem}.bin")
+        Path(f"{stem}.json").write_text(json.dumps({"name": stem.name, "dtype": "float32", "shape": list(data.shape)}))
+
+
+@pytest.mark.parametrize("applied", ["declared", "default"])
+def test_the_gpu_dump_check_names_the_scale_the_kernel_applied(tmp_path, capsys, applied):
+    """The fixed kernel (168**-0.5) passes, the unfixed one (1/sqrt(128)) fails, in out, lse and d_qkv alike."""
+    declared = 168.0**-0.5
+    write_kernel_dumps(tmp_path, declared if applied == "declared" else 128.0**-0.5, backward=True)
+    check = dump_check()
+    hs, default, rows = check.compare(tmp_path, 5, 4, 2, declared)
+    assert (hs, default) == (128, pytest.approx(128.0**-0.5, rel=1e-15))
+    assert [r[0] for r in rows] == ["out", "lse", "d_qkv"]
+    assert [check.verdict(*r[:3]) for r in rows] == [applied] * 3
+    status = check.main([str(tmp_path), "--layer", "5", "--hq", "4", "--hkv", "2", "--scale", repr(declared)])
+    assert status == (0 if applied == "declared" else 1), capsys.readouterr().out
+
+
+def test_the_gpu_dump_check_handles_forward_only_and_missing_dumps(tmp_path):
+    """trainer.validate leaves only the forward dumps; a directory without them is an error, not a pass."""
+    check = dump_check()
+    args = ["--layer", "5", "--hq", "4", "--hkv", "2", "--scale", repr(168.0**-0.5)]
+    assert check.main([str(tmp_path), *args]) == 2
+    write_kernel_dumps(tmp_path, 168.0**-0.5, backward=False)
+    assert [r[0] for r in check.compare(tmp_path, 5, 4, 2, 168.0**-0.5)[2]] == ["out", "lse"]
+    assert check.main([str(tmp_path), *args]) == 0
+
+
+def test_the_gpu_dump_check_reads_what_flash_attention_writes():
+    """The dump names, the env switches and the float32 .bin + {"shape": [...]} .json format the checker relies on,
+    and that the forward dump follows the kernel call and d_qkv the backward call."""
+    text = FLASH_ATTENTION.read_text(encoding="utf-8")
+    assert 'std::getenv("SUROGATE_DEBUG_ATTENTION_DUMP_LAYER")' in text
+    writer = body(FLASH_ATTENTION, r"void debug_dump_runtime_tensor\(")
+    assert 'std::string(dump_dir) + "/" + safe + ".bin"' in writer and 'safe + ".json"' in writer
+    assert "sizeof(float), nelem, bin_f" in writer and '\\"shape\\": [' in writer
+    forward = body(FLASH_ATTENTION, r"void CompiledExecutor::dispatch_flash_attention\(")
+    backward = body(FLASH_ATTENTION, r"void CompiledExecutor::dispatch_flash_attention_backward\(")
+    for name in ("qkv", "out", "lse"):
+        dump = f'debug_dump_runtime_tensor(fmt::format("attn_live.layer{{}}.{name}", layer_idx), {name}, dump_dir);'
+        assert forward.index("backend.forward(params);") < forward.index(dump)
+    for name, var in (("d_out", "d_out"), ("qkv_bwd", "qkv")):
+        assert f'fmt::format("attn_live.layer{{}}.{name}", layer_idx), {var}, dump_dir);' in backward
+    d_qkv = 'fmt::format("attn_live.layer{}.d_qkv", layer_idx), d_qkv,'
+    assert backward.index("backend.backward(params);") < backward.index(d_qkv)
