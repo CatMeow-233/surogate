@@ -45,6 +45,7 @@ a request; nothing here is saved in checkpoints.
 from __future__ import annotations
 
 import os
+import sys
 import weakref
 
 MODE_ENV = "SUROGATE_GRPO_DETOK"
@@ -180,21 +181,25 @@ def byte_level_backend(tokenizer):
 
 
 def _byte_level_backend(tokenizer):
-    try:
-        from tokenizers import decoders
-        from transformers.processing_utils import ProcessorMixin
-        from transformers.tokenization_utils_base import PreTrainedTokenizerBase
-        from transformers.tokenization_utils_tokenizers import TokenizersBackend
-    except ImportError:
-        return None
-    if isinstance(tokenizer, ProcessorMixin):
+    # Look the classes up instead of importing them: an instance of one means its
+    # module is loaded, and importing transformers.processing_utils for the check
+    # would hold the GIL for over a second inside a request.
+    processors = sys.modules.get("transformers.processing_utils")
+    ProcessorMixin = getattr(processors, "ProcessorMixin", None)
+    if ProcessorMixin is not None and isinstance(tokenizer, ProcessorMixin):
         # ProcessorMixin.decode forwards to its tokenizer.
         if type(tokenizer).decode is not ProcessorMixin.decode or "decode" in vars(tokenizer):
             return None
         tokenizer = getattr(tokenizer, "tokenizer", None)
+    fast = sys.modules.get("transformers.tokenization_utils_tokenizers")
+    TokenizersBackend = getattr(fast, "TokenizersBackend", None)
+    if TokenizersBackend is None or not isinstance(tokenizer, TokenizersBackend):
+        return None
+    from tokenizers import decoders
+    from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+
     if (
-        not isinstance(tokenizer, TokenizersBackend)
-        or type(tokenizer).decode is not PreTrainedTokenizerBase.decode
+        type(tokenizer).decode is not PreTrainedTokenizerBase.decode
         or type(tokenizer)._decode is not TokenizersBackend._decode
         or {"decode", "_decode"} & set(vars(tokenizer))
     ):

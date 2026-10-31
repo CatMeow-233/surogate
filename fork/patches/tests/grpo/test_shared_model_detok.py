@@ -9,6 +9,9 @@ model and request stop tokens, tool calls and Harmony's terminal token.
 
 import json
 import random
+import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -452,6 +455,42 @@ def test_the_window_is_used_only_where_it_is_exact(tokenizers_):
     patched = byte_level_bpe(clean_up_tokenization_spaces=False)
     patched.decode = lambda *args, **kwargs: ""
     assert byte_level_backend(patched) is None
+
+    # Multimodal checkpoints load an AutoProcessor, whose decode forwards to its tokenizer.
+    from transformers.processing_utils import ProcessorMixin
+
+    class Processor(ProcessorMixin):
+        attributes = ["tokenizer"]
+        tokenizer_class = "AutoTokenizer"
+
+        def __init__(self, tokenizer):
+            super().__init__(tokenizer)
+
+    class Rewriting(Processor):
+        def decode(self, *args, **kwargs):
+            return ""
+
+    assert byte_level_backend(Processor(tokenizers_["byte_level"])) is not None
+    assert byte_level_backend(Processor(tokenizers_["sentencepiece"])) is None
+    assert byte_level_backend(Rewriting(tokenizers_["byte_level"])) is None
+
+
+def test_the_window_check_imports_nothing_heavy_inside_a_request():
+    """Importing transformers.processing_utils on the first stop-string request held the GIL for ~1.5 s."""
+    script = """
+import sys
+from tokenizers import Tokenizer, decoders, models, pre_tokenizers
+from transformers import PreTrainedTokenizerFast
+from surogate._fork.grpo_detok import byte_level_backend
+tok = Tokenizer(models.BPE(vocab={c: i for i, c in enumerate(pre_tokenizers.ByteLevel.alphabet())}, merges=[]))
+tok.pre_tokenizer, tok.decoder = pre_tokenizers.ByteLevel(add_prefix_space=False), decoders.ByteLevel()
+assert "transformers.processing_utils" not in sys.modules
+assert byte_level_backend(PreTrainedTokenizerFast(tokenizer_object=tok)) is not None
+assert "transformers.processing_utils" not in sys.modules, "imported by the check"
+"""
+    root = Path(__file__).resolve().parents[4]
+    result = subprocess.run([sys.executable, "-c", script], cwd=root, capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stderr[-2000:]
 
 
 def test_an_unknown_mode_is_rejected(monkeypatch):
