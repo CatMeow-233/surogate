@@ -168,7 +168,7 @@ void mode_memset(const std::vector<Param>& params, int reps) {
         t0 = std::chrono::steady_clock::now();
         overwrites.begin_step();
         for (auto& h : host)  // every buffer gets micro-step 0's D2H
-            overwrites.overwritten(h.data(), h.size() * 2);
+            overwrites.before_copy(h.data(), h.size() * 2);
         zeroed = overwrites.zero_rest();
         const double a = ms_since(t0);
         if (r > 0) {

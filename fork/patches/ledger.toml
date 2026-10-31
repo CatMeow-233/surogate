@@ -411,15 +411,23 @@ switch = "always on (removes dead work; the host gradients are bit-identical)"
 # DslGradStore::start_micro_step(0) memset every host gradient (mCpuGrads) on the rank thread before micro-step 0's
 # backward: 16.4 GB for Qwen3-8B (about 0.55-0.8 s on one desktop core; 1.9 s at the 8.6 GB/s this VM's memset
 # reaches). That micro-step's D2H copies, offload_layer_grads for block gradients and offload_non_block_grads for
-# the rest, overwrite each buffer in full before anything reads it. HostGradOverwrites
-# (fork/native/include/surogate_fork/host_grad_overwrites.h) records each such copy as it is enqueued, and
-# zero_rest() zeroes only the buffers no copy covered (none in an FFT run; a non-block gradient without device
-# storage, or a layer whose offload was skipped, otherwise), once per step, at start_micro_step(k > 0) or in
-# wait_all_offloads, before the first reader. No copy into an uncovered buffer is in flight (it would have been
-# recorded) and its readers are enqueued only later, so the zeroing cannot race the GPU. cpu-step-contract
-# replays the protocol (coverage gaps, a tied buffer, a buffer without a device copy, GA 1-4) against the memset
-# path and gets the same bytes. Relies on step_cpu_streaming being the only reader of host gradients, after
-# wait_all_offloads, and on the three host-gradient copies of the grad store (test_cpu_step_hooks.py pins both).
+# the rest, overwrite each buffer in full before anything reads it. Each copy into a host gradient calls
+# HostGradOverwrites::before_copy (fork/native/include/surogate_fork/host_grad_overwrites.h) with its destination
+# and size before it is enqueued, and zero_rest() zeroes only the buffers no copy of the step wrote (none in an
+# FFT run; a non-block gradient without device storage, or a layer whose offload was skipped, otherwise), once
+# per step, at start_micro_step(k > 0) or in wait_all_offloads, before the first reader. A copy that is the
+# step's first into a buffer and covers only part of it (shorter, or starting inside it) zeroes the whole buffer
+# in before_copy, before that copy is enqueued: upstream's order (memset, then copy). No call site makes such a
+# copy today (each copies the bytes() of the tensor the host buffer was allocated from); the rule keeps a future
+# one correct. Registered buffers may not overlap (add() throws). No zeroing races a copy: zero_rest() touches
+# only buffers no copy of the step wrote, before_copy() zeroes before the copy it precedes and only a buffer no
+# earlier copy of the step wrote, the previous step's copies finished in its wait_all_offloads, and the readers
+# are enqueued or run only later. cpu-step-contract replays the protocol (coverage gaps, copies shorter than the
+# buffer or at an offset, a tied buffer, a buffer without a device copy, GA 1-4) against the memset path and gets
+# the same bytes. Relies on step_cpu_streaming being the only reader of host gradients, after wait_all_offloads,
+# and on the three host-gradient copies of the grad store, each preceded by before_copy (test_cpu_step_hooks.py
+# pins both). The first version (49f42a6d) recorded a copy after enqueuing it and let a partial copy cover
+# nothing, so zero_rest() would have zeroed such a buffer under or after its copy; it made no partial copy.
 # Not a defect fix (no errata entry): the memset was redundant, not wrong. GPU behaviour is unchanged by
 # construction; dsl_grad_store.cpp is compile-checked for sm_120a only, and the 5090 check is in
 # fork/docs/performance.md ("cpu_training 主机端步").
@@ -439,6 +447,7 @@ tests = [
 ]
 conflict_history = [
     "2026-10-31 reverse replay of the T13 hunks onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: dsl_grad_store.cpp 0/0/0, dsl_grad_store.h 0/0/0 (upstream rewrote the streaming functions in 00aef092, #282, 2026-10-04, outside these lines)",
+    "2026-10-31 before_copy (the calls moved before the copies, one more before the later micro-steps' non-block copy): git merge-file of the fork's dsl_grad_store.{cpp,h} onto the upstream commits 90/30/14 days before the sync point, with and without the change, gives the same conflict blocks: cpp 3/3/0, h 1/1/0 (T14's, see T14)",
 ]
 
 [[topic]]

@@ -290,7 +290,7 @@ private:
 
     // CPU pinned storage for ALL layers' gradients
     std::unordered_map<std::string, Tensor> mCpuGrads;
-    // Which of them micro-step 0's D2H has overwritten: start_micro_step zeroes only the others (fork ledger T13).
+    // Which of them this step's D2H copies have written: only the others are zeroed (fork ledger T13).
     std::shared_ptr<surogate_fork::HostGradOverwrites> mHostOverwrites;
 
     // Double-buffered GPU gradient pool

@@ -1007,12 +1007,12 @@ void DslGradStore::offload_layer_grads(int layer_idx, cudaStream_t compute_strea
             auto grad_it = mGrads.find(name);
             auto cpu_it = mCpuGrads.find(name);
             if (grad_it == mGrads.end() || cpu_it == mCpuGrads.end()) continue;
+            mHostOverwrites->before_copy(cpu_it->second.Data, grad_it->second.bytes());  // fork ledger T13
             CUDA_CHECK(cudaMemcpyAsync(cpu_it->second.Data,
                                        grad_it->second.Data,
                                        grad_it->second.bytes(),
                                        cudaMemcpyDeviceToHost,
                                        copy_stream));
-            mHostOverwrites->overwritten(cpu_it->second.Data, grad_it->second.bytes());
         }
     } else {
         // Subsequent micro-steps: D2H to staging, then CPU accumulate in wait_all_offloads
@@ -1060,15 +1060,16 @@ void DslGradStore::offload_non_block_grads(cudaStream_t stream) {
         if (!grad_it->second.Data) continue;
 
         if (mMicroStep == 0) {
+            mHostOverwrites->before_copy(cpu_it->second.Data, grad_it->second.bytes());  // fork ledger T13
             CUDA_CHECK(cudaMemcpyAsync(cpu_it->second.Data,
                                        grad_it->second.Data,
                                        grad_it->second.bytes(),
                                        cudaMemcpyDeviceToHost,
                                        stream));
-            mHostOverwrites->overwritten(cpu_it->second.Data, grad_it->second.bytes());
         } else {
             // For non-block grads, accumulate was done on GPU via mAccumulateTensors
             // so GPU has the accumulated result. Just copy it.
+            mHostOverwrites->before_copy(cpu_it->second.Data, grad_it->second.bytes());  // fork ledger T13
             CUDA_CHECK(cudaMemcpyAsync(cpu_it->second.Data,
                                        grad_it->second.Data,
                                        grad_it->second.bytes(),

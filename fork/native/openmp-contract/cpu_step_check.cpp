@@ -23,6 +23,7 @@
 #include <limits>
 #include <pthread.h>
 #include <random>
+#include <stdexcept>
 #include <sched.h>
 #include <thread>
 #include <vector>
@@ -201,16 +202,24 @@ bool same_floats(const float* a, const float* b, std::size_t n) {
 
 // ---- 1. host gradient overwrites (T13) ------------------------------------------------------------------------
 
+// One copy into a host buffer: `len` elements at element `offset`.
+struct Copy {
+    std::size_t offset, len;
+};
+
 // A replay of DslGradStore's host-side protocol over random steps. Buffers 0..L-1 are block gradients (one layer
 // each), L the buffer a tied embedding and lm_head share (copied under both names), L+1 a non-block gradient
 // whose device buffer is null (never copied). Device values are fresh random bytes per micro-step. `old_host`
-// takes upstream's memset at micro-step 0; `new_host` uses HostGradOverwrites as dsl_grad_store.cpp does.
+// takes upstream's memset at micro-step 0; `new_host` calls HostGradOverwrites as dsl_grad_store.cpp does. Each
+// micro-step-0 copy into a block gradient is, at random, skipped (a coverage gap), whole (what the grad store
+// enqueues), or one or two partial copies (shorter than the buffer, or at an offset), which only a future copy
+// could make: the memset path gives those the copied ranges over zeros.
 void check_overwrites_protocol() {
     constexpr int L = 6;
     std::mt19937_64 rng(7);
     std::vector<std::size_t> sizes;
     for (int i = 0; i < L; ++i)
-        sizes.push_back(1 + rng() % 3000);
+        sizes.push_back(2 + rng() % 3000);
     sizes.push_back(2048);  // tied embedding/lm_head
     sizes.push_back(77);    // non-block gradient with no device buffer
     const auto fill = [&](std::vector<std::uint16_t>& b) {
@@ -232,7 +241,42 @@ void check_overwrites_protocol() {
            static_cast<long long>(overwrites.buffers()),
            static_cast<long long>(sizes.size()));
 
-    for (int step = 0; step < 40; ++step) {
+    // The copies of one micro-step-0 D2H into a buffer of n elements.
+    const auto copies_of = [&](std::size_t n) {
+        std::vector<Copy> copies;
+        switch (rng() % 6) {
+            case 0: break;                                              // no copy: a coverage gap
+            case 1: copies.push_back({0, 1 + rng() % (n - 1)}); break;  // shorter than the buffer
+            case 2: {                                                   // inside the buffer, at an offset
+                const std::size_t offset = 1 + rng() % (n - 1);
+                copies.push_back({offset, 1 + rng() % (n - offset)});
+                break;
+            }
+            case 3: {  // two halves, which cover the buffer together
+                const std::size_t half = 1 + rng() % (n - 1);
+                copies.push_back({half, n - half});
+                copies.push_back({0, half});
+                break;
+            }
+            default: copies.push_back({0, n}); break;  // the whole buffer, as dsl_grad_store.cpp copies today
+        }
+        return copies;
+    };
+    // Copies `device` into `old_host[b]` and `new_host[b]` as `copies` say, calling before_copy first.
+    const auto copy_into =
+        [&](std::size_t b, const std::vector<std::uint16_t>& device, const std::vector<Copy>& copies, bool record) {
+            for (const Copy& c : copies) {
+                if (record) overwrites.before_copy(new_host[b].data() + c.offset, c.len * 2);
+                std::copy_n(device.begin() + static_cast<long>(c.offset),
+                            c.len,
+                            old_host[b].begin() + static_cast<long>(c.offset));
+                std::copy_n(device.begin() + static_cast<long>(c.offset),
+                            c.len,
+                            new_host[b].begin() + static_cast<long>(c.offset));
+            }
+        };
+
+    for (int step = 0; step < 200; ++step) {
         const int ga = 1 + static_cast<int>(rng() % 4);
         for (int micro = 0; micro < ga; ++micro) {
             // start_micro_step
@@ -243,28 +287,23 @@ void check_overwrites_protocol() {
             } else {
                 overwrites.zero_rest();
             }
-            // backward: each layer's D2H (sometimes skipped, to model a coverage gap), then the non-block copies
+            // backward: each layer's D2H, then the non-block copies
             for (int layer = L - 1; layer >= 0; --layer) {
-                if (rng() % 5 == 0) continue;
-                std::vector<std::uint16_t> device(sizes[layer]);
+                const std::size_t n = sizes[layer];
+                std::vector<std::uint16_t> device(n);
                 fill(device);
                 if (micro == 0) {
-                    old_host[layer] = device;
-                    new_host[layer] = device;
-                    overwrites.overwritten(new_host[layer].data(), sizes[layer] * 2);
-                } else {
-                    ref_add_bf16(old_host[layer].data(), device.data(), sizes[layer]);
-                    ref_add_bf16(new_host[layer].data(), device.data(), sizes[layer]);
+                    copy_into(layer, device, copies_of(n), true);
+                } else if (rng() % 5 != 0) {
+                    ref_add_bf16(old_host[layer].data(), device.data(), n);
+                    ref_add_bf16(new_host[layer].data(), device.data(), n);
                 }
             }
-            if (rng() % 4 != 0) {  // the tied gradient, copied under both names
+            if (rng() % 4 != 0) {  // the tied gradient, copied whole under both names (later micro-steps too)
                 std::vector<std::uint16_t> device(sizes[L]);
                 fill(device);
-                for (int name = 0; name < 2; ++name) {
-                    old_host[L] = device;
-                    new_host[L] = device;
-                    if (micro == 0) overwrites.overwritten(new_host[L].data(), sizes[L] * 2);
-                }
+                for (int name = 0; name < 2; ++name)
+                    copy_into(L, device, {{0, sizes[L]}}, true);
             }
         }
         overwrites.zero_rest();  // wait_all_offloads
@@ -279,24 +318,63 @@ void check_overwrites_protocol() {
 }
 
 void check_overwrites_rules() {
-    std::vector<float> a(100, 1.0f), b(50, 2.0f);
+    std::vector<float> a(100, 1.0f), b(50, 2.0f), c(64, 3.0f), d(64, 4.0f);
     surogate_fork::HostGradOverwrites o;
     o.add(a.data(), a.size() * 4);
     o.add(b.data(), b.size() * 4);
+    o.add(c.data(), c.size() * 4);
+    o.add(d.data(), 32 * 4);  // two adjacent buffers
+    o.add(d.data() + 32, 32 * 4);
     o.add(nullptr, 16);  // a gradient without storage registers nothing
-    expect(o.buffers() == 2, "null buffers do not register", static_cast<long long>(o.buffers()), 2);
+    expect(o.buffers() == 5, "null buffers do not register", static_cast<long long>(o.buffers()), 5);
+    bool threw = false;
+    try {
+        o.add(a.data() + 10, 8);  // a view into a registered buffer
+    } catch (const std::logic_error&) {
+        threw = true;
+    }
+    expect(threw, "an overlapping registration throws", threw, 1);
+    threw = false;
+    try {
+        o.add(d.data(), 33 * 4);  // the first of the adjacent buffers grown into the second
+    } catch (const std::logic_error&) {
+        threw = true;
+    }
+    expect(threw, "a registration grown into the next buffer throws", threw, 1);
+
     expect(o.zero_rest() == 0, "zero_rest before begin_step zeroes nothing", 0, 0);
+    expect(o.before_copy(a.data(), 8) == 0 && a[0] == 1.0f, "before_copy outside a step does nothing", 0, 0);
     o.begin_step();
-    o.overwritten(a.data(), a.size() * 4 - 4);  // a copy shorter than the buffer does not cover it
-    o.overwritten(b.data(), b.size() * 4);
-    const std::size_t zeroed = o.zero_rest();
-    expect(zeroed == a.size() * 4,
-           "only the uncovered buffer is zeroed",
+    std::size_t zeroed = o.before_copy(b.data(), b.size() * 4);
+    expect(zeroed == 0 && b[0] == 2.0f, "a copy over a whole buffer zeroes nothing", static_cast<long long>(zeroed), 0);
+    zeroed = o.before_copy(a.data(), a.size() * 4 - 4);
+    expect(zeroed == a.size() * 4 && a[0] == 0.0f && a[99] == 0.0f,
+           "a copy shorter than its buffer zeroes it first",
            static_cast<long long>(zeroed),
            static_cast<long long>(a.size() * 4));
-    expect(a[0] == 0.0f && a[99] == 0.0f && b[0] == 2.0f, "zeroed and kept contents", 0, 0);
-    a.assign(a.size(), 3.0f);
-    expect(o.zero_rest() == 0 && a[0] == 3.0f, "zero_rest runs once per step", static_cast<long long>(a[0]), 3);
+    std::fill(a.begin(), a.end() - 1, 5.0f);  // that copy lands
+    zeroed = o.before_copy(a.data() + 50, 40);
+    expect(zeroed == 0 && a[0] == 5.0f, "a later copy into the same buffer keeps the earlier one", 0, 0);
+    std::fill(a.begin() + 50, a.begin() + 60, 6.0f);
+    zeroed = o.before_copy(d.data() + 16, 32 * 4);
+    expect(zeroed == 64 * 4 && d[0] == 0.0f && d[63] == 0.0f,
+           "a copy across two buffers, covering neither, zeroes both",
+           static_cast<long long>(zeroed),
+           64 * 4);
+    zeroed = o.zero_rest();
+    expect(zeroed == c.size() * 4,
+           "zero_rest zeroes only the buffer no copy wrote",
+           static_cast<long long>(zeroed),
+           256);
+    expect(c[0] == 0.0f && b[49] == 2.0f && a[0] == 5.0f && a[55] == 6.0f && a[99] == 0.0f,
+           "zeroed and kept contents",
+           0,
+           0);
+    c.assign(c.size(), 3.0f);
+    expect(o.zero_rest() == 0 && c[0] == 3.0f, "zero_rest runs once per step", static_cast<long long>(c[0]), 3);
+    expect(o.before_copy(c.data() + 1, 8) == 0 && c[0] == 3.0f, "before_copy after zero_rest does nothing", 0, 0);
+    o.begin_step();
+    expect(o.zero_rest() == (100 + 50 + 64 + 64) * 4, "the next step starts over", 0, 0);
 }
 
 // ---- 2. host gradient additions (T14) -------------------------------------------------------------------------

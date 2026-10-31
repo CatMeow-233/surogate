@@ -65,19 +65,26 @@ def test_micro_step_zero_records_instead_of_zeroing():
     )
 
 
-def test_every_micro_step_zero_copy_into_a_host_gradient_is_recorded():
-    """Each D2H into a host gradient at micro-step 0 marks its buffer, so zero_rest leaves only uncovered ones."""
+# Each copy into a host gradient calls before_copy() with the copy's destination and size before it is enqueued:
+# a copy over part of a buffer must zero it first, as upstream's memset did (host_grad_overwrites.h).
+HOST_COPY = "CUDA_CHECK(cudaMemcpyAsync(cpu_it->second.Data, grad_it->second.Data, grad_it->second.bytes(),"
+RECORDED_HOST_COPY = (
+    "mHostOverwrites->before_copy(cpu_it->second.Data, grad_it->second.bytes()); // fork ledger T13 " + HOST_COPY
+)
+
+
+def test_every_copy_into_a_host_gradient_calls_before_copy_first():
+    """zero_rest leaves only buffers no copy wrote; a copy enqueued before before_copy could be zeroed under it."""
     layer = body(GRAD_STORE, r"void DslGradStore::offload_layer_grads\(")
     first = block_after(layer, "if (mMicroStep == 0) {")
-    assert first.count("cudaMemcpyAsync(cpu_it->second.Data,") == 1
-    assert first.count("mHostOverwrites->overwritten(cpu_it->second.Data, grad_it->second.bytes());") == 1
+    assert first.count(HOST_COPY) == first.count(RECORDED_HOST_COPY) == 1
     non_block = body(GRAD_STORE, r"void DslGradStore::offload_non_block_grads\(")
-    first = block_after(non_block, "if (mMicroStep == 0) {")
-    assert first.count("cudaMemcpyAsync(cpu_it->second.Data,") == 1
-    assert first.count("mHostOverwrites->overwritten(cpu_it->second.Data, grad_it->second.bytes());") == 1
-    # The only copies into host gradients in the grad store: the two above and the non-block copy of later
-    # micro-steps, which overwrites a buffer micro-step 0 has already zeroed or covered.
-    assert GRAD_STORE.read_text(encoding="utf-8").count("cudaMemcpyAsync(cpu_it->second.Data,") == 3
+    # micro-step 0's copy and the later micro-steps' copy of the GPU-accumulated value
+    assert non_block.count(HOST_COPY) == non_block.count(RECORDED_HOST_COPY) == 2
+    # The only copies into host gradients in the grad store are these three.
+    whole = " ".join(GRAD_STORE.read_text(encoding="utf-8").split())
+    assert whole.count("cudaMemcpyAsync(cpu_it->second.Data,") == whole.count(RECORDED_HOST_COPY) == 3
+    assert "overwritten(" not in whole, "the recorder's call after the copy is back: call before_copy() first"
 
 
 def test_the_optimizer_reads_host_gradients_only_after_wait_all_offloads():
