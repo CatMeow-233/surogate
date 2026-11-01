@@ -297,7 +297,8 @@ void DslGradStore::start_micro_step(cudaStream_t stream, int micro_step, int tot
     if (!mAccumulate) {
         zero_all(stream);
         // Streaming mode: this micro-step's D2H overwrites the CPU gradients, and those it does not reach are
-        // zeroed before their first reader (zero_rest below and in wait_all_offloads; fork ledger T13).
+        // zeroed before their first reader (zero_rest below and in wait_all_offloads; fork ledger T13). With
+        // SUROGATE_FORK_HOST_GRAD_MEMSET=1, begin_step() memsets them all here instead, as upstream did.
         if (mStreamGrads) {
             mHostOverwrites->begin_step();
             // Zero the norm accumulator
@@ -819,7 +820,7 @@ void DslGradStore::allocate_streaming_buffers(const DslParamStore& params) {
         if (gpu_grad.Data) host_of_device.emplace(gpu_grad.Data, host);
         mCpuGrads.emplace(name, host);
     }
-    mHostOverwrites = std::make_shared<surogate_fork::HostGradOverwrites>();
+    mHostOverwrites = std::make_shared<surogate_fork::HostGradOverwrites>(surogate_fork::host_grad_memset_enabled());
     for (const auto& [name, host] : mCpuGrads) {
         mHostOverwrites->add(host.Data, host.bytes());
     }

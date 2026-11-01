@@ -1,7 +1,8 @@
 """Source pins of ledger topics T13-T15 (the host side of the cpu_training step), runnable without CUDA.
 
 T13 drops the step-start memset of every host gradient (DslGradStore::start_micro_step) for HostGradOverwrites:
-micro-step 0's D2H copies are recorded and only the buffers they miss are zeroed, before their first reader. T14
+micro-step 0's D2H copies are recorded and only the buffers they miss are zeroed, before their first reader;
+SUROGATE_FORK_HOST_GRAD_MEMSET=1 restores upstream's memset there and leaves the recorder inert. T14
 adds an opt-in vectorized, team-parallel host addition (SUROGATE_FORK_HOST_GRAD_ACCUM=1) and an opt-in D2H stream of
 the grad store's own (SUROGATE_FORK_GRAD_D2H_STREAM=1). T15 adds an opt-in vectorized CPU AdamW
 (SUROGATE_FORK_CPU_ADAMW_SIMD=1). The CPU contract test (`fork/dev test openmp`, cpu-step-contract) checks the
@@ -15,6 +16,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[4]
 GRAD_STORE = REPO / "csrc/src/runtime/dsl/dsl_grad_store.cpp"
 GRAD_STORE_H = REPO / "csrc/src/runtime/dsl/dsl_grad_store.h"
+OVERWRITES_H = REPO / "fork/native/include/surogate_fork/host_grad_overwrites.h"
 CPU_ADAMW = REPO / "csrc/src/runtime/optimizers/cpu_adamw.cpp"
 KERNELS = REPO / "fork/native/src/cpu_step_kernels.cpp"
 KERNELS_H = REPO / "fork/native/include/surogate_fork/cpu_step_kernels.h"
@@ -106,11 +108,50 @@ def test_the_optimizer_reads_host_gradients_only_after_wait_all_offloads():
 
 
 def test_every_host_gradient_is_registered():
+    """The recorder takes the switch at construction and gets (Data, bytes()) of every mCpuGrads entry, in the order
+    upstream's step-start loop memset them: `for (auto& [name, cpu_grad] : mCpuGrads) std::memset(cpu_grad.Data, 0,
+    cpu_grad.bytes())`, which SUROGATE_FORK_HOST_GRAD_MEMSET=1 reproduces through begin_step()."""
     alloc = body(GRAD_STORE, r"void DslGradStore::allocate_streaming_buffers\(")
     assert (
-        "mHostOverwrites = std::make_shared<surogate_fork::HostGradOverwrites>(); "
+        "mHostOverwrites = std::make_shared<surogate_fork::HostGradOverwrites>("
+        "surogate_fork::host_grad_memset_enabled()); "
         "for (const auto& [name, host] : mCpuGrads) { mHostOverwrites->add(host.Data, host.bytes()); }"
     ) in alloc
+    # Registration iterates mCpuGrads after its last insertion, as upstream's loop did at every step: nothing else in
+    # the grad store inserts into it, so the registration order is the order upstream memset in.
+    whole = " ".join(GRAD_STORE.read_text(encoding="utf-8").split())
+    assert whole.count("mCpuGrads.emplace(") == 2 and alloc.count("mCpuGrads.emplace(") == 2
+    assert alloc.index("mCpuGrads.emplace(name, host);") < alloc.index("mHostOverwrites->add(")
+    assert "mCpuGrads.erase(" not in whole and "mCpuGrads[" not in whole and "mCpuGrads.clear(" not in whole
+
+
+def test_the_memset_switch_restores_upstreams_memset_and_disarms_the_recorder():
+    """SUROGATE_FORK_HOST_GRAD_MEMSET=1: begin_step() runs upstream's loop where it stood; nothing else zeroes."""
+    header = " ".join(OVERWRITES_H.read_text(encoding="utf-8").split())
+    assert 'inline constexpr const char* kHostGradMemsetEnv = "SUROGATE_FORK_HOST_GRAD_MEMSET";' in header
+    enabled = body(OVERWRITES_H, r"inline bool host_grad_memset_enabled\(")
+    assert enabled == (
+        "static const bool on = host_grad_memset_requested(std::getenv(kHostGradMemsetEnv)); return on;"
+    ), "the switch must be read once per process"
+    assert body(OVERWRITES_H, r"inline bool host_grad_memset_requested\(") == (
+        'return value != nullptr && std::strcmp(value, "1") == 0;'
+    )
+    add = body(OVERWRITES_H, r"void add\(")
+    assert add.startswith(
+        "if (!data || bytes == 0) return; if (mUpstreamMemset) { mUpstream.emplace_back(data, bytes); return; }"
+    )
+    begin = body(OVERWRITES_H, r"void begin_step\(")
+    assert begin.startswith(
+        "if (mUpstreamMemset) { for (const auto& [data, bytes] : mUpstream) std::memset(data, 0, bytes); return; }"
+    )
+    # mPending is only set past that return, and before_copy and zero_rest do nothing without it.
+    assert body(OVERWRITES_H, r"std::size_t before_copy\(").startswith("if (!mPending ||")
+    assert body(OVERWRITES_H, r"std::size_t zero_rest\(").startswith("if (!mPending) return 0;")
+    assert header.count("mPending = true;") == 1 and begin.endswith("mPending = true;")
+    # begin_step() stands where upstream's loop stood: start_micro_step(0) in streaming mode, after zero_all.
+    start = body(GRAD_STORE, r"void DslGradStore::start_micro_step\(")
+    first = block_after(start, "if (!mAccumulate) {")
+    assert first.startswith("zero_all(stream);") and first.index("zero_all(stream);") < first.index("begin_step();")
 
 
 # ---- T14 ------------------------------------------------------------------------------------------------------
@@ -252,6 +293,7 @@ def test_the_contract_references_compile_like_upstream():
 def test_the_topic_is_documented():
     doc = PERFORMANCE.read_text(encoding="utf-8")
     assert "HostGradOverwrites" in doc and "## cpu_training 主机端步" in doc
+    assert "`SUROGATE_FORK_HOST_GRAD_MEMSET=1`" in doc
 
 
 def test_the_switches_are_documented():

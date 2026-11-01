@@ -4,7 +4,8 @@
 // CPU contract of the cpu_training host step (fork ledgers T13-T15), without CUDA:
 //   1. surogate_fork::HostGradOverwrites: replaying DslGradStore's host-side protocol (micro-step 0 D2H
 //      overwrites, staged additions on later micro-steps, non-block copies, gaps in the coverage) gives the same
-//      host gradients as the upstream memset of every buffer at micro-step 0 (T13);
+//      host gradients as the upstream memset of every buffer at micro-step 0 (T13), both on T13's path and with
+//      SUROGATE_FORK_HOST_GRAD_MEMSET=1, which restores the memset and leaves the recorder inert;
 //   2. host_grad_add_bf16/f32 give the bits of DslGradStore::accumulate_staged_layer's loop, with the host
 //      __float2bfloat16 of cuda_bf16.hpp, for every BF16 `dst` value against a structured set of `src` values,
 //      at every team size and length (T14);
@@ -213,11 +214,13 @@ struct Copy {
 // A replay of DslGradStore's host-side protocol over random steps. Buffers 0..L-1 are block gradients (one layer
 // each), L the buffer a tied embedding and lm_head share (copied under both names), L+1 a non-block gradient
 // whose device buffer is null (never copied). Device values are fresh random bytes per micro-step. `old_host`
-// takes upstream's memset at micro-step 0; `new_host` calls HostGradOverwrites as dsl_grad_store.cpp does. Each
-// micro-step-0 copy into a block gradient is, at random, skipped (a coverage gap), whole (what the grad store
-// enqueues), or one or two partial copies (shorter than the buffer, or at an offset), which only a future copy
-// could make: the memset path gives those the copied ranges over zeros.
-void check_overwrites_protocol() {
+// takes upstream's memset at micro-step 0; `new_host` calls HostGradOverwrites as dsl_grad_store.cpp does, built
+// with `upstream_memset` as the grad store builds it from SUROGATE_FORK_HOST_GRAD_MEMSET. Each micro-step-0 copy
+// into a block gradient is, at random, skipped (a coverage gap), whole (what the grad store enqueues), or one or
+// two partial copies (shorter than the buffer, or at an offset), which only a future copy could make: the memset
+// path gives those the copied ranges over zeros. With `upstream_memset` the recorder's begin_step() must do that
+// memset and its before_copy() and zero_rest() must zero nothing.
+void check_overwrites_protocol(bool upstream_memset) {
     constexpr int L = 6;
     std::mt19937_64 rng(7);
     std::vector<std::size_t> sizes;
@@ -235,14 +238,17 @@ void check_overwrites_protocol() {
         fill(old_host.back());  // pinned memory starts with whatever it held
         new_host.push_back(old_host.back());
     }
-    surogate_fork::HostGradOverwrites overwrites;
+    surogate_fork::HostGradOverwrites overwrites(upstream_memset);
     for (std::size_t b = 0; b < sizes.size(); ++b)
         overwrites.add(new_host[b].data(), sizes[b] * 2);
     overwrites.add(new_host[L].data(), sizes[L] * 2);  // lm_head registers the embedding's buffer again
-    expect(overwrites.buffers() == sizes.size(),
-           "a shared buffer registers once",
+    // The memset switch keeps every registration, as upstream's loop memsets every name.
+    const std::size_t registered = upstream_memset ? sizes.size() + 1 : sizes.size();
+    expect(overwrites.buffers() == registered,
+           upstream_memset ? "with the memset switch every registration is kept" : "a shared buffer registers once",
            static_cast<long long>(overwrites.buffers()),
-           static_cast<long long>(sizes.size()));
+           static_cast<long long>(registered));
+    std::size_t recorder_zeroed = 0;  // the bytes before_copy() and zero_rest() zeroed
 
     // The copies of one micro-step-0 D2H into a buffer of n elements.
     const auto copies_of = [&](std::size_t n) {
@@ -269,7 +275,7 @@ void check_overwrites_protocol() {
     const auto copy_into =
         [&](std::size_t b, const std::vector<std::uint16_t>& device, const std::vector<Copy>& copies, bool record) {
             for (const Copy& c : copies) {
-                if (record) overwrites.before_copy(new_host[b].data() + c.offset, c.len * 2);
+                if (record) recorder_zeroed += overwrites.before_copy(new_host[b].data() + c.offset, c.len * 2);
                 std::copy_n(device.begin() + static_cast<long>(c.offset),
                             c.len,
                             old_host[b].begin() + static_cast<long>(c.offset));
@@ -288,7 +294,7 @@ void check_overwrites_protocol() {
                     std::fill(h.begin(), h.end(), 0);
                 overwrites.begin_step();
             } else {
-                overwrites.zero_rest();
+                recorder_zeroed += overwrites.zero_rest();
             }
             // backward: each layer's D2H, then the non-block copies
             for (int layer = L - 1; layer >= 0; --layer) {
@@ -309,15 +315,87 @@ void check_overwrites_protocol() {
                     copy_into(L, device, {{0, sizes[L]}}, true);
             }
         }
-        overwrites.zero_rest();  // wait_all_offloads
+        recorder_zeroed += overwrites.zero_rest();  // wait_all_offloads
         for (std::size_t b = 0; b < sizes.size(); ++b) {
             if (!same_bits(old_host[b].data(), new_host[b].data(), sizes[b] * 2)) {
-                std::fprintf(stderr, "FAIL: step %d buffer %zu differs from the memset path\n", step, b);
+                std::fprintf(stderr,
+                             "FAIL: step %d buffer %zu differs from the memset path%s\n",
+                             step,
+                             b,
+                             upstream_memset ? " with the memset switch" : "");
                 ++failures;
                 return;
             }
         }
     }
+    if (upstream_memset) {
+        expect(recorder_zeroed == 0,
+               "with the memset switch before_copy and zero_rest zero nothing",
+               static_cast<long long>(recorder_zeroed),
+               0);
+    } else {
+        expect(recorder_zeroed > 0,
+               "the replay's gaps and partial copies make T13 zero some buffers",
+               static_cast<long long>(recorder_zeroed),
+               1);
+    }
+}
+
+// SUROGATE_FORK_HOST_GRAD_MEMSET (T13's switch): only "1" turns it on, it is read once per process, and with it the
+// recorder memsets every registration in begin_step() and is otherwise inert. main() sets the variable to "1"
+// before anything reads it.
+void check_memset_switch() {
+    using surogate_fork::host_grad_memset_requested;
+    for (const char* off : {static_cast<const char*>(nullptr), "", "0", "true", "on", " 1", "1 ", "01", "2"}) {
+        if (host_grad_memset_requested(off)) {
+            std::fprintf(stderr, "FAIL: SUROGATE_FORK_HOST_GRAD_MEMSET=\"%s\" turns the memset switch on\n", off);
+            ++failures;
+        }
+    }
+    expect(host_grad_memset_requested("1"), "\"1\" turns the memset switch on", 0, 1);
+    expect(surogate_fork::host_grad_memset_enabled(), "SUROGATE_FORK_HOST_GRAD_MEMSET=1 is seen", 0, 1);
+    unsetenv(surogate_fork::kHostGradMemsetEnv);
+    expect(surogate_fork::host_grad_memset_enabled(), "the memset switch is read once per process", 0, 1);
+
+    std::vector<float> a(100, 1.0f), b(50, 2.0f);
+    surogate_fork::HostGradOverwrites o(true);
+    expect(o.upstream_memset() && !surogate_fork::HostGradOverwrites().upstream_memset(),
+           "the recorder takes the switch from its constructor and defaults to T13's path",
+           0,
+           1);
+    bool threw = false;
+    try {
+        o.add(a.data(), a.size() * 4);
+        o.add(a.data() + 10, 8);  // a view into a registered buffer: upstream checks nothing
+        o.add(b.data(), b.size() * 4);
+        o.add(nullptr, 16);
+    } catch (const std::logic_error&) {
+        threw = true;
+    }
+    expect(!threw, "with the memset switch an overlapping registration does not throw", threw, 0);
+    expect(o.buffers() == 3,
+           "with the memset switch every registration is kept",
+           static_cast<long long>(o.buffers()),
+           3);
+    std::size_t zeroed = o.before_copy(a.data(), 8) + o.zero_rest();
+    expect(zeroed == 0 && a[0] == 1.0f && b[0] == 2.0f, "nothing is zeroed before begin_step", 0, 0);
+    o.begin_step();
+    expect(std::all_of(a.begin(), a.end(), [](float x) { return bits(x) == 0; }) &&
+               std::all_of(b.begin(), b.end(), [](float x) { return bits(x) == 0; }),
+           "begin_step memsets every registration, as upstream's start_micro_step(0)",
+           0,
+           0);
+    std::fill(a.begin(), a.end(), 5.0f);  // micro-step 0's copies land
+    std::fill(b.begin(), b.end(), 6.0f);
+    zeroed = o.before_copy(a.data() + 10, 40);  // a partial first copy: T13 would zero `a` first
+    zeroed += o.zero_rest();                    // T13 would zero `b`, which no copy announced
+    zeroed += o.before_copy(b.data(), b.size() * 4);
+    expect(zeroed == 0 && a[0] == 5.0f && a[99] == 5.0f && b[0] == 6.0f && b[49] == 6.0f,
+           "with the memset switch before_copy and zero_rest neither zero nor report anything",
+           static_cast<long long>(zeroed),
+           0);
+    o.begin_step();
+    expect(bits(a[99]) == 0 && bits(b[49]) == 0, "each step starts with the memset again", 0, 0);
 }
 
 void check_overwrites_rules() {
@@ -559,10 +637,13 @@ void check_serial_group_teams(const std::vector<int>& cpus) {
 }  // namespace
 
 int main() {
-    setenv("SUROGATE_FORK_CPU_ADAMW_SIMD", "1", 1);  // read once, by check_adamw
+    setenv("SUROGATE_FORK_CPU_ADAMW_SIMD", "1", 1);     // read once, by check_adamw
+    setenv(surogate_fork::kHostGradMemsetEnv, "1", 1);  // read once, by check_memset_switch
     const std::vector<int> cpus = process_cpus();
     check_overwrites_rules();
-    check_overwrites_protocol();
+    check_overwrites_protocol(false);
+    check_overwrites_protocol(true);
+    check_memset_switch();
     // On a fresh thread: the main thread would stay registered as a caller on every CPU and halve later teams.
     std::thread(check_add_bf16_values).join();
     check_add_lengths_and_teams(cpus);

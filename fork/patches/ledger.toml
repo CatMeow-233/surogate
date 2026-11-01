@@ -459,7 +459,7 @@ conflict_history = [
 id = "T13"
 title = "cpu_training: no step-start memset of the host gradients"
 commits = ["796fdfa0", "e2f56d21"]
-switch = "always on (removes dead work; the host gradients are bit-identical)"
+switch = "on by default (removes dead work; the host gradients are bit-identical); SUROGATE_FORK_HOST_GRAD_MEMSET=1 restores upstream's step-start memset and leaves the recorder inert, for A/B runs (read once per process)"
 # DslGradStore::start_micro_step(0) memset every host gradient (mCpuGrads) on the rank thread before micro-step 0's
 # backward: 16.4 GB for Qwen3-8B (about 0.55-0.8 s on one desktop core; 1.9 s at the 8.6 GB/s this VM's memset
 # reaches). That micro-step's D2H copies, offload_layer_grads for block gradients and offload_non_block_grads for
@@ -480,9 +480,17 @@ switch = "always on (removes dead work; the host gradients are bit-identical)"
 # and on the three host-gradient copies of the grad store, each preceded by before_copy (test_cpu_step_hooks.py
 # pins both). The first version (796fdfa0) recorded a copy after enqueuing it and let a partial copy cover
 # nothing, so zero_rest() would have zeroed such a buffer under or after its copy; it made no partial copy.
+# SUROGATE_FORK_HOST_GRAD_MEMSET=1 (host_grad_memset_enabled() in host_grad_overwrites.h; exactly "1", read once per
+# process) gives the A/B and escape hatch the other perf topics have: allocate_streaming_buffers builds the recorder
+# with upstream_memset, so add() only lists each mCpuGrads entry (Data, bytes(), in the map's order, no merge and no
+# overlap check), begin_step() (in start_micro_step(0), where upstream's loop stood) memsets every entry as that loop
+# did, and before_copy()/zero_rest() never zero (mPending is never set). The upstream hunks stay as they are but for
+# the constructor argument; cpu-step-contract replays the protocol with the switch against the memset path and checks
+# the recorder zeroes nothing, the value rule and the once-per-process read; the pin checks the construction, the
+# registration order and the header's early returns.
 # Not a defect fix (no errata entry): the memset was redundant, not wrong. GPU behaviour is unchanged by
-# construction; dsl_grad_store.cpp is compile-checked for sm_120a only, and the 5090 check is in
-# fork/docs/performance.md ("cpu_training 主机端步").
+# construction; dsl_grad_store.cpp is compile-checked for sm_120a only, and the 5090 check (an A/B on one build,
+# with and without the switch) is in fork/docs/performance.md ("cpu_training 主机端步").
 files = [
     "csrc/src/runtime/dsl/dsl_grad_store.h",
     "csrc/src/runtime/dsl/dsl_grad_store.cpp",

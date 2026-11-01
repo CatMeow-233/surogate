@@ -27,27 +27,60 @@
 // Registered buffers do not overlap, except that one buffer can be registered more than once (a tied lm_head and
 // the embedding share one, ledger T10); add() throws std::logic_error on any other overlap.
 //
+// SUROGATE_FORK_HOST_GRAD_MEMSET=1 (host_grad_memset_enabled(), read once per process) restores upstream's path
+// for A/B runs and as an escape hatch: DslGradStore builds the recorder with upstream_memset, begin_step() (called
+// where upstream's loop stood, in start_micro_step(0)) memsets every registration in registration order, which is
+// the mCpuGrads order upstream's loop iterates, and the recorder is otherwise inert: add() neither merges nor checks
+// overlaps, and before_copy() and zero_rest() return 0 without touching memory.
+//
 // The class is plain host code (no CUDA), so the contract test compiles it without a GPU
-// (fork/native/openmp-contract/cpu_step_check.cpp: check_overwrites_rules and check_overwrites_protocol).
+// (fork/native/openmp-contract/cpu_step_check.cpp: check_overwrites_rules, check_overwrites_protocol and
+// check_memset_switch).
 #pragma once
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iterator>
 #include <map>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace surogate_fork {
 
+inline constexpr const char* kHostGradMemsetEnv = "SUROGATE_FORK_HOST_GRAD_MEMSET";
+
+// The value of SUROGATE_FORK_HOST_GRAD_MEMSET that turns upstream's memset back on: exactly "1", as the other
+// cpu_training switches (cpu_step_kernels.h). Unset or anything else keeps T13's path.
+inline bool host_grad_memset_requested(const char* value) {
+    return value != nullptr && std::strcmp(value, "1") == 0;
+}
+
+// Read once per process, so every grad store and step of a run takes the same path.
+inline bool host_grad_memset_enabled() {
+    static const bool on = host_grad_memset_requested(std::getenv(kHostGradMemsetEnv));
+    return on;
+}
+
 class HostGradOverwrites {
 public:
+    // upstream_memset: SUROGATE_FORK_HOST_GRAD_MEMSET=1 (see the top of this file).
+    explicit HostGradOverwrites(bool upstream_memset = false)
+        : mUpstreamMemset(upstream_memset) {
+    }
+
     // Registers a host buffer of `bytes` bytes. A buffer registered again (same start) keeps the larger size. On an
-    // overlap it throws and leaves the registrations as they were.
+    // overlap it throws and leaves the registrations as they were. With upstream_memset it only appends the
+    // registration, as given, to the list begin_step() memsets.
     void add(void* data, std::size_t bytes) {
         if (!data || bytes == 0) return;
+        if (mUpstreamMemset) {
+            mUpstream.emplace_back(data, bytes);
+            return;
+        }
         const std::uintptr_t start = address(data);
         auto next = mByStart.upper_bound(start);  // the first buffer that starts after this one
         auto same = next == mByStart.begin() ? mByStart.end() : std::prev(next);
@@ -64,15 +97,22 @@ public:
         }
     }
 
-    // The first micro-step of an optimizer step starts: no copy has written to any buffer in it yet.
+    // The first micro-step of an optimizer step starts: no copy has written to any buffer in it yet. With
+    // upstream_memset: upstream's memset of every registration, and nothing else.
     void begin_step() {
+        if (mUpstreamMemset) {
+            for (const auto& [data, bytes] : mUpstream)
+                std::memset(data, 0, bytes);
+            return;
+        }
         for (auto& entry : mByStart)
             entry.second.written = false;
         mPending = true;
     }
 
     // A copy of `bytes` bytes to `dst` is about to be enqueued: call this first. Returns the bytes it zeroed (see
-    // the top of this file): the buffers this copy is the first of the step to write to and does not cover.
+    // the top of this file): the buffers this copy is the first of the step to write to and does not cover. Never
+    // zeroes anything with upstream_memset (mPending stays false).
     std::size_t before_copy(const void* dst, std::size_t bytes) {
         if (!mPending || !dst || bytes == 0) return 0;
         const std::uintptr_t begin = address(dst);
@@ -93,7 +133,7 @@ public:
     }
 
     // Zeroes every buffer that no copy has written to since begin_step(), at most once per step, and returns the
-    // number of bytes it zeroed.
+    // number of bytes it zeroed. Never zeroes anything with upstream_memset (mPending stays false).
     std::size_t zero_rest() {
         if (!mPending) return 0;
         mPending = false;
@@ -107,8 +147,13 @@ public:
         return zeroed;
     }
 
+    // The distinct registered buffers; with upstream_memset, the registrations (begin_step() memsets each).
     [[nodiscard]] std::size_t buffers() const {
-        return mByStart.size();
+        return mUpstreamMemset ? mUpstream.size() : mByStart.size();
+    }
+
+    [[nodiscard]] bool upstream_memset() const {
+        return mUpstreamMemset;
     }
 
 private:
@@ -131,7 +176,9 @@ private:
     }
 
     std::map<std::uintptr_t, Buffer> mByStart;
-    bool mPending = false;  // begin_step() ran and zero_rest() has not
+    bool mPending = false;  // begin_step() ran and zero_rest() has not; never set with upstream_memset
+    bool mUpstreamMemset = false;
+    std::vector<std::pair<void*, std::size_t>> mUpstream;  // upstream_memset: the registrations, in order
 };
 
 }  // namespace surogate_fork

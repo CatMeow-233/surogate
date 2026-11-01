@@ -154,18 +154,20 @@ team 因而不超过调用线程掩码中的 CPU 数；同一组 CPU 上的几�
 
 | 改动 | ledger | 开关 | 数值 |
 |---|---|---|---|
-| 删去 micro-step 0 对每个主机梯度的 memset | T13 | 始终开启（去掉的是冗余工作） | 主机梯度逐字节相同 |
+| 删去 micro-step 0 对每个主机梯度的 memset | T13 | 默认开启（去掉的是冗余工作）；`SUROGATE_FORK_HOST_GRAD_MEMSET=1` 恢复上游的 memset | 主机梯度逐字节相同 |
 | 主机梯度加法向量化，并在 `OmpTeam` 的 team 上并行 | T14 | `SUROGATE_FORK_HOST_GRAD_ACCUM=1` | BF16 逐位相同；FP32 除 NaN 的 payload 外逐位相同 |
 | 块梯度的 D2H 与主机加法移到 grad store 自己的 stream | T14 | `SUROGATE_FORK_GRAD_D2H_STREAM=1` | 不改变数值，只改变排队的 stream |
 | CPU AdamW 向量化 | T15 | `SUROGATE_FORK_CPU_ADAMW_SIMD=1` | 基线 ISA 没有 FMA 的构建（上游的 x86-64 wheel）中除 NaN 的 payload 外逐位相同；基线 ISA 有 FMA 时开关被忽略（见“数值”） |
 
-T14、T15 的开关默认关闭，关闭时行为与上游相同；进程中第一次用到时读取一次环境变量，只有值恰好为 `1` 时开启。
+T13 默认开启，`SUROGATE_FORK_HOST_GRAD_MEMSET=1` 恢复上游的做法；T14、T15 的开关默认关闭，关闭时行为与上游相同。四个开关都在进程中第一次用到时读取一次环境变量，只有值恰好为 `1` 时生效。
 
 ### 步开始的清零（T13）
 
 上游在 `DslGradStore::start_micro_step(0)` 中、micro-step 0 的反向排队之前，在 rank 线程上逐个 `std::memset` 全部主机梯度：Qwen3-8B 是 16.4 GB，桌面 CPU 的单核约 0.55–0.8 s；本机单线程 memset 约 8.5 GB/s（见下文测量），16.4 GB 约 1.9 s。这段时间里 rank 线程不排队反向，只有已经排队的前向能遮住它。而 micro-step 0 的 D2H（块梯度的 `offload_layer_grads`、其余梯度的 `offload_non_block_grads`）在任何读取之前就整块覆盖了这些缓冲。
 
 grad store 在排队每次写入主机梯度的拷贝之前，调用 `fork/native/include/surogate_fork/host_grad_overwrites.h` 中 `HostGradOverwrites` 的 `before_copy()`，传入与拷贝相同的目标地址和字节数；`zero_rest()` 每步至多一次，只清零这一步没有任何拷贝写过的缓冲，调用点在第一个读者之前：micro-step 1 起的 `start_micro_step`，以及只有一个 micro-step 时的 `wait_all_offloads`。全参微调中没有这样的缓冲；没有设备存储的非块梯度、或某层在 micro-step 0 没有卸载时才会有。如果某个缓冲这一步的第一次拷贝只覆盖它的一部分（比缓冲短，或从缓冲中间开始），`before_copy()` 在这次拷贝排队之前就把整个缓冲清零，与上游先 memset 再拷贝的顺序相同。现在的三处拷贝都按分配主机缓冲时所用张量的 `bytes()` 整块拷贝，不会走到这一步；这条规则保证以后新增的部分拷贝结果也正确。主机梯度因此与 memset 路径逐字节相同：整块覆盖的缓冲，两种做法都是拷贝来的字节；部分覆盖的缓冲，两种做法都是在零上叠加各次拷贝；其余缓冲，两种做法在第一次被读之前都是零。清零不会与 GPU 竞争：`zero_rest()` 只清零这一步没有拷贝写过的缓冲；`before_copy()` 只在这一步还没有拷贝写过该缓冲时清零，并且在它对应的拷贝排队之前完成；上一步的拷贝已在上一步的 `wait_all_offloads` 中完成；读这些缓冲的主机函数和优化器都在清零之后才排队或运行。主机梯度唯一的读者是 `step_cpu_streaming`，它在 `wait_all_offloads` 之后读；源码 pin `fork/patches/tests/native/test_cpu_step_hooks.py` 检查这一点，并检查 grad store 中写入主机梯度的三处拷贝都先调用 `before_copy()`。`fork/dev test openmp` 中的 `cpu-step-contract` 在随机的 GA（1–4）、覆盖缺口、比缓冲短或从中间开始的拷贝、共用的 tied 缓冲和没有设备拷贝的缓冲上重放这个协议，与 memset 路径逐字节比较。
+
+开关 `SUROGATE_FORK_HOST_GRAD_MEMSET=1`（`host_grad_memset_enabled()`）恢复上游的 memset，用于在同一个构建上做 A/B，也是怀疑 T13 时的退路。`allocate_streaming_buffers` 以 `upstream_memset` 构建 `HostGradOverwrites`：`add()` 只按 `mCpuGrads` 的遍历顺序记下每一项的 `Data` 与 `bytes()`（不合并共用的缓冲，也不检查重叠，与上游一样不会因此抛异常）；`begin_step()` 仍在 `start_micro_step(0)` 中、`zero_all` 之后，即上游循环原来的位置，逐项 memset，与上游的循环相同；`before_copy()` 与 `zero_rest()` 不清零任何字节。上游文件中只有构建记录器的那一行多了这个参数，调用点不变。`cpu-step-contract` 在开关打开时同样重放上面的协议，与 memset 路径逐字节比较，并确认记录器没有清零任何字节；它还检查只有恰好为 `1` 的值生效、进程中只读取一次（读过之后再改环境变量不起作用）。源码 pin 检查 grad store 构建记录器时传入开关、登记的是 `mCpuGrads` 的每一项，以及头文件中开关打开时的提前返回。
 
 ### 主机梯度加法（T14）
 
@@ -251,7 +253,7 @@ CPU AdamW 一整步（T15，`SUROGATE_FORK_CPU_ADAMW_SIMD=1`），小模型的�
 
 没有 GPU：GPU 上的行为由代码阅读确定；`dsl_grad_store.cpp`、`graph_executor.cpp`、`py_train.cpp`、`adamw_8bit_optimizer.cpp`、`cpu_adamw.cpp` 与 `cpu_step_kernels.cpp` 只按 sm_120a 构建的编译命令编译检查过。在 RTX 5090 主机上依次检查下列各项，配置都是 `examples/training/cpu-offload.yaml` 改为 `model: Qwen/Qwen3-8B`、`max_steps: 20`（下称 C8），用 `surogate sft C8` 运行：
 
-1. T13：在 T13 的提交与它的父提交 `488e5f00` 上各运行一次 C8。每步记录的 loss 与梯度范数应逐位相同（先在父提交上连跑两次，确认这个配置本身可复现）；`step_seconds` 应减少，至多减少 memset 的时间（16.4 GB 除以主机单核的 memset 带宽），实际减少量取决于已排队的前向遮住了多少。
+1. T13：在同一个构建（当前 HEAD）上运行 C8，一次设 `SUROGATE_FORK_HOST_GRAD_MEMSET=1`（上游的 memset），一次不设（T13）；两次只有 T13 不同。先设开关连跑两次，确认这个配置本身可复现。每步记录的 loss 与梯度范数应逐位相同；不设开关的一次 `step_seconds` 应更短，至多短 memset 的时间（16.4 GB 除以主机单核的 memset 带宽），实际减少量取决于已排队的前向遮住了多少。不要比较 T13 的提交与它的父提交：本分支落地时把各 topic 依次放到一条线上，796fdfa0 的父提交是 1bba063b，而 488e5f00 与 796fdfa0 之间还有 T17–T29 等提交，比较这两个提交分不出 T13；796fdfa0 与 1bba063b 只差 T13 的第一版，没有 e2f56d21 的 `before_copy()`。
 2. T14 的加法：C8 分别不设与设置 `SUROGATE_FORK_HOST_GRAD_ACCUM=1`。两者每步的梯度范数与 loss 应逐位相同（主机梯度逐位相同）。训练时先用 `grep -H Cpus_allowed_list /proc/<pid>/task/*/status` 记下 rank 线程、回调线程和 team 线程的掩码（主机函数的 team 应是回调线程掩码中的 CPU 数减 1，`OMP_NUM_THREADS` 更小时取它）。再用 `nsys profile -t cuda,osrt -s cpu -o t14 surogate sft C8` 比较 micro-step 1–3 与 micro-step 0 的每层反向耗时（目标：不超过 1.3 倍）和回调线程上主机函数的时长，并看主机函数运行期间 rank 线程是否占着一个 CPU（CPU 采样，或训练时 `top -H -p <pid>`）。然后按 team 大小比较 micro-step 1–3 的每层反向耗时：默认（掩码减 1）、`OMP_NUM_THREADS` 设为掩码的一半，以及本项修正之前的 `ce939c53`（主机函数得到整个掩码）。默认应不慢于另外两种；如果整个掩码更快（rank 线程这时并不占 CPU），把三组数字记在 ledger T14 的 `conflict_history` 中，再决定是否去掉这一个 CPU 的预留。
 3. T14 的 stream：再加 `SUROGATE_FORK_GRAD_D2H_STREAM=1`。nsys 中块梯度的 D2H 应出现在一条与权重预取的 H2D 不同的 stream 上，权重预取不再排在主机函数之后；梯度范数与 loss 与第 2 项逐位相同。先用 `deviceQuery` 记下 `asyncEngineCount`（为 2 时 D2H 与 H2D 可以同时进行）。有两张卡时加 `world_size: 2` 再跑一次，检查 NCCL 归约（`reduce_done`）之后的 D2H。
 4. T15：C8 改为 `max_steps: 5`、`save_steps: 5`，分别不设与设置 `SUROGATE_FORK_CPU_ADAMW_SIMD=1`。5090 主机是 x86-64：用 fork 的 x86-64 wheel，或不在 CXXFLAGS 中选 FMA 的本地构建；第二次的日志中不应出现 `SUROGATE_FORK_CPU_ADAMW_SIMD=1 is ignored`。两次的 loss 应逐位相同，checkpoint 中权重分片的 sha256 应相同；nsys 中最后一个反向 kernel 到下一步第一个前向 kernel 之间的空隙（CPU 优化器步）应缩短。
