@@ -1158,7 +1158,7 @@ conflict_history = [
 id = "T29"
 title = "the native GRPO SharedServer evicts retained KV before it sleeps"
 commits = ["deec1701"]
-switch = "always on (removes dead work, identical results); SUROGATE_SHARED_SLEEP_KEEP_KV=1 restores upstream's order for A/B runs (read once per process)"
+switch = "on by default (removes dead work, identical results); SUROGATE_SHARED_SLEEP_KEEP_KV=1 restores upstream's order for A/B runs (read once per process)"
 # generation_service.cpp keeps one hunk in GenerationService::begin_shared_training: after the drain loop and inside
 # the try, a static `keep_kv` read from SUROGATE_SHARED_SLEEP_KEEP_KV and `if (!keep_kv) { engine_->shrink_kv(); }`
 # before `engine_->sleep();`. Upstream slept with the finished lanes' prefixes retained, so ElasticKvRegion::sleep

@@ -19,7 +19,7 @@
 | §0 #7 | documented | 2737f5b8 | none | [errata](../upstream-errata.md#asyncstaleadamw-的注释声称已接入-dispatch-pp) |
 | R2 step 1 | implemented, opt-in: `SUROGATE_FORK_HOST_GRAD_ACCUM=1` and `SUROGATE_FORK_GRAD_D2H_STREAM=1`; step 2 deferred | be5b9191, 54954e9b | T14 | [performance.md](../performance.md#cpu_training-主机端步) |
 | R4 | implemented differently: text built and parsed once, on the step that ends the completion, with no incremental detokenisation; a request with stop strings still decodes the whole completion on each step to check them (`SUROGATE_GRPO_DETOK=final`, default); windowed stop check (`incremental`, opt-in); live-session round dispatch (`SUROGATE_GRPO_LIVE_DISPATCH=1`, opt-in) | afe88d26, 2586d3ac, e7ee206a | T11, T12 | [performance.md](../performance.md#grpo-训练路径-rollout-服务的主机开销) |
-| R8 | implemented, always on; `SUROGATE_SHARED_SLEEP_KEEP_KV=1` restores upstream's order | deec1701 | T29 | [performance.md](../performance.md#原生-grpo-sharedserver-睡眠前释放保留的-kvledger-t29) |
+| R8 | implemented, on by default; `SUROGATE_SHARED_SLEEP_KEEP_KV=1` restores upstream's order | deec1701 | T29 | [performance.md](../performance.md#原生-grpo-sharedserver-睡眠前释放保留的-kvledger-t29) |
 | R22 | implemented as the §0 #3 fix | 6bcf5231, ae28bc19 | T28 | [performance.md](../performance.md#grpo-训练路径服务的排队与中止ledger-t28) |
 | R12 | open; its hazard, defect 0.2, is guarded | none | none | |
 | R32 | open, now unblocked: defect 0.1 is fixed | none | none | |
@@ -60,7 +60,7 @@ Items the code or literature skeptics refuted are removed. Their corrections are
 2. **R2, cpu_training FFT.** Host gradient accumulation runs as a scalar loop inside a host function and blocks the gradient-copy/prefetch stream. Parallelising it with OpenMP is an S change and could cut an 8B FFT step by 30-50%. **Status: step 1 landed as T14 (opt-in).**
 3. **R3, experimental backend.** Turning gradient checkpointing off in the 5090 LISA/LoRA configs gives 1.25-1.35x. The corrected memory estimate shows it fits.
 4. **R4, GRPO training-path server.** This server handles every MoE, GLM and non-Qwen model. Incremental detokenisation plus round dispatch based on live sessions gives about 1.2x rollout for MoE at 1k-token completions, and the gain grows with length. **Status: landed differently. T11's default mode (`SUROGATE_GRPO_DETOK=final`) does no incremental detokenisation: it builds and parses the text once, on the step that ends the completion (a request with stop strings still decodes the whole completion on each step to check them). The windowed stop-string check is `SUROGATE_GRPO_DETOK=incremental`, opt-in. Live-session dispatch is T12 (`SUROGATE_GRPO_LIVE_DISPATCH=1`), opt-in.**
-5. **R8, native GRPO server.** One line, `shrink_kv()` before `sleep()`, removes 2-3 s per step of pinned KV backup and restore. **Status: landed as T29 (always on); the skeptic's corrected saving is about 0.8-3 s per step at C=16.**
+5. **R8, native GRPO server.** One line, `shrink_kv()` before `sleep()`, removes 2-3 s per step of pinned KV backup and restore. **Status: landed as T29 (on by default; `SUROGATE_SHARED_SLEEP_KEEP_KV=1` restores upstream's order); the skeptic's corrected saving is about 0.8-3 s per step at C=16.**
 
 ---
 
@@ -306,7 +306,7 @@ Ordering notes:
 - **Success.** ≥ 1.3x on data with mean length ≤ 600 tokens; per-document loss parity; peak no higher than one 2048-token row.
 
 ### R8. Discard retained prefix KV before sleep (native SharedServer)
-- **Status: implemented in deec1701 (ledger T29), always on.** `SUROGATE_SHARED_SLEEP_KEEP_KV=1` restores upstream's order for A/B runs, as proposed. The code skeptic corrected the expected saving to about 0.8-3 s per step at C=16, growing with context and C. The `SUROGATE_SLEEP_DEBUG` timings named below do not cover the elastic KV hooks; the `engine: awake, restored ... GiB` line does. The 5090 check is in [performance.md](../performance.md#原生-grpo-sharedserver-睡眠前释放保留的-kvledger-t29).
+- **Status: implemented in deec1701 (ledger T29), on by default.** `SUROGATE_SHARED_SLEEP_KEEP_KV=1` restores upstream's order for A/B runs, as proposed. The code skeptic corrected the expected saving to about 0.8-3 s per step at C=16, growing with context and C. The `SUROGATE_SLEEP_DEBUG` timings named below do not cover the elastic KV hooks; the `engine: awake, restored ... GiB` line does. The 5090 check is in [performance.md](../performance.md#原生-grpo-sharedserver-睡眠前释放保留的-kvledger-t29).
 - **Evidence.**
   - `generation_service.cpp:2189-2211` sleeps without `shrink_kv`.
   - `elastic_kv_region.cu:648-720` does `cudaMallocHost` plus a synchronous `cudaMemcpy` for each used (granule, plane) of 2 MiB. That is about 2000 such pairs for 4 GB, plus `cudaFreeHost` at wake.

@@ -82,7 +82,7 @@
 | R5 | LISA 冻结 embedding/head 并截断反向 | W-EXP-LISA 每 microbatch FLOPs −22%（步约 −15–20%） | M | S | 未做 |
 | R6 | colocate 并发按空闲显存自动设定，停止补发多余请求 | W-0.6B-GRPO 周期 −13–20%（C 16→64，解析估计） | M | S | 未做 |
 | R7 | 实验训练器：GA 窗口内打包 + FA2 varlen | W-EXP-LoRA 在平均 300–600 token 的数据上 1.3–2 倍 tok/s | M | M | 未做 |
-| R8 | 原生 SharedServer 睡眠前丢弃保留的前缀 KV | W-0.6B-GRPO 周期 −8–14%（C=16）；W-8B-GRPO −2–3%；怀疑者修正后每步约省 0.8–3 s | M-H | S | 已实现，始终开启（T29） |
+| R8 | 原生 SharedServer 睡眠前丢弃保留的前缀 KV | W-0.6B-GRPO 周期 −8–14%（C=16）；W-8B-GRPO −2–3%；怀疑者修正后每步约省 0.8–3 s | M-H | S | 已实现，默认开启（T29） |
 | R9 | 实验训练器：Liger 融合 RMSNorm、RoPE、SwiGLU | W-EXP-LISA/LoRA 步 −8–15% | M | S | 未做 |
 | R10 | 实验训练器：关闭 PEFT 的输入 dtype 转换 | W-EXP-LoRA 每 microbatch 40–70 ms（−8–14%） | M | S | 未做 |
 | R12 | 原生 SFT 的 eval 打包 | W-0.6B-SFT 默认 `eval_steps=100` 时墙钟 −8%，基准配置（`eval_steps` 25）约 −20% | H | S-M | 未做；它依赖的缺陷 0.2 已加保护（T18） |
@@ -166,7 +166,7 @@ serve 组另有两个应同时启动的门槛实验，它们需要少量新代�
 | [CPU AdamW 向量化](../performance.md#cpu-adamwt15) | train-native #7 | T15 | `SUROGATE_FORK_CPU_ADAMW_SIMD=1`，默认关闭；基线 ISA 有 FMA 的构建忽略它 | be5b9191、ce939c53 | C8 改为 5 步、`save_steps: 5`，设与不设：loss 逐位相同，权重分片 sha256 相同，日志中没有 “is ignored”，最后一个反向 kernel 到下一步前向之间的空隙缩短 |
 | [训练路径服务的非流式请求只在结束的一步构造文本](../performance.md#非流式请求只在结束的那一步构造文本t11) | python-rl R4 | T11 | `SUROGATE_GRPO_DETOK=final`，默认；`incremental`（另加 ByteLevel 窗口检查停止字符串）默认不用；`per_token` 恢复上游 | afe88d26、2586d3ac | 走训练路径的约 10B qwen3_moe LoRA `grpo-colocate` 至少 50 步，`per_token` vs 默认 vs 默认加 T12：比较 `train/pack_duration_ms`、`train/cycle_duration_ms` 中位数与有效 batch，MoE rollout 预期至少 1.15 倍；`max_concurrency=1` 时与 `per_token` 逐位相同 |
 | [decode 轮次按存活 session 决定大小](../performance.md#按存活-session-决定-decode-轮次的大小t12) | python-rl R4 | T12 | `SUROGATE_GRPO_LIVE_DISPATCH=1`，默认关闭 | e7ee206a | 同上一项的第三组：尾部轮次的有效 batch 约为 min(16, 存活数)，尾部的 pack 时间降低 |
-| [原生 GRPO SharedServer 睡眠前释放保留的 KV](../performance.md#原生-grpo-sharedserver-睡眠前释放保留的-kvledger-t29) | python-rl R8 | T29 | 始终开启（只去掉没人读的备份与恢复）；`SUROGATE_SHARED_SLEEP_KEEP_KV=1` 恢复上游顺序 | deec1701 | W-0.6B-GRPO 与 W-8B-GRPO 各 20 步，带与不带该开关：0.6B、C=16 时每步至少省 1 s；每步的 `cudaMallocHost`/`cudaFreeHost` 降到约 0；发布后第一轮的前缀命中与 rollout token 不变 |
+| [原生 GRPO SharedServer 睡眠前释放保留的 KV](../performance.md#原生-grpo-sharedserver-睡眠前释放保留的-kvledger-t29) | python-rl R8 | T29 | 默认开启（只去掉没人读的备份与恢复）；`SUROGATE_SHARED_SLEEP_KEEP_KV=1` 恢复上游顺序 | deec1701 | W-0.6B-GRPO 与 W-8B-GRPO 各 20 步，带与不带该开关：0.6B、C=16 时每步至少省 1 s；每步的 `cudaMallocHost`/`cudaFreeHost` 降到约 0；发布后第一轮的前缀命中与 rollout token 不变 |
 | [服务端注册 128 宽的 GQA 32q8、40q8 与 MHA 32q32](../performance.md#服务端-gqa-形状注册) | serve R1 | T16 | `SUROGATE_SERVE_GQA_FORK_SHAPES=1`，默认关闭（关闭时 MHA 与注册前一样被拒绝）；int8 KV 始终走通用 kernel | 7a45b4f7、2e5f766b | `make serve-test-build` 后在服务构建目录运行 `ctest -R '^sinfer_gqa_(attention|fork_shapes)'`，四个条目都通过；同一构建只切换开关跑 `sinfer_causal_softmax_attention_bench`；成功标准：16×4K BF16 解码至少 1.15 倍，30K 历史上 40 token 一轮不超过 10 ms，int8 KV 仍可服务 |
 
 另外两项性能相关的改动属于缺陷修复，已列在上一节：T28 的 FIFO 排队（python-rl R22，CPU 模拟中一批从 155.6 s 降到 74.1 s），以及 T19 在回放中少跑的统计 kernel。T13–T15 的 CPU 测量来自 `fork/native/bench/cpu-optimizer/step.sh`：它用构建目录中 `compile_commands.json` 记录的命令编译真实的 `cpu_adamw.cpp` 与 `cpu_step_kernels.cpp`，再按 ISA 做逐位检查，复现方法见 [performance.md](../performance.md#复现)。部分做了但未完成的：train-native #7 中的逐层 GPU 范数（只在 GA=1 时成立）推迟；python-rl R2 第二步（K 个暂存槽加专用累加线程）推迟；serve 的 F0 挂接点已有（`fork/native/cmake/fork_native.cmake` 的 `_surogate_fork_attach_serve()`），但目前只挂到 `sinfer_ops` 和 GQA 测试目标。
