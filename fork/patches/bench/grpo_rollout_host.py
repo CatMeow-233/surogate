@@ -6,14 +6,17 @@ numpy, torch, tokenizers and transformers, e.g. FORK_PY; nothing is installed):
   tokenizer DIR    train a Qwen2-style ByteLevel BPE (32k, Qwen2 split regex, chat and
                    tool specials) on the checkout's markdown and surogate/ sources, save to DIR
   per-token DIR    time SharedModelServer._generate per generated token with a scripted
-                   sampler (no scheduler, no GPU) at 1k/2k/4k tokens, with and without stop
-                   strings; prints a digest of each response so modes can be compared
+                   sampler (no scheduler, no GPU) at 1k/2k/4k tokens (--lengths), with and
+                   without stop strings; prints a digest of each response so modes can be
+                   compared
   rollout DIR MS   16 requests on real threads through generate() and the real
                    DecodeScheduler; the GPU round is time.sleep(MS) with the GIL released,
                    as the native decode call releases it; prints rollout tok/s
 
 Set SUROGATE_GRPO_DETOK and SUROGATE_GRPO_LIVE_DISPATCH to choose the modes. The results
-in fork/docs/performance.md were measured with these commands.
+in fork/docs/performance.md were measured with these commands; its T11 section says how to
+reproduce the column measured before T11. fork/patches/tests/grpo/test_shared_model_detok.py
+runs per-token and rollout at short lengths.
 """
 
 from __future__ import annotations
@@ -72,7 +75,7 @@ def completion_ids(tok, think: bool) -> list[int]:
     return tok.encode(("<think>\n" if think else "") + text, add_special_tokens=False)
 
 
-def per_token(tokdir: str, reps: int) -> None:
+def per_token(tokdir: str, reps: int, lengths=(1024, 2048, 4096)) -> None:
     from transformers import AutoTokenizer
 
     from surogate.grpo.shared_model import SharedModelServer
@@ -83,9 +86,16 @@ def per_token(tokdir: str, reps: int) -> None:
     server.tokenizer, server.config, server.vocab, server.context = tok, {}, len(tok), 1 << 20
     server.eos, server.persistent_decode, server.adapter = {tok.convert_tokens_to_ids("<|im_end|>")}, True, "policy"
     server.trainer = type("Trainer", (), dict(batch_size=1, seq_length=1 << 20, decode_batch_sample=None))()
+    try:  # T28's _generate calls admission.check_client() every step; code before T28 has neither
+        from surogate._fork.shared_admission import Admission
+    except ImportError:
+        pass
+    else:
+        # The constructor builds this; with no recorded connection check_client() returns at once.
+        server.admission = Admission(dict(max_concurrency=1))
     mode = os.environ.get("SUROGATE_GRPO_DETOK", "final")
     for stop in ([], ["</answer>", "\n\n\n\n"]):
-        for length in (1024, 2048, 4096):
+        for length in lengths:
             walls, cpus = [], []
             for _ in range(reps):
                 request = server.prepare(
@@ -200,6 +210,7 @@ def main() -> None:
     p = sub.add_parser("per-token")
     p.add_argument("dir")
     p.add_argument("--reps", type=int, default=5)
+    p.add_argument("--lengths", type=int, nargs="+", default=[1024, 2048, 4096])
     p = sub.add_parser("rollout")
     p.add_argument("dir")
     p.add_argument("gpu_ms", type=float)
@@ -209,7 +220,7 @@ def main() -> None:
     if args.command == "tokenizer":
         build_tokenizer(args.dir)
     elif args.command == "per-token":
-        per_token(args.dir, args.reps)
+        per_token(args.dir, args.reps, args.lengths)
     else:
         rollout(args.dir, args.gpu_ms, args.reps, args.length)
 

@@ -7,6 +7,7 @@ special tokens, stop strings that straddle tokens or occur before `min_tokens`,
 model and request stop tokens, tool calls and Harmony's terminal token.
 """
 
+import importlib.util
 import json
 import random
 import subprocess
@@ -553,3 +554,33 @@ def test_http_rollouts_match_per_token_text(tokenizers_, monkeypatch):
         assert json.loads(results["final", ("STOP",)])["choices"][0]["finish_reason"] == "stop"
     finally:
         server.close()
+
+
+def test_the_host_cost_bench_runs_on_this_code(tokenizers_, tmp_path, monkeypatch, capsys):
+    """fork/patches/bench/grpo_rollout_host.py, as fork/docs/performance.md runs it, at short lengths.
+
+    Its per-token command builds the server without the constructor, so a field that _generate
+    starts to read (T28's admission did) breaks it while every other test passes.
+    """
+    tokenizers_["byte_level"].save_pretrained(tmp_path)
+    path = Path(__file__).resolve().parents[2] / "bench/grpo_rollout_host.py"
+    spec = importlib.util.spec_from_file_location("grpo_rollout_host_bench", path)
+    bench = importlib.util.module_from_spec(spec)
+    monkeypatch.setattr(sys, "path", list(sys.path))  # the script puts the checkout first
+    spec.loader.exec_module(bench)
+    digests = {}
+    for mode in ("per_token", "final", "incremental"):
+        monkeypatch.setenv("SUROGATE_GRPO_DETOK", mode)
+        argv = ["grpo_rollout_host.py", "per-token", str(tmp_path), "--reps", "1", "--lengths", "48"]
+        monkeypatch.setattr(sys, "argv", argv)
+        bench.main()
+        lines = capsys.readouterr().out.splitlines()
+        assert len(lines) == 2, lines  # without and with stop strings
+        digests[mode] = [line.split("response=")[1] for line in lines]
+    assert digests["final"] == digests["incremental"] == digests["per_token"]
+    monkeypatch.delenv("SUROGATE_GRPO_DETOK")
+    argv = ["grpo_rollout_host.py", "rollout", str(tmp_path), "0.1", "--reps", "1", "--length", "32"]
+    monkeypatch.setattr(sys, "argv", argv)
+    bench.main()
+    lines = capsys.readouterr().out.splitlines()
+    assert [line.split("lengths=")[1].split()[0] for line in lines] == ["equal", "spread"], lines
