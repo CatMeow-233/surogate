@@ -101,6 +101,7 @@ GRPO 补丁（T6–T8、T11、T12、T28）和 T10 的 dispatch-PP 拒绝调用�
 - [docs/build-and-release.md](docs/build-and-release.md)：每个产物的构建命令、输出位置和发布工作流，`fork/dev` 的测试命令，版本号和依赖版本固定在哪里，以及发布实验版本的清单。
 - [patches/README.md](patches/README.md)：ledger 的表格形式，包括每个 topic 的文件、测试和冲突记录。
 - [docs/performance.md](docs/performance.md)：fork 的性能改动、测量方法和开关，包括 LoRA 融合输入梯度和 GRPO 周期计时指标。
+- [docs/perf-roadmap/README.md](docs/perf-roadmap/README.md)：单张 RTX 5090 的性能路线图（2026 年 10 月无 GPU 的效率研究，train-native、serve、python-rl 三组，各有英文全文）：按收益排序的改进项、先跑的零代码实验、发现的正确性缺陷与已实现的改动在本分支的状态。
 - [native/README.md](native/README.md)：fork 原生代码（C++ 与 CMake）的目录、`csrc/CMakeLists.txt` 中两行挂接点的约定，以及 OpenMP 接线测试的运行方法。
 - [docs/upstream-errata.md](docs/upstream-errata.md)：上游已知的失效引用、过时配置和测试缺陷；fork 不修改这些上游文件，只记录绕行方法。
 - [tlc/README.md](tlc/README.md)：TLC 包的目录、环境、命令行与 P0 的行；[tlc/docs/](tlc/docs/) 中是模型目录与 checkpoint 契约、初始化与 Mamba-2 数值参照（model.md），语料、去污染、合成绑定任务、tokenizer 与数据 shard（data.md），训练驱动与评测（training.md），RTX 5090 运行手册与 GPU 预算（runbook.md），以及实测记录（measurements.md）。
