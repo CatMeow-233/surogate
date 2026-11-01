@@ -78,7 +78,7 @@
 | R1 | 实验训练器：融合的随机舍入优化器（每步 8B 约 16.4 万个小 kernel） | W-EXP-OIB-8B 步快 2.7–3.7 倍；4B 全参 GA=8 −9–14%；LISA 约 −2% | H | M | 未做 |
 | R2 | `cpu_training`：主机梯度加法并行化并移出预取 stream | W-8B-FFT-cpu 步 −30–50% | M | S | 第一步已实现，默认关闭（T14） |
 | R3 | 实验训练器的 5090 LISA/LoRA 配置关闭 gradient checkpointing | 1.25–1.35 倍 tok/s（修正后的显存估计放得下） | H | S | 未做（零代码） |
-| R4 | 训练路径服务：增量去 token 化，按存活 session 分轮 | W-MoE-GRPO：约 1k token 的 completion 下 rollout 约 1.2 倍（模拟），周期 −10–15%；非 Qwen 的 1B 稠密模型 rollout 约 2 倍 | H | S | 已实现（T11 默认开启，T12 默认关闭） |
+| R4 | 训练路径服务：去掉逐 token 的整段去 token 化（路线图提议增量去 token 化），按存活 session 分轮 | W-MoE-GRPO：约 1k token 的 completion 下 rollout 约 1.2 倍（模拟），周期 −10–15%；非 Qwen 的 1B 稠密模型 rollout 约 2 倍 | H | S | 已用另一种做法实现：T11 默认的 `final` 只在结束 completion 的那一步构造文本（请求有停止字符串时每步仍对全文解码一次来检查），不做增量去 token 化；增量的停止字符串窗口是 `SUROGATE_GRPO_DETOK=incremental`，默认关闭；按存活 session 分轮是 T12（`SUROGATE_GRPO_LIVE_DISPATCH=1`），默认关闭 |
 | R5 | LISA 冻结 embedding/head 并截断反向 | W-EXP-LISA 每 microbatch FLOPs −22%（步约 −15–20%） | M | S | 未做 |
 | R6 | colocate 并发按空闲显存自动设定，停止补发多余请求 | W-0.6B-GRPO 周期 −13–20%（C 16→64，解析估计） | M | S | 未做 |
 | R7 | 实验训练器：GA 窗口内打包 + FA2 varlen | W-EXP-LoRA 在平均 300–600 token 的数据上 1.3–2 倍 tok/s | M | M | 未做 |
@@ -122,7 +122,7 @@ serve 组另有两个应同时启动的门槛实验，它们需要少量新代�
 
 ## 发现的正确性缺陷及其在本分支的状态
 
-热点核查与实现过程中一共发现下列缺陷。“已修复”“已加保护”的都有 CPU 测试在改动前失败、改动后通过，GPU 上的行为都未验证；上游缺陷的 5090 检查写在 [upstream-errata.md](../upstream-errata.md) 对应的一节（链接见“说明”列）；实验训练器一项是 fork 自有代码，它的检查写在该行。
+热点核查与实现过程中一共发现下列缺陷。“已修复”“已加保护”的都有 CPU 测试在改动前失败、改动后通过，GPU 上的行为都未验证。这些修复与保护都默认开启。有开关恢复上游行为的是 T21、T24、T25 与 T28：T21 的 `SUROGATE_FORK_CPU_ADAMW_SAVE_STATE=0` 写出不含矩的 checkpoint，`SUROGATE_FORK_CPU_ADAMW_ALLOW_MISSING_STATE=1` 从不含矩的 checkpoint 以零矩恢复，两者都设时仍有一处不同于上游：恢复时不在设备上分配那份从不使用的 8-bit 状态；T24 的 `SUROGATE_NVFP4_4O6_SR_LEGACY=1`、`SUROGATE_NVFP4_4O6_RN_LEGACY=1`、`SUROGATE_NVFP4_SR_GRAPH_LEGACY=1` 各恢复一处；T25 的 `SUROGATE_GPT_OSS_PREQUANT_SKIP_EXPERT_DGRAD=1`；T28 的 `SUROGATE_SHARED_SERVER_QUEUE=reject`。T17、T18、T19、T22、T23、T26、T27 没有开关，要回到上游行为只能 revert 对应的提交；其中 T26 只在设了上游的 `SUROGATE_FP8_MOE_WEIGHT_CACHE` 时起作用，T27 改的代码在当前所有配置中都走不到。上游缺陷的 5090 检查写在 [upstream-errata.md](../upstream-errata.md) 对应的一节（链接见“说明”列）；实验训练器一项是 fork 自有代码，它的检查写在该行。
 
 | 缺陷 | 来源 | 本分支状态 | 提交 | ledger | 说明 |
 |---|---|---|---|---|---|
@@ -132,7 +132,7 @@ serve 组另有两个应同时启动的门槛实验，它们需要少量新代�
 | pad 模式从不关闭，`validate()` 一个微步的文档多于捕获上限时静默丢掉多出的文档 | python-rl §0 #2 | 已加保护：上限以内照旧，超过上限的 eager 调用改用精确几何 | d3d36439 | T18 | [errata](../upstream-errata.md#整步-graph-的-pad-模式不会关闭超过上限的-eager-调用丢掉尾部文档fork-已加保护ledger-t18) |
 | MoE 路由统计在重计算回放中再累加一次（`aux_loss`、`z_loss` 报成 2 倍） | train-native C10 | 已修复；C10 中“warmup 也重复累加”一半被否定（micro-step 0 的 `begin_step` 清零） | 66647915 | T19 | [errata](../upstream-errata.md#moe-路由统计在重计算回放和分块训练的-kv-sweep-中重复累加fork-已修复ledger-t19) |
 | 分块训练（`sequence_chunks > 1`）的 KV sweep 中每个块再计一次路由统计 | 评审 T19 时发现 | 已修复（`train_step_graphed`）；`step_chunked` 未覆盖，记在 errata | 67ec9ef7 | T19 | 同上 |
-| `cpu_training` 全参微调不把 CPU AdamW 的矩写进 checkpoint，恢复时在设备上分配 8-bit 状态（8B 约 16 GB）且矩从零开始 | train-native C1 | 已修复：新的 checkpoint 格式 v1；`SUROGATE_FORK_CPU_ADAMW_SAVE_STATE=0`、`SUROGATE_FORK_CPU_ADAMW_ALLOW_MISSING_STATE=1` 可回到上游行为 | 563df25e | T21 | [errata](../upstream-errata.md#cpu_training-的全量训练不保存-cpu-adamw-的矩fork-已修复ledger-t21) |
+| `cpu_training` 全参微调不把 CPU AdamW 的矩写进 checkpoint，恢复时在设备上分配 8-bit 状态（8B 约 16 GB）且矩从零开始 | train-native C1 | 已修复：新的 checkpoint 格式 v1；`SUROGATE_FORK_CPU_ADAMW_SAVE_STATE=0`、`SUROGATE_FORK_CPU_ADAMW_ALLOW_MISSING_STATE=1` 回到上游的 checkpoint 与零矩恢复（恢复时仍不在设备上分配 8-bit 状态） | 563df25e | T21 | [errata](../upstream-errata.md#cpu_training-的全量训练不保存-cpu-adamw-的矩fork-已修复ledger-t21) |
 | cuDNN SDPA 忽略 op 的 `softmax_scale`，Gemma3-27B 的全局层按 1/sqrt(128) 训练 | train-native C3 | 已修复：把 scale 传给 cuDNN；不声明 scale 的 op 逐位不变 | db4a840a | T22 | [errata](../upstream-errata.md#cudnn-注意力忽略-softmax_scalegemma3-27b-的全局层按-1sqrt128-训练fork-已修复ledger-t22) |
 | 交叉熵 kernel 按 int 计算 `row * P + i`，一个分块超过 2^31 个 logits 时越界读写 | train-native C4 | 已修复 | e067f546 | T23 | [errata](../upstream-errata.md#交叉熵-kernel-按-int-计算行偏移一个-lm-head-分块超过-231-个-logits-时越界读写fork-已修复ledger-t23) |
 | FP8 abs_max 与量化 kernel 的 grid-stride 下标是 int（fp8_hybrid 的 LM-head dX 路径） | 评审 C4 时发现 | 已修复 | a58ff65f | T23 | [errata](../upstream-errata.md#fp8-abs_max-与量化-kernel-的循环下标是-int一次处理约-231-个元素时越界读写fork-已修复ledger-t23) |
@@ -155,7 +155,7 @@ serve 组另有两个应同时启动的门槛实验，它们需要少量新代�
 
 ## 本分支实现的快速改进
 
-只去掉可证明是冗余或重复、结果不变的工作的改动默认开启（并留有恢复上游的开关）；其余默认关闭。全部没有在 GPU 上运行过，下表的 5090 检查都未做；完整的设计、CPU 测量和检查步骤见 [performance.md](../performance.md) 中链接的一节。
+默认开启的只有四项，它们只去掉可证明是冗余或重复、结果不变的工作，每项都有恢复上游的开关：T11 的 `final`（对给定的 token 序列，每个请求的响应与上游相同；`SUROGATE_GRPO_DETOK=per_token` 恢复上游的循环）、T13（`SUROGATE_FORK_HOST_GRAD_MEMSET=1`）、T20（`SUROGATE_FORK_FORCE_GRAPH_WARMUP=1`）与 T29（`SUROGATE_SHARED_SLEEP_KEEP_KV=1`）。其余默认关闭，不设开关时与上游相同：T11 的 `incremental`、T12、T14 的两个开关、T15 与 T16。全部没有在 GPU 上运行过，下表的 5090 检查都未做；完整的设计、CPU 测量和检查步骤见 [performance.md](../performance.md) 中链接的一节。
 
 | 改动 | 来源 | ledger | 开关 | 提交 | 5090 检查 |
 |---|---|---|---|---|---|
