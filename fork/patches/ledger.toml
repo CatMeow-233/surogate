@@ -157,7 +157,7 @@ switch = "always on"
 # edit to the moved lines conflicts with this hunk; port it into the fork function.
 files = ["csrc/src/runtime/ops/moe_grouped_gemm.cpp"]
 fork_files = [
-    "fork/native/cmake/fork_native.cmake",   # compiles src/moe_weight_grad.cpp into surogate-common (shared with T5)
+    "fork/native/cmake/fork_native.cmake",   # compiles src/moe_weight_grad.cpp into surogate-common (shared with T5, T10, T14–T17, T20, T21, T24)
     "fork/native/include/surogate_fork/moe_weight_grad.h",
     "fork/native/include/surogate_fork/moe_weight_grad_policy.h",
     "fork/native/src/moe_weight_grad.cpp",
@@ -384,7 +384,7 @@ files = [
     "surogate/grpo/trainer.py",        # GRPO: the same call (the file is shared with T6-T8)
 ]
 fork_files = [
-    "fork/native/cmake/fork_native.cmake",   # attaches the C++ test to dsl-run-state-tests (shared with T5)
+    "fork/native/cmake/fork_native.cmake",   # attaches the C++ test to dsl-run-state-tests (shared with T3, T5, T14–T17, T20, T21, T24)
     "fork/native/tests/test-fork-tied-lm-head.cpp",
     "fork/native/src/cpu_adamw_checkpoint.cpp",   # build_layout: the CPU step's tied dedupe since T21 (shared with T21)
     "fork/patches/tests/native/test_tied_lm_head.py",
@@ -405,7 +405,7 @@ conflict_history = [
 [[topic]]
 id = "T11"
 title = "GRPO training-path server builds non-streaming text once"
-commits = ["0156497c", "eb61130a"]   # eb61130a: the window check no longer imports transformers.processing_utils
+commits = ["afe88d26", "2586d3ac"]   # 2586d3ac: the window check no longer imports transformers.processing_utils
 switch = "SUROGATE_GRPO_DETOK=final (default; removes only per-token text work whose result is discarded) | incremental (also a ByteLevel window for stop strings) | per_token (upstream's loop); streaming requests always use upstream's loop"
 # shared_model.py keeps three hunks in SharedModelServer._generate: a local import of the fork
 # module, `view = completion_view(...)` before the token loop, and after `stopped = token in eos`
@@ -437,7 +437,7 @@ conflict_history = [
 [[topic]]
 id = "T12"
 title = "decode rounds sized by live sessions"
-commits = ["595da1c6"]
+commits = ["e7ee206a"]
 switch = "SUROGATE_GRPO_LIVE_DISPATCH=1 (default off; read when the DecodeScheduler is built)"
 # decode_scheduler.py keeps four hunks: the LiveSessions counter built in __init__ (local import),
 # opened() in new_session, released() in release, and round_size(max_batch) in place of max_batch
@@ -458,7 +458,7 @@ conflict_history = [
 [[topic]]
 id = "T13"
 title = "cpu_training: no step-start memset of the host gradients"
-commits = ["49f42a6d", "64770762"]
+commits = ["796fdfa0", "e2f56d21"]
 switch = "always on (removes dead work; the host gradients are bit-identical)"
 # DslGradStore::start_micro_step(0) memset every host gradient (mCpuGrads) on the rank thread before micro-step 0's
 # backward: 16.4 GB for Qwen3-8B (about 0.55-0.8 s on one desktop core; 1.9 s at the 8.6 GB/s this VM's memset
@@ -478,7 +478,7 @@ switch = "always on (removes dead work; the host gradients are bit-identical)"
 # buffer or at an offset, a tied buffer, a buffer without a device copy, GA 1-4) against the memset path and gets
 # the same bytes. Relies on step_cpu_streaming being the only reader of host gradients, after wait_all_offloads,
 # and on the three host-gradient copies of the grad store, each preceded by before_copy (test_cpu_step_hooks.py
-# pins both). The first version (49f42a6d) recorded a copy after enqueuing it and let a partial copy cover
+# pins both). The first version (796fdfa0) recorded a copy after enqueuing it and let a partial copy cover
 # nothing, so zero_rest() would have zeroed such a buffer under or after its copy; it made no partial copy.
 # Not a defect fix (no errata entry): the memset was redundant, not wrong. GPU behaviour is unchanged by
 # construction; dsl_grad_store.cpp is compile-checked for sm_120a only, and the 5090 check is in
@@ -489,7 +489,7 @@ files = [
 ]
 fork_files = [
     "fork/native/include/surogate_fork/host_grad_overwrites.h",
-    "fork/native/openmp-contract/CMakeLists.txt",   # shared with T5
+    "fork/native/openmp-contract/CMakeLists.txt",   # shared with T5, T14, T15
     "fork/native/openmp-contract/cpu_step_check.cpp",
     "fork/patches/tests/native/test_cpu_step_hooks.py",
 ]
@@ -505,7 +505,7 @@ conflict_history = [
 [[topic]]
 id = "T14"
 title = "cpu_training: opt-in parallel host gradient accumulation off the prefetch stream"
-commits = ["f43d459e", "fed5f0ca"]   # f43d459e shared with T15
+commits = ["be5b9191", "54954e9b"]   # be5b9191 shared with T15
 switch = "SUROGATE_FORK_HOST_GRAD_ACCUM=1 and SUROGATE_FORK_GRAD_D2H_STREAM=1 (each default off, read once per process)"
 # On micro-steps after the first, every layer's staged BF16 gradients are added into the host gradients by
 # DslGradStore::accumulate_staged_layer, a single-threaded scalar loop in a cudaLaunchHostFunc on the copy stream
@@ -521,7 +521,7 @@ switch = "SUROGATE_FORK_HOST_GRAD_ACCUM=1 and SUROGATE_FORK_GRAD_D2H_STREAM=1 (e
 # mode show both). The rank thread still runs while a host function does, outside any region: it enqueues the
 # backward kernels, and CUDA's default schedule (cudaDeviceScheduleAuto; the trainer sets no flag) spin-waits. So
 # the host function's team, OmpTeam(n, OmpHostFunction{store}), is the group's share minus one CPU, at least 1.
-# The first version (f43d459e) gave it the whole share, oversubscribing the mask by the rank thread; on the VM
+# The first version (be5b9191) gave it the whole share, oversubscribing the mask by the rank thread; on the VM
 # (stepbench group, 4 CPUs, medians of 3) three micro-steps of additions with a spinning rank thread took 104.3 ->
 # 78.6 ms (small model) and 143.8 -> 117.5 ms (one Qwen3-8B block) with the reservation, and with the rank thread
 # asleep 67.0 -> 72.0 and 83.8 -> 112.0 ms. Whether the rank thread is busy then on a 5090 host is unverified
@@ -543,7 +543,7 @@ files = [
 ]
 fork_files = [
     "fork/native/cmake/cpu_step_kernels.cmake",   # shared with T15
-    "fork/native/cmake/fork_native.cmake",   # adds cpu_step_kernels.cpp to surogate-common (shared with T3, T5, T10, T15)
+    "fork/native/cmake/fork_native.cmake",   # adds cpu_step_kernels.cpp to surogate-common (shared with T3, T5, T10, T15–T17, T20, T21, T24)
     "fork/native/include/surogate_fork/cpu_step_kernels.h",   # shared with T15
     "fork/native/src/cpu_step_kernels.cpp",   # shared with T15
     "fork/native/include/surogate_fork/omp_team.h",   # serial groups (shared with T5)
@@ -568,7 +568,7 @@ conflict_history = [
 [[topic]]
 id = "T15"
 title = "cpu_training: opt-in vectorized CPU AdamW"
-commits = ["f43d459e", "28fc5941"]   # f43d459e shared with T14
+commits = ["be5b9191", "ce939c53"]   # be5b9191 shared with T14
 switch = "SUROGATE_FORK_CPU_ADAMW_SIMD=1 (default off, read once per process; refused where the baseline ISA has FMA)"
 # cpu_adamw.cpp's three element-wise steps (cpu_adamw_step, cpu_adamw_step_bf16, cpu_adamw_step_bf16_param, which
 # step_cpu_streaming calls per parameter; AsyncStaleAdamW, the Dispatch-PP async optimizer debug surface, also
@@ -596,7 +596,7 @@ switch = "SUROGATE_FORK_CPU_ADAMW_SIMD=1 (default off, read once per process; re
 files = ["csrc/src/runtime/optimizers/cpu_adamw.cpp"]
 fork_files = [
     "fork/native/cmake/cpu_step_kernels.cmake",   # shared with T14
-    "fork/native/cmake/fork_native.cmake",   # compiles cpu_step_kernels.cpp into surogate-common (shared with T3, T5, T10, T14)
+    "fork/native/cmake/fork_native.cmake",   # compiles cpu_step_kernels.cpp into surogate-common (shared with T3, T5, T10, T14, T16, T17, T20, T21, T24)
     "fork/native/include/surogate_fork/cpu_step_kernels.h",   # shared with T14
     "fork/native/src/cpu_step_kernels.cpp",   # shared with T14
     "fork/native/openmp-contract/CMakeLists.txt",   # builds cpu-step-contract, its references at -O3 (shared with T5, T13, T14)
@@ -616,7 +616,7 @@ conflict_history = [
 [[topic]]
 id = "T16"
 title = "serve: register the 128-wide 32q8, 40q8 and MHA 32q32 GQA shapes"
-commits = ["45bf39b7", "c799b728"]
+commits = ["7a45b4f7", "2e5f766b"]
 switch = "SUROGATE_SERVE_GQA_FORK_SHAPES=1 (default off: 32q8/40q8 keep their pre-registration routes and 128/32q32 is refused as before, its KV pair withheld; on, 32q32 is served; int8 KV keeps the generic route with the switch on)"
 # Roadmap serve R1. Qwen3-4B/8B, Llama-3-8B, Mistral-7B (128/32q8) and Qwen3-14B (128/40q8) decode, verify and
 # 7-63-column prompt segments ran on the CUDA-core generic split-KV kernel (gqa_attention_generic.cu) on every GPU
@@ -660,7 +660,7 @@ files = [
     "csrc/src/testing/serve/ops/test_gqa_attention.cpp",
 ]
 fork_files = [
-    "fork/native/cmake/fork_native.cmake",   # _surogate_fork_attach_serve (shared with T3, T5, T10)
+    "fork/native/cmake/fork_native.cmake",   # _surogate_fork_attach_serve (shared with T3, T5, T10, T14, T15, T17, T20, T21, T24)
     "fork/native/include/surogate_fork/gqa_fork_shapes.h",
     "fork/native/serve/gqa_attention_decode_gqa128_32q8.cu",
     "fork/native/serve/gqa_attention_decode_gqa128_40q8.cu",
@@ -681,7 +681,7 @@ conflict_history = [
 [[topic]]
 id = "T17"
 title = "graphed packed SFT: per-row documents in the cap-and-pad replay and capture"
-commits = ["b40ae9f7"]   # shared with T18
+commits = ["d3d36439"]   # shared with T18
 switch = "always on (defect fix)"
 # Defects (upstream 282f9901; errata "打包 SFT 的整步 CUDA graph ..."): after a full-step capture with documents,
 # (1) a step without in-row position resets staged cu_seqlens {0, B*T} (py_train.cpp:1600-1606), one document over
@@ -704,7 +704,7 @@ files = [
 ]
 fork_files = [
     "fork/native/include/surogate_fork/doc_mask_staging.h",       # shared with T18
-    "fork/native/cmake/fork_native.cmake",   # fork include root for _surogate and dsl-run-state-tests, attaches the C++ test (shared with T3, T5, T10, T20)
+    "fork/native/cmake/fork_native.cmake",   # fork include root for _surogate and dsl-run-state-tests, attaches the C++ test (shared with T3, T5, T10, T14–T16, T20, T21, T24)
     "fork/native/tests/test-fork-doc-mask-staging.cpp",
     "fork/patches/tests/native/test_doc_mask_staging.py",         # shared with T18
 ]
@@ -713,13 +713,13 @@ tests = [
     "fork/native/tests/test-fork-doc-mask-staging.cpp",
 ]
 conflict_history = [
-    "2026-10-31 reverse replay of b40ae9f7's upstream-file hunks onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: py_train.cpp 1/1/0 (the include line, next to the serve/core/unified_memory.h include upstream added in 7026ba31, #302, 2026-10-07), graph_executor.h 0/0/0, graph_executor.cpp 0/0/0, causal_lm_execution_profile.cpp 0/0/0",
+    "2026-10-31 reverse replay of d3d36439's upstream-file hunks onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: py_train.cpp 1/1/0 (the include line, next to the serve/core/unified_memory.h include upstream added in 7026ba31, #302, 2026-10-07), graph_executor.h 0/0/0, graph_executor.cpp 0/0/0, causal_lm_execution_profile.cpp 0/0/0",
 ]
 
 [[topic]]
 id = "T18"
 title = "cap-and-pad pad mode: an eager call over the cap runs exact geometry"
-commits = ["b40ae9f7"]   # shared with T17
+commits = ["d3d36439"]   # shared with T17
 switch = "always on (defect guard)"
 # Defect (latent, upstream 282f9901; errata "整步 graph 的 pad 模式不会关闭 ..."): pad mode stays on after a capture
 # with documents, and an eager set_doc_masking (validate, a warmup after a shape change) with more documents than the
@@ -739,13 +739,13 @@ fork_files = [
 ]
 tests = ["fork/patches/tests/native/test_doc_mask_staging.py"]
 conflict_history = [
-    "2026-10-31 reverse replay of b40ae9f7 (shared with T17) onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: graph_executor.h 0/0/0, graph_executor.cpp 0/0/0",
+    "2026-10-31 reverse replay of d3d36439 (shared with T17) onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: graph_executor.h 0/0/0, graph_executor.cpp 0/0/0",
 ]
 
 [[topic]]
 id = "T19"
 title = "MoE routing statistics are not accumulated in the recompute replay or the chunked KV sweep"
-commits = ["402f7add", "4a165106"]
+commits = ["66647915", "67ec9ef7"]
 switch = "always on (defect fix; removes one stats kernel per MoE layer per replayed layer and per KV-sweep chunk)"
 # Defects (upstream 282f9901; errata "MoE 路由统计在重计算回放和分块训练的 KV sweep 中重复累加"): (1) with recompute on,
 # replay_layer_forward re-runs MoETopK and its stats block (moe_topk.cpp:158-192) added every layer again: aux_loss
@@ -760,14 +760,14 @@ files = ["csrc/src/runtime/ops/moe_topk.cpp"]
 fork_files = ["fork/patches/tests/native/test_moe_stats_replay.py"]
 tests = ["fork/patches/tests/native/test_moe_stats_replay.py"]
 conflict_history = [
-    "2026-10-31 reverse replay of 402f7add onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: moe_topk.cpp 0/0/0",
-    "2026-10-31 reverse replay of moe_topk.cpp's whole T19 diff (402f7add + 4a165106) onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: moe_topk.cpp 0/0/0",
+    "2026-10-31 reverse replay of 66647915 onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: moe_topk.cpp 0/0/0",
+    "2026-10-31 reverse replay of moe_topk.cpp's whole T19 diff (66647915 + 67ec9ef7) onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: moe_topk.cpp 0/0/0",
 ]
 
 [[topic]]
 id = "T20"
 title = "full-step warmup runs once for a model that never captures"
-commits = ["191109e8"]
+commits = ["f73ad034"]
 switch = "on by default (removes duplicated, discarded work); SUROGATE_FORK_FORCE_GRAPH_WARMUP=1 restores upstream; ep_size > 1 keeps upstream's warmup"
 # Upstream ran train_step_graphed's discarded eager fwd+bwd warmup on every step for capture-unsafe models (MoE, EP),
 # which never capture. has_capture_unsafe_ops() is valid from allocate_run_state, so after one warmup (which keeps the
@@ -782,18 +782,18 @@ files = [
 ]
 fork_files = [
     "fork/native/include/surogate_fork/full_step_warmup.h",
-    "fork/native/cmake/fork_native.cmake",   # _surogate_fork_attach_binding: fork include root for _surogate (shared with T17)
+    "fork/native/cmake/fork_native.cmake",   # _surogate_fork_attach_binding: fork include root for _surogate (shared with T3, T5, T10, T14–T17, T21, T24)
     "fork/patches/tests/native/test_full_step_warmup.py",
 ]
 tests = ["fork/patches/tests/native/test_full_step_warmup.py"]
 conflict_history = [
-    "2026-10-31 reverse replay of 191109e8 together with b40ae9f7 (T20's include sits next to T17's) onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: py_train.cpp 1/1/0 (T17's include-line block, no other), py_train.h 0/0/0",
+    "2026-10-31 reverse replay of f73ad034 together with d3d36439 (T20's include sits next to T17's) onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: py_train.cpp 1/1/0 (T17's include-line block, no other), py_train.h 0/0/0",
 ]
 
 [[topic]]
 id = "T21"
 title = "cpu_training checkpoints its CPU AdamW moments"
-commits = ["b5ca1061"]
+commits = ["563df25e"]
 switch = "always on (defect fix): checkpoints hold the moments and a resume reads them; SUROGATE_FORK_CPU_ADAMW_SAVE_STATE=0 writes none (upstream's checkpoints), SUROGATE_FORK_CPU_ADAMW_ALLOW_MISSING_STATE=1 resumes from a checkpoint without them (upstream's zero moments); GPU training unchanged; cpu_training with adamw/normuon now refuses a resume unless SUROGATE_FORK_CPU_ADAMW_ALLOW_MISSING_STATE=1 and briefly allocates the host moments (errata)"
 # Defect (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "cpu_training 的全量训练不保存 CPU AdamW
 # 的矩"): under cpu_training, AdamW8BitOptimizer::step routes every step to step_cpu_streaming, whose FP32 moments
@@ -831,7 +831,7 @@ files = [
     "csrc/src/utilities/safetensors.cpp",
 ]
 fork_files = [
-    "fork/native/cmake/fork_native.cmake",   # compiles src/cpu_adamw_checkpoint.cpp into surogate-common (shared with T5)
+    "fork/native/cmake/fork_native.cmake",   # compiles src/cpu_adamw_checkpoint.cpp into surogate-common (shared with T3, T5, T10, T14–T17, T20, T24)
     "fork/native/include/surogate_fork/cpu_adamw_checkpoint.h",
     "fork/native/include/surogate_fork/pageable_host.h",
     "fork/native/src/cpu_adamw_checkpoint.cpp",
@@ -845,13 +845,13 @@ tests = [
     "fork/patches/tests/native/test_tied_lm_head.py",
 ]
 conflict_history = [
-    "2026-10-31 reverse replay of b5ca1061 onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: adamw_8bit_optimizer.cpp 0/0/0 (T10 and T21 hunks), checkpoint.cpp 0/0/0, safetensors.cpp 0/0/0; upstream/main 82d42c72 has not changed the three files",
+    "2026-10-31 reverse replay of 563df25e onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: adamw_8bit_optimizer.cpp 0/0/0 (T10 and T21 hunks), checkpoint.cpp 0/0/0, safetensors.cpp 0/0/0; upstream/main 82d42c72 has not changed the three files",
 ]
 
 [[topic]]
 id = "T22"
 title = "cuDNN SDPA applies the op's softmax_scale"
-commits = ["7523eb3b", "7b5b5f1b"]   # 7b5b5f1b: the GPU check's dump comparison script and its tests
+commits = ["db4a840a", "90740b88"]   # 90740b88: the GPU check's dump comparison script and its tests
 switch = "always on (defect fix); ops without an explicit softmax_scale are bit-identical"
 # Defect (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "cuDNN 注意力忽略 softmax_scale"):
 # CuDNNAttention::supports() never read AttentionParams::softmax_scale and forward()/backward() did not pass it on;
@@ -892,13 +892,13 @@ fork_files = [
 ]
 tests = ["fork/patches/tests/native/test_cudnn_softmax_scale.py"]
 conflict_history = [
-    "2026-10-31 reverse replay of 7523eb3b onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: attention_kernels.h 0/0/0, attention_cudnn.cpp 0/0/0, attention_custom.cu 0/0/0, backend_cudnn.cpp 0/0/0",
+    "2026-10-31 reverse replay of db4a840a onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: attention_kernels.h 0/0/0, attention_cudnn.cpp 0/0/0, attention_custom.cu 0/0/0, backend_cudnn.cpp 0/0/0",
 ]
 
 [[topic]]
 id = "T23"
 title = "64-bit element indices in the cross-entropy kernels and the FP8 abs-max/quantize loops"
-commits = ["79165030", "2cfc438f"]
+commits = ["e067f546", "a58ff65f"]
 switch = "always on (defect fix); shapes whose indices did not wrap read and write the same elements with the same float arithmetic"
 # Defect (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "交叉熵 kernel 按 int 计算行偏移"):
 # fused_classifier.cu formed the logits/dlogits index as `row * P + i` in int at seven sites:
@@ -945,17 +945,17 @@ tests = [
     "fork/patches/tests/native/test_fp8_quant_grid_stride.py",
 ]
 conflict_history = [
-    "2026-10-31 reverse replay of 79165030 onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: fused_classifier.cu 0/0/0",
-    "2026-10-31 reverse replay of 2cfc438f onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: quant.cu 0/0/0",
+    "2026-10-31 reverse replay of e067f546 onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: fused_classifier.cu 0/0/0",
+    "2026-10-31 reverse replay of a58ff65f onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: quant.cu 0/0/0",
 ]
 
 [[topic]]
 id = "T24"
 title = "NVFP4 Four Over Six: unbiased SR, stored-scale encode, fresh SR noise on graph replays"
-commits = ["af89ae9b", "33b73381", "20f5044a", "32765eed", "25251cc5"]
-# af89ae9b: SR and RN; 33b73381: fresh SR noise on graph replays; review fixes, fork files only: 20f5044a internal
-# linkage of the graph counter's users, 32765eed the graph GPU case under SR_LEGACY and the switch coupling,
-# 25251cc5 pins of the upstream code the fork kernels copied
+commits = ["c32c9996", "fecde777", "2f7b5d37", "895a72f6", "86b36a70"]
+# c32c9996: SR and RN; fecde777: fresh SR noise on graph replays; review fixes, fork files only: 2f7b5d37 internal
+# linkage of the graph counter's users, 895a72f6 the graph GPU case under SR_LEGACY and the switch coupling,
+# 86b36a70 pins of the upstream code the fork kernels copied
 switch = "on by default (defect fixes), each switch read once per process: SUROGATE_NVFP4_4O6_SR_LEGACY=1 runs upstream's 4/6 SR kernel, which takes no graph generation, so under graphs the wgrad 4/6 operand reuses the captured noise too; SUROGATE_NVFP4_4O6_RN_LEGACY=1 runs upstream's 4/6 RN kernel; SUROGATE_NVFP4_SR_GRAPH_LEGACY=1 makes graph replays reuse the captured SR noise again in the fork 4/6 SR kernel and the standard SR kernels (for the 4/6 operand it matters only while SR_LEGACY is unset)"
 # Defects (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "NVFP4 随机舍入与 Four Over Six 块比例的缺陷"):
 # (SR) quantize_block_4o6_stochastic (quant_nvfp4_4o6_sm100.cu) adds a fixed (b/256-0.5)*0.5 dither before
@@ -995,7 +995,7 @@ files = [
     "csrc/src/recipes/nvfp4/kernels/quant_nvfp4_cutlass.cu",   # graphs: the standard SR kernels take the generation
 ]
 fork_files = [
-    "fork/native/cmake/fork_native.cmake",   # compiles src/nvfp4_4o6.cu, attaches the GPU test (shared with T3, T5, T10)
+    "fork/native/cmake/fork_native.cmake",   # compiles src/nvfp4_4o6.cu, attaches the GPU test (shared with T3, T5, T10, T14–T17, T20, T21)
     "fork/native/include/surogate_fork/nvfp4_4o6.h",
     "fork/native/include/surogate_fork/nvfp4_4o6_arith.h",
     "fork/native/include/surogate_fork/sr_graph_generation.cuh",
@@ -1010,13 +1010,13 @@ tests = [
     "fork/native/tests/test-fork-nvfp4-4o6.cu",
 ]
 conflict_history = [
-    "2026-10-31 reverse replay of af89ae9b and 33b73381 onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: quant_nvfp4_4o6.cu 1/0/0 (the 90-day point predates 9f7d3705, which added quantize_nvfp4_4o6_cutlass_from_amax, where one RN dispatch sits), quant_nvfp4_cutlass.cu 0/0/0",
+    "2026-10-31 reverse replay of c32c9996 and fecde777 onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: quant_nvfp4_4o6.cu 1/0/0 (the 90-day point predates 9f7d3705, which added quantize_nvfp4_4o6_cutlass_from_amax, where one RN dispatch sits), quant_nvfp4_cutlass.cu 0/0/0",
 ]
 
 [[topic]]
 id = "T25"
 title = "GPT-OSS prequantized LoRA computes the frozen-expert input gradient"
-commits = ["b71740bb"]
+commits = ["d4b3ab07"]
 switch = "always on (defect fix): the base dgrad runs by default; SUROGATE_GPT_OSS_PREQUANT_SKIP_EXPERT_DGRAD=1 restores upstream's skip (approximate gradients, two grouped GEMMs fewer per MoE layer)"
 # Defect (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "GPT-OSS 预量化 checkpoint 的 LoRA 训练跳过冻结专家的
 # 输入梯度"): dispatch_moe_grouped_gemm_gate_up_backward and dispatch_moe_grouped_gemm_down_backward set
@@ -1047,13 +1047,13 @@ fork_files = [
 ]
 tests = ["fork/patches/tests/native/test_gpt_oss_prequant_dgrad.py"]
 conflict_history = [
-    "2026-10-31 reverse replay of b71740bb onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: moe_grouped_gemm_gate_up.cpp 0/0/0, moe_grouped_gemm_down.cpp 0/0/0",
+    "2026-10-31 reverse replay of d4b3ab07 onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: moe_grouped_gemm_gate_up.cpp 0/0/0, moe_grouped_gemm_down.cpp 0/0/0",
 ]
 
 [[topic]]
 id = "T26"
 title = "the MoE FP8 weight cache refuses trainable expert weights"
-commits = ["df2bda79"]
+commits = ["000452cd"]
 switch = "always on (defect fix) under the opt-in SUROGATE_FP8_MOE_WEIGHT_CACHE; frozen experts (LoRA/QLoRA) keep the cache, so results there are unchanged"
 # Defect (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "MoE 的 FP8 权重缓存不拒绝可训练的专家权重"):
 # CompiledExecutor::attach_moe_fp8_cache (compiled_ops.cpp:928-972) checked only the env, the budget and the shape. The
@@ -1077,13 +1077,13 @@ files = ["csrc/src/runtime/executor/compiled_ops.cpp"]
 fork_files = ["fork/patches/tests/native/test_moe_fp8_cache_trainable.py"]
 tests = ["fork/patches/tests/native/test_moe_fp8_cache_trainable.py"]
 conflict_history = [
-    "2026-10-31 reverse replay of df2bda79 onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: compiled_ops.cpp 0/0/0",
+    "2026-10-31 reverse replay of 000452cd onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: compiled_ops.cpp 0/0/0",
 ]
 
 [[topic]]
 id = "T27"
 title = "FP8 producer pre-quantization computes the amax it quantizes with"
-commits = ["b2426862"]
+commits = ["eb34d5e0"]
 switch = "always on (latent-defect guard): the blocks it changes are unreachable in every current configuration, so current runs are bit-identical"
 # Defect (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "FP8 的生产者侧预量化使用没有计算过的 amax"):
 # the co-located pre-quantization blocks of dispatch_fused_residual_rmsnorm (fused_residual_rmsnorm.cpp:292-321, LN1/LN2),
@@ -1109,13 +1109,13 @@ files = [
 fork_files = ["fork/patches/tests/native/test_fp8_prequant_amax.py"]
 tests = ["fork/patches/tests/native/test_fp8_prequant_amax.py"]
 conflict_history = [
-    "2026-10-31 reverse replay of b2426862 onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: fused_residual_rmsnorm.cpp 0/0/0, swiglu.cpp 0/0/0, matmul_swiglu.cpp 0/0/0",
+    "2026-10-31 reverse replay of eb34d5e0 onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: fused_residual_rmsnorm.cpp 0/0/0, swiglu.cpp 0/0/0, matmul_swiglu.cpp 0/0/0",
 ]
 
 [[topic]]
 id = "T28"
 title = "SharedModelServer queues requests past its lanes and stops rollouts whose client left"
-commits = ["189e7b59", "f411193d"]
+commits = ["6bcf5231", "ae28bc19"]
 switch = "SUROGATE_SHARED_SERVER_QUEUE=fifo (default, defect fix) | reject (upstream's admission: 429 at capacity, no disconnect checks); SUROGATE_SHARED_SERVER_ABORT=1 (default) | 0 (an admitted request runs to max_tokens after its client leaves; queued ones are still skipped; no effect under reject); both read and validated when the server is built, in either mode; a run turns the queue off only with reject (the infer config refuses max_pending_requests: 0)"
 # Defect (upstream 282f9901, unchanged on upstream/main 82d42c72; errata "训练路径的 SharedModelServer 在满载时拒绝 rollout"):
 # SharedModelServer.admit raised Busy (429) whenever max_concurrency lanes were busy, though the colocated run keeps
@@ -1143,13 +1143,13 @@ fork_files = [
 ]
 tests = ["fork/patches/tests/grpo/test_shared_admission.py"]
 conflict_history = [
-    "2026-10-31 reverse replay of 189e7b59 onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: shared_model.py did not exist 90 days back (added 2026-09-09), 0/0 at 30/14 days",
+    "2026-10-31 reverse replay of 6bcf5231 onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: shared_model.py did not exist 90 days back (added 2026-09-09), 0/0 at 30/14 days",
 ]
 
 [[topic]]
 id = "T29"
 title = "the native GRPO SharedServer evicts retained KV before it sleeps"
-commits = ["cf7fc7ba"]
+commits = ["deec1701"]
 switch = "always on (removes dead work, identical results); SUROGATE_SHARED_SLEEP_KEEP_KV=1 restores upstream's order for A/B runs (read once per process)"
 # generation_service.cpp keeps one hunk in GenerationService::begin_shared_training: after the drain loop and inside
 # the try, a static `keep_kv` read from SUROGATE_SHARED_SLEEP_KEEP_KV and `if (!keep_kv) { engine_->shrink_kv(); }`
@@ -1163,5 +1163,5 @@ files = ["csrc/src/serve/serve/generation_service.cpp"]
 fork_files = ["fork/patches/tests/native/test_shared_sleep_kv.py"]
 tests = ["fork/patches/tests/native/test_shared_sleep_kv.py"]
 conflict_history = [
-    "2026-10-31 reverse replay of cf7fc7ba onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: generation_service.cpp 0/0/0",
+    "2026-10-31 reverse replay of deec1701 onto the 2026-10-23 sync point, conflict blocks at 90/30/14 days: generation_service.cpp 0/0/0",
 ]
