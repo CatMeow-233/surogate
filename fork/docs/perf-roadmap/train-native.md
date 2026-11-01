@@ -22,7 +22,7 @@
 | C10 | replay half fixed, and review found the chunked KV sweep counting twice, also fixed; the warmup half is refuted (micro-step 0's `begin_step` resets the stats) | 66647915, 67ec9ef7 | T19 | [errata](../upstream-errata.md#moe-路由统计在重计算回放和分块训练的-kv-sweep-中重复累加fork-已修复ledger-t19) |
 | C11 | documented; upstream docs are not edited | 2737f5b8 | none | [errata](../upstream-errata.md#lora-配置文档中的默认值与代码不符) |
 | #1 | implemented, on by default; `SUROGATE_FORK_FORCE_GRAPH_WARMUP=1` restores upstream | f73ad034 | T20 | [performance.md](../performance.md#不能捕获的整步只预热一次) |
-| #7 | partly implemented: step-start memset dropped (on by default; `SUROGATE_FORK_HOST_GRAD_MEMSET=1` restores it); parallel SIMD host accumulate and its own D2H stream (opt-in); vectorized CPU AdamW (opt-in); per-layer GPU norm deferred | 796fdfa0, e2f56d21, be5b9191, 54954e9b, ce939c53 | T13, T14, T15 | [performance.md](../performance.md#cpu_training-主机端步) |
+| #7 | partly implemented: step-start memset dropped (on by default; `SUROGATE_FORK_HOST_GRAD_MEMSET=1` restores it); parallel SIMD host accumulate and its own D2H stream (opt-in); vectorized CPU AdamW (opt-in); per-layer GPU norm deferred | 796fdfa0, e2f56d21, 4a983cc6, be5b9191, 54954e9b, ce939c53 | T13, T14, T15 | [performance.md](../performance.md#cpu_training-主机端步) |
 | #24 | open, now unblocked: C2's per-row synthesis has landed | none | none | |
 | #33 | the replay stats skip landed with C10's fix; the counting sort is open | 66647915 | T19 | |
 
@@ -281,7 +281,7 @@ Other hardware facts:
 
 ### 7. cpu_training CPU-step and host-accumulate quick wins
 - **Status: partly implemented.** [performance.md](../performance.md#cpu_training-主机端步) has the design, the CPU measurements and the 5090 checks.
-  - The step-start memset is gone: 796fdfa0 and e2f56d21 (ledger T13), on by default, host gradients byte-identical; `SUROGATE_FORK_HOST_GRAD_MEMSET=1` restores upstream's memset for A/B runs on one build.
+  - The step-start memset is gone: 796fdfa0 and e2f56d21 (ledger T13), on by default, host gradients byte-identical; `SUROGATE_FORK_HOST_GRAD_MEMSET=1` (4a983cc6) restores upstream's memset for A/B runs on one build.
   - The parallel SIMD host accumulate (`SUROGATE_FORK_HOST_GRAD_ACCUM=1`) and the block-gradient D2H on its own stream (`SUROGATE_FORK_GRAD_D2H_STREAM=1`) landed in be5b9191 and 54954e9b (T14), both default off. The kernels are in `fork/native/src/cpu_step_kernels.cpp`. The residual put was not moved, so `compiled_ops.cpp` is untouched.
   - The vectorized CPU AdamW (`SUROGATE_FORK_CPU_ADAMW_SIMD=1`, default off, refused where the baseline ISA has FMA since ce939c53) landed in be5b9191 (T15).
   - Deferred: the per-layer GPU norm. It is valid only at GA=1 or breadth-first, and it cannot equal the CPU `ordered_block_sum` norm bit for bit without that summation order.
