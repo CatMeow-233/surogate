@@ -4,7 +4,7 @@
 
 研究的问题 [待实验]：从同一个双语种子分叉、在冻结的共享骨干（嵌入兼 tied head、attention、norm）上**各自独立训练**的中文 FFN 专家与英文 FFN 专家，组装后在没有任何联合训练的条件下能否完成跨语言组合；在同一组冻结的专家检查点上，“先混合、再经共享冻结的非线性读出”（pre）与“先读出、再混合”（post）是否不同；独立专家相对单一双语专家要付出多少切换代价与模块化代价。通道拼接等于 Top-2 输出求和是已知恒等式 [已知数学事实]，只作零假设与数值检查，不算贡献。
 
-**当前状态：只有脚手架（实现步骤 I1）。** 包里还没有模型、数据或训练代码，没有任何实验结果。凡涉及 RTX 5090 的吞吐、显存和时长，都是 [估计] 或 TBD，在 [运行手册](docs/runbook.md) 的 G0、G0.5 实测并记入 [实测记录](docs/measurements.md) 之前，不得写成结果。证据层级沿用手稿：[假设]、[建议]、[待实验]、[已知数学事实]、[已有论文结果]、[估计]。
+**当前状态：实现步骤 I1、I2 已完成（只在 CPU 上验证）。** 包里有模型核心、路由、组装、冻结审计与参数预算（见下文“模型、路由与组装”）；还没有数据、训练循环与评测代码，所以没有任何实验结果。凡涉及 RTX 5090 的吞吐、显存和时长，都是 [估计] 或 TBD，在 [运行手册](docs/runbook.md) 的 G0、G0.5 实测并记入 [实测记录](docs/measurements.md) 之前，不得写成结果。证据层级沿用手稿：[假设]、[建议]、[待实验]、[已知数学事实]、[已有论文结果]、[估计]。
 
 ## 决定 B-D1（已采用，owner 可以推翻）
 
@@ -26,7 +26,7 @@
 | [requirements-gpu.txt](requirements-gpu.txt) | GPU 主机环境 `fork/.venv-bilingual` 的依赖；torch 按 [运行手册的 G0](docs/runbook.md#g0-环境与-gpu-不变量) 另装 |
 | [src/surogate_bilingual/](src/surogate_bilingual/) | 包代码。`import surogate_bilingual` 不导入 torch，也不导入任何 `surogate` 模块；子模块按需导入 torch |
 | [docs/](docs/) | 决定与数据契约、运行手册和实测记录，见下文“文档” |
-| [tests/cpu/](tests/cpu/) | CPU 测试，用 `fork/dev test bilingual` 运行 |
+| [tests/cpu/](tests/cpu/) | CPU 测试，用 `fork/dev test bilingual` 运行；`golden/` 中是 pilot 几何的预算报告 |
 | [reference/](reference/) | owner 的 v1.0 代码与数据，逐字节原样保存，sha256 固定在 `MANIFEST.json` 中；不打包，包代码不导入，只供测试按路径加载，见 [reference/README.md](reference/README.md) |
 
 后续步骤还会加入运行配置的 examples 目录（I4、I5）和 GPU 测试目录（I6）。
@@ -68,6 +68,24 @@
 | `matrix` | 对照矩阵各行的状态 | I6 |
 | `registry` | 列出或查看运行 | I5 |
 
+## 模型、路由与组装（I2）
+
+以下都只在 CPU 上验证过，CUDA 上的行为待 G0 检查。模块边界与数据契约见 [docs/spec.md](docs/spec.md)，验收与偏离见其中的 I2 落地记录。
+
+- **配置**（`config`）：所有默认值都在 `DEFAULTS` 一张表中；`tiny`、`smoke`（= v1.0 的 smoke 几何）、`mech8`、`pilot` 四个 profile；`config_hash` 是规范 JSON 的 sha256。
+- **模型**（`model`、`ops`）：`RoutedLM` 由冻结的共享骨干（嵌入兼 tied head、attention、norm；族 II 另含各层共享读出 Q、b；LP-k 另含非专家层的种子 FFN）、按名字存放的专家库和 executor 组成。两个族：`swiglu`（族 I，B4/B6/B7）与 `slot`（族 II，B4-II/B8/B9）。有两个以上专家时必须传入 `RoutePlan`。只有 executor 读取 plan：全部 token 走同一专家时直接调用该专家，与单专家模型逐位相同；one-hot 行走 gather/scatter；两项非零的行按模型的融合方式（`output`、`concat`、`pre`、`post`）计算。输出缓冲区与输入同 dtype，所以 bf16 autocast 下不再出现 v1.0 的 NEW-01 错误。
+- **路由**（`routing`）：`RoutePlan` 是逐 token 的单纯形门控（P0 中每行至多两个非零项）；`plan_from_segments` 给出 `R_out`、`R_src`、`R_wrong`、`R_random`；`apply_gate_policy` 给出 `dual_const` 与 `dual_window`；`plan_from_tags` 在完整历史上计算后再切片，修正了 v1.0 的窗口截断问题（MA-09）。
+- **组装**（`assembly`）：种子 pack 与专家 pack（safetensors 加 `pack.json`，记录内容哈希、种子指纹与探针 logits）；`assemble` 写出不复制权重的 manifest，对名字互换、同一专家占两个槽位、种子不同、config 或族不同、缺键、多键、文件被改等情况各报一种错误；`verify` 在强制路由下复现每个专家 pack 的探针（CPU fp32 期望差为 0.0）；`FreezePlan` 按 storage 审计优化器，并对每个冻结张量做内容哈希。
+- **审计**（`audit`）：`p_total`、`p_update` 与执行路径上的 `p_active`（在 `TorchFunctionMode` 下记录前向实际读到的参数），解析 MAC 与 `FlopCounterMode` 交叉检查，以及手稿 §5.1 的预算行。
+
+预算报告在 meta device 上从模块树重算，不分配权重内存，几秒内完成：
+
+```bash
+PYTHONPATH=fork/bilingual/src "${FORK_PY:-.venv/bin/python}" -m surogate_bilingual audit --profile pilot
+```
+
+它与手稿 §5.1 和评审的 `budget_v11.json` 逐项一致，只有 B10-ch 的权重 MAC 例外：本实现计入了块 router 的 108,672 MAC，手稿表没有计入，需要 owner 确认（spec 的 I2 落地记录第 11 条）。改动预算代码后，用同一命令加 `--out fork/bilingual/tests/cpu/golden/budget_pilot.json` 重新生成 golden 文件，并在提交说明中写明数字为什么变。
+
 ## 实现步骤
 
 每个步骤由一个或多个签名提交落地；提交前 `fork/dev map`、`fork/dev check` 和 `fork/dev test bilingual` 都要通过。各步骤的交付物和验收条件见 [docs/spec.md 的“实现步骤”](docs/spec.md#实现步骤)。
@@ -75,7 +93,7 @@
 | 步骤 | 内容 | 状态 |
 |---|---|---|
 | I1 | 脚手架与仓库接线 | 已完成（CPU）；CI 尚未运行，见 [实测记录](docs/measurements.md) |
-| I2 | 模型核心、路由、组装、冻结、哈希、参数审计 | 未开始 |
+| I2 | 模型核心、路由、组装、冻结、哈希、参数审计 | 已完成（CPU）；CI 尚未运行，GPU 上未运行 |
 | I3 | 融合算子与合并，fp64 参照测试（复用 v1.0 的 `verify_merge_math.py`） | 未开始 |
 | I4 | 数据：tokenizer、manifest、划分、去污染、shard、采样器、Track S | 未开始 |
 | I5 | 训练：单一训练循环、各 recipe、状态与恢复、运行登记 | 未开始 |

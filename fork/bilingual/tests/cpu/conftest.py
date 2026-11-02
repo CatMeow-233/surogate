@@ -16,3 +16,29 @@ import surogate_bilingual  # noqa: E402
 
 if Path(surogate_bilingual.__file__).resolve().parent != SRC / "surogate_bilingual":
     raise RuntimeError(f"surogate_bilingual was imported from {surogate_bilingual.__file__}, not from {SRC}")
+
+import importlib.util  # noqa: E402
+
+import pytest  # noqa: E402
+
+REFERENCE = Path(__file__).resolve().parents[2] / "reference"
+
+
+@pytest.fixture(autouse=True)
+def _one_cpu_thread():
+    """Bitwise checks on CPU hold with one thread only (docs/spec.md, "实现步骤"); every test runs that way."""
+    import torch
+
+    previous = torch.get_num_threads()
+    torch.set_num_threads(1)
+    yield
+    torch.set_num_threads(previous)
+
+
+@pytest.fixture(scope="session")
+def moe_pilot():
+    """The owner's v1.0 `reference/moe_pilot.py`, loaded by path (it is not a package module)."""
+    spec = importlib.util.spec_from_file_location("bilingual_reference_moe_pilot", REFERENCE / "moe_pilot.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module

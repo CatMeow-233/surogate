@@ -12,7 +12,9 @@
 | 内容 | 结果 | 做法 | 主机 | 提交 | 日期 |
 |---|---|---|---|---|---|
 | I1 CPU 套件（I1-A7 的本机部分） | 21 个用例全部通过；`fork/dev test bilingual` 连续三次的墙钟时间 1.3 s、0.8 s、0.7 s（冷缓存的第一次约 11 s）；最慢的用例约 0.06 s（导入检查的子进程） | `FORK_PY=… fork/dev test bilingual`，`--durations` | C1 | I1（本表所在的提交） | 2026-11-02 |
-| I1 CI 步骤 `Bilingual CPU tests`（I1-A7） | **未运行**：本步骤的提交没有推送，fork CI 尚未执行这一步；90 秒的预算在 CI 的 CPU lane 上待测 | 推送后看 `fork-ci.yml` 中 `fork-tests` job 的这一步 | — | — | — |
+| I2 CPU 套件 | 133 个用例全部通过（I1 的 21 个，I2 的 112 个）；`fork/dev test bilingual` 连续三次的墙钟时间 12.3 s、11.7 s、11.4 s；最慢的是 pilot 预算报告的 fixture，约 4.4 s（在 meta device 上建 18 行的模型并执行前向），其次是写 pack 的 fixture，约 1.4 s | `FORK_PY=… fork/dev test bilingual`，`--durations` | C1 | I2（本行所在的提交） | 2026-11-02 |
+| I2 与 v1.0 的 logits 差（I2-A1） | smoke 几何、fp32、单线程：强制路由与随机混合路由下最大差 4.8e-7（T = 128）与 3.6e-7（T = 37），容差 1e-6；差来自 RoPE 角度表（v1.0 用 fp32，本包用 float64，见 spec 的 I2 落地记录第 1 条） | 一次性脚本（未入库），按测试中的构造打印每种路由的最大差 | C1 | I2 | 2026-11-02 |
+| CI 步骤 `Bilingual CPU tests`（I1-A7；I1 与 I2 的用例） | **未运行**：I1、I2 的提交都没有推送，fork CI 尚未执行这一步；90 秒的预算在 CI 的 CPU lane 上待测 | 推送后看 `fork-ci.yml` 中 `fork-tests` job 的这一步 | — | — | — |
 
 ## GPU
 

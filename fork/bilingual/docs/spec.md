@@ -1,6 +1,6 @@
 # 决定记录与数据契约（P0）
 
-- **状态：** 规格。截至步骤 I1，只有脚手架落地；本文的模型、数据、训练与评测部分都还没有实现，也没有在 GPU 上运行过。凡是 RTX 5090 的数字都是 [估计] 或 TBD，以 G0.5 的实测为准。
+- **状态：** 规格。截至步骤 I2，脚手架（I1）以及模型核心、路由、组装、冻结、哈希与参数审计（I2）已落地，并通过 CPU 测试（见“实现步骤”中的 I2 落地记录）；数据、训练与评测部分还没有实现。没有任何代码在 GPU 上运行过。凡是 RTX 5090 的数字都是 [估计] 或 TBD，以 G0.5 的实测为准。
 - **来源：** 三份文档，都写于 2026-11-02，都不在本仓库中，由 owner 保存：
   - owner 的预注册稿 v1.1（下称“手稿”；本文的“手稿 §N”指它的章节）；
   - 对 v1.0 研究包的对抗式评审 v1.0（下称“评审”；文中的 NOV-、MA-、SCI-、IMPL- 编号和 NEW-01 指它的问题）；
@@ -101,6 +101,7 @@
 | `bilingual-seed/1`、`bilingual-expert/1` | pack 的 `pack.json` | I2 |
 | `bilingual-assembly/1` | 组装 manifest，不复制权重 | I2 |
 | `bilingual-budget/1` | 预算报告 | I2 |
+| `bilingual-fidelity/1` | `verify` 的强制路由保真报告（I2 新增，英文规格中没有） | I2 |
 | `bilingual-manifest/1`、`bilingual-split/1` | 语料 manifest、划分文件 | I4 |
 | `bilingual-shard/1` | shard 的头 `shard.json` | I4 |
 | `bilingual-item/1`、`bilingual-datacard/1` | Track S 的题目（每行一项）与数据卡 | I4 |
@@ -120,7 +121,7 @@ name.encode("utf-8") + b"\0" + str(dtype).encode() + b"\0" + json(list(shape)).e
 
 **组装 manifest（修正 IMPL-04）。** 记录种子 pack、各槽位（名字、路径、`expert_hash`）、融合方式、config 哈希、创建时间与代码提交。`assemble` 对下列每种失败抛出不同的 `AssemblyError`：pack 的名字与槽位名不同；槽位名重复；同一 pack 用了两次（`expert_hash` 重复）；`seed_fingerprint`、`config_hash` 或 `family` 不一致；权重键集合与期望的专家键不完全相等；记录的文件哈希与文件不符。槽位名取自 manifest，任何匹配 `[a-z][a-z0-9_]*` 的标识符都允许（例如普通的第三个专家 `t3`）。`load_assembly` 重新校验每个哈希。
 
-**路由 plan。** `RoutePlan.gates` 是 float32 张量 `[B, T, E]`，每行在单纯形上，P0 中至多两个非零项。one-hot 行走 Top-1 gather/scatter 路径；两项非零的行走模型指定的融合（swiglu 为 `output`/`concat`，slot 为 `pre`/`post`）。路由因果性：`routing.policies` 构造的 plan 只用位置 t 时已知的段元数据给 token t 分配路由；`R_out` 下答案段的路由是问题的语言，在答案开始前就已确定。shard 存 route id 而不是门控，门控由 `apply_gate_policy` 给出。
+**路由 plan。** `RoutePlan.gates` 是 float32 张量 `[B, T, E]`（fp64 测试也可用 float64），每行在单纯形上，P0 中至多两个非零项。one-hot 行走 Top-1 gather/scatter 路径；两项非零的行走模型指定的融合（swiglu 为 `output`/`concat`，slot 为 `pre`/`post`）。路由因果性：`routing.policies` 构造的 plan 只用位置 t 时已知的段元数据给 token t 分配路由；`R_out` 下答案段的路由是问题的语言，在答案开始前就已确定。shard 存 route id 而不是门控，门控由 `apply_gate_policy` 给出。
 
 **语料 manifest 与划分（SCI-10）。** spec 中每个来源一个 `[[source]]`，字段：`name`、`kind`（`zh | en | parallel | codeswitch | synthetic`）、`files`（glob）、`url`、`revision`、`licence`（SPDX 风格 id，必填）、`licence_verified`（默认 false）、`downloaded`、`filters`。manifest 记录每个文件的路径、sha256、字节数、文档数，以及整份 manifest 的 `manifest_sha256`。划分文件记录 `{划分名: [doc_key, …]}`、种子、比例与聚类规则：普通文档按 NFKC、casefold、空白折叠后的文本哈希聚类；平行句对按 `pair_id`；合成文档按 `entity_id`，同一实体的所有文档落在同一划分。
 
@@ -132,7 +133,7 @@ name.encode("utf-8") + b"\0" + str(dtype).encode() + b"\0" + json(list(shape)).e
 
 **运行登记（修正 IMPL-21）。** `runs/index.json` 把运行名映射到唯一的 `run_id`；每个运行目录有 `run.json`、`environment.json`（Python、torch、CUDA/cuDNN、驱动、GPU、CPU、线程数、git 提交与是否 dirty）、`metrics.jsonl`，以及状态、pack 和评测子目录。`run_id` 是规范 JSON `{config_hash, data_manifest_sha256, tokenizer_sha256, seed_fingerprint, code_commit, recipe, init_seed, data_seed}` 的 sha256 的前 16 个十六进制字符。运行名已绑定到另一个 `run_id` 时拒绝创建；同名同 id 则恢复。`code_dirty: true` 时拒绝运行，除非设置了 `registry.allow_dirty`，此时记录该标志。
 
-**指标与预算。** `metrics.jsonl` 每个记录步一行：step、token 数、loss、lr、grad_norm、tokens_per_s、step_s、`peak_alloc_gib`、`peak_reserved_gib`、`dev` 与时间；CPU 上 CUDA 字段为 `null`。预算报告的每行：`id`、`P_total`、`P_active`、`P_update`、`weight_macs`、`macs_T1024`、`within_active_budget`、`within_update_budget`、`declared_in_budget`。
+**指标与预算。** `metrics.jsonl` 每个记录步一行：step、token 数、loss、lr、grad_norm、tokens_per_s、step_s、`peak_alloc_gib`、`peak_reserved_gib`、`dev` 与时间；CPU 上 CUDA 字段为 `null`。预算报告的每行：`id`、`P_total`、`P_active`、`P_update`、`weight_macs`、`macs_T1024`、`within_active_budget`、`within_update_budget`、`declared_in_budget`；I2 另加 `label`、`family`、`method`、`standalone_P_total`、`P_active_dual` 与 `note`（见 I2 落地记录）。
 
 ## 开关
 
@@ -225,6 +226,47 @@ name.encode("utf-8") + b"\0" + str(dtype).encode() + b"\0" + json(list(shape)).e
 - **I2-A13（执行路径上的 P_active，IMPL-21）：** 在 `TorchFunctionMode` 下运行并统计不重复的 storage，切片权重（例如 `channel_select`）用算子声明的元素数：单路径 = shared + path；ZH/EN 混合批为并集 shared + 2 条路径；tied head 只计一次；slot 族的双路 plan 为 shared_II + 2 个专家。
 - **I2-A14（MAC）：** 在 `smoke` profile 与 `pilot` meta 模型上做 T = 8 的前向，用 `FlopCounterMode` 统计 Linear 与嵌入头的 FLOPs，必须恰好等于 2 × 解析权重 MAC × token 数（pilot 单路径每 token 96,206,848）；双路与单路的权重 MAC 之比四舍五入到四位小数为 1.6621。
 - **I2-A15：** 预算报告等于 I2 提交的 golden 文件 budget_pilot.json。
+
+#### I2 落地记录
+
+**状态：** 已完成（CPU）。下表 15 条验收都是 `fork/bilingual/tests/cpu` 中有名字的用例，全部通过；没有在 GPU 上运行，CI 也还没有运行这些用例（见 [实测记录](measurements.md)）。`assemble`、`verify`、`audit` 三个命令随本步骤落地。
+
+| 验收 | 检查方式（`fork/bilingual/tests/cpu` 下的用例） |
+|---|---|
+| I2-A1 | `test_model.py` 的 `test_i2_a1_logits_match_the_v10_model_on_forced_and_mixed_routes`（T = 128 与 37）；C1 上实测最大差 4.8e-7，来源见下文偏离 1 |
+| I2-A2 | `test_i2_a2_executor_matches_the_dense_reference`：tiny 与 smoke、fp32 与 fp64、四种融合、one-hot/双路/混合 plan，逐层比较；`test_i2_a2_model_logits_match_a_dense_model`：整模型对稠密 executor |
+| I2-A3 | `test_i2_a3_every_dispatch_path_runs_under_bf16_autocast`；对照用例 `test_i2_a3_the_v10_dispatch_is_the_regression_it_guards` 表明 v1.0 的 `_ffn` 在 CPU bf16 autocast 下确实报错，即 NEW-01 已在 CPU 上复现，CUDA 上仍未验证 |
+| I2-A4 | `test_i2_a4_a_multi_expert_model_requires_a_plan` |
+| I2-A5 | `test_i2_a5_later_tokens_never_change_earlier_logits`；同时检查窗口前向用完整 plan 的切片时与完整前向的前缀一致（≤ 1e-12） |
+| I2-A6 | `test_numerics.py` 的四个 `test_i2_a6_*` 用例 |
+| I2-A7 | `test_i2_a7_checkpointing_leaves_gradients_unchanged_and_frozen_grads_none`（两个族、四种融合，混合 plan） |
+| I2-A8 | `test_routing.py` 的 `test_i2_a8_*`；窗口回归用例直接调用 v1.0 的 `route_from_tags`，确认它在窗口内回落到 zh |
+| I2-A9 | `test_hashing.py` 的 `test_i2_a9_*` |
+| I2-A10 | `test_assembly.py` 的 `test_i2_a10_*`：12 种失败各对应一个不同的 `AssemblyError` 子类，另有改名副本与未知 major 版本两例；`t3` 被接受；三个槽位的探针差都是 0.0 |
+| I2-A11 | `test_freeze.py` 的 `test_i2_a11_*`（两个族；另有植入违规的对照用例） |
+| I2-A12 | `test_audit.py` 的 `test_i2_a12_*`：上表全部数字，以及 `budget_v11.json` 的 17 行逐项比较 |
+| I2-A13 | `test_i2_a13_*`；算子声明部分读取的机制用一个切片权重的玩具模块检查，`channel_select` 本身在 I3 落地 |
+| I2-A14 | `test_i2_a14_*`：smoke 上两个族、单路与双路；pilot meta 模型上单路 96,206,848 MAC/token，比值 1.6621 |
+| I2-A15 | `test_i2_a15_budget_report_equals_the_golden_file`；golden 文件是 `fork/bilingual/tests/cpu/golden/budget_pilot.json`，由 `audit --profile pilot --out` 生成 |
+
+**实现中的决定与对英文规格的偏离（owner 可以推翻）：**
+
+1. **RoPE 角度表在 float64 中构造**，cos/sin 再转成提升后的 dtype。规格写的是“角度表在提升后的 dtype 中构造”，但 fp32 角度表在 T = 128 时与精确值差 4.9e-6（T = 1024 时约 4e-5），达不到 I2-A6 的 fp32 ≤ 1e-6。代价是与 v1.0（fp32 角度表）的 logits 不再逐位相同：I2-A1 实测差 4.8e-7，仍在 1e-6 之内。
+2. **`ops.fusion` 的一部分提前到 I2：** executor 需要的四种融合（`mix_outputs`、`stack_swiglu` 与 `concat_forward`、`slot_pre`、`slot_post`），因为 I2-A2 要求双路 dispatch 与稠密参照一致。交叉连接、通道选择、零初始化 adapter 及全部 fp64 恒等式测试仍在 I3。
+3. **`RoutedLM` 的 `fusion` 默认为 None，即所属族的默认融合**（swiglu 为 `output`，slot 为 `post`）。规格签名中的默认值 `"output"` 不属于 slot 族；slot 族不接受 `output`，它在数学上就是 `post`，同一个臂不用两个名字。
+4. **`RoutePlan.gates` 也接受 float64**，供 fp64 测试与 I3 的恒等式使用；默认 plan 与由 shard 生成的 plan 都是 float32。
+5. **LP-k 的 config 哈希。** 种子 pack 的 config 中 `expert_layers` 为 null；专家 pack 的 config 只能在 `expert_layers` 上与种子不同（否则 `ConfigMismatchError`），同一组装中的专家之间要求 `config_hash` 完全相同（否则 `ConfigHashMismatchError`）。LP-k 时种子与专家的 `config_hash` 必然不同，所以规格中“每个 pack 的 config_hash 相同”按此细化；专家 pack 另记 `seed_config_hash`。
+6. **组装的检查顺序**是：同一专家占两个槽位（`expert_hash` 重复，`PackReusedError`）先于名字是否一致。否则 `zh=zh 包 en=zh 包` 会先报名字不符；按这个顺序，改过 `pack.json` 中名字的副本同样以 `PackReusedError` 拒绝。规格之外另有：`InvalidSlotNameError`、`FusionError`、`FormatError`（含未知 major 版本）、`ConfigMismatchError`，以及写专家 pack 时骨干与种子不同的 `BackboneMismatchError`。
+7. **manifest 中的路径相对 manifest 所在目录保存**，组装结果可以与 pack 一起移动。
+8. **探针**总是在 CPU 上以 fp32 运行独立模型（种子骨干加该专家），与训练所在的设备无关；`pack.json` 的 `probe` 另记 `"device": "cpu"`。保真报告是新格式 `bilingual-fidelity/1`；bf16 CUDA 的容差 0.05 与 argmax 一致率 99.5% 只是 [建议]，G0 运行前锁定。
+9. **路由策略的解读。** `R_src` 把整道题（提示与答案）都路由到 `knowledge_source` [假设]，owner 也可以改为只路由答案段；`R_random` 每段抽一次；`R_wrong` 在每一段上交换 zh 与 en。
+10. **预算行**另含 `label`、`family`、`method`、`standalone_P_total`、`P_active_dual` 与 `note`。`method` 为 `executed` 时 P_active 来自执行计数；B10-ch 的块 router 与通道选择、B11 的 adapter、2B 外推的 router 在 P0 中没有前向（P1），这几行为 `structural`，这些部分按声明计数。B10-II 的槽宽取 ⌈789/2⌉ = 395（B-O4）。
+11. **与手稿 §5.1 的一处不一致，需要 owner 确认：** B10-ch 的权重 MAC 本实现为 96,315,520，手稿表与 `budget_v11.json` 为 96,206,848。后者没有计入 rank-8 块 router 的 24 × 8 × (512 + 54) = 108,672 MAC，而这些 router 参数已经计入了它的 P_active。本实现计入这部分，与 B11 计入 adapter MAC 的做法一致。owner 若同意，手稿表的这一格改为 96,315,520，否则改代码。
+12. **2B 外推行的 `P_update` 为 null**：v1.0 §5.2 的组织方式（每层 40 个小 FFN 加每层 router）不是整路径专家，P_update 没有定义。
+13. **训练桩**只有 `train.recipes`（`SeedRecipe` 与 `ExpertRecipe` 的可训练集合）与 `train.objectives`（masked CE）。`train.loop` 没有落地，所以 `train` 命令仍以退出码 2 结束，并指向 I5。
+14. **`config.load_toml` 只覆盖 `DEFAULTS` 的各节**：行文件的 stage 表与运行身份字段在 I5 加入，`extra_tables` 参数为此预留。
+
+**仍未验证：** CUDA 上的全部行为（bf16 autocast 下的 executor、SDPA 后端、容差）；CI 上的这些用例与 CPU lane 上的套件耗时。
 
 ### I3：融合算子与合并（复用 `verify_merge_math.py` 的 fp64 参照测试）
 
