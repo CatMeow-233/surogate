@@ -2,7 +2,7 @@
 
 命令都在 GPU 主机的仓库根目录、环境 `fork/.venv-bilingual` 中运行。门槛按顺序进行：某一步以非零退出码结束、或判据不成立，就停止，保存输出，不进入下一个门槛；判据不成立时记录实测值，不要放宽阈值。每个结果都按主机、提交和日期记入 [实测记录](measurements.md)。本手册中的时长、吞吐和显存数字在实测之前都是 [估计]。
 
-**当前状态（截至步骤 I6）：本手册中的门槛全部未运行。** 全部命令都已落地（I2–I6），但没有在 GPU 主机上运行过，所以下文的结果表都是“未运行”。
+**当前状态（截至步骤 I6 与代码评审 CR1 的修正）：本手册中的门槛全部未运行。** 全部命令都已落地（I2–I6，CR1 加入 `verify --docs`、`eval-nll --arm/--replicate`、`registry budget` 与 bench 的 `joint_wide`、`bridge_c` recipe），但没有在 GPU 主机上运行过，所以下文的结果表都是“未运行”。
 
 **命令块的检查。** 标为 `bash runbook` 的代码块由 `fork/bilingual/tests/cpu/test_runbook.py` 逐条检查（I6-E7）：
 
@@ -38,7 +38,7 @@
    fork/.venv-bilingual/bin/python -m pytest -q -p no:cacheprovider fork/bilingual/tests/cpu
    ```
 
-   判据：倒数第二条输出的计算能力为 `(12, 0)`；CPU 测试全部通过，并且没有跳过的用例：在 GPU 主机上 scipy 已装，CPU lane 上跳过的 `test_i3_c10_numpy_hungarian_equals_scipy`（numpy Hungarian 对 scipy 的对拍）在这里必须运行并通过；pilot 的 Re-Basin（n = 1728）也只能在这里用 scipy 求解。把 torch 的确切版本（含 `+cu` 后缀）、CUDA 版本、驱动版本（`nvidia-smi`）和 `requirements.lock` 的 sha256 记入实测记录。`fork/.venv-bilingual` 被 `fork/.gitignore` 忽略，所以其中的锁文件不会让工作区变 dirty。
+   判据：倒数第二条输出的计算能力为 `(12, 0)`；CPU 测试全部通过，并且没有跳过的用例（CPU 测试在这台主机上也只用 CPU：conftest 在会话开始时隐藏 CUDA，所以逐位检查照常成立，`bench` 只做 dry-run）：在 GPU 主机上 scipy 已装，CPU lane 上跳过的 `test_i3_c10_numpy_hungarian_equals_scipy`（numpy Hungarian 对 scipy 的对拍）在这里必须运行并通过；pilot 的 Re-Basin（n = 1728）也只能在这里用 scipy 求解。把 torch 的确切版本（含 `+cu` 后缀）、CUDA 版本、驱动版本（`nvidia-smi`）和 `requirements.lock` 的 sha256 记入实测记录。`fork/.venv-bilingual` 被 `fork/.gitignore` 忽略，所以其中的锁文件不会让工作区变 dirty。
 
 2. **环境指纹。** 写出 Python、torch、CUDA/cuDNN、驱动（`nvidia-smi`）、GPU、CPU、线程数、库版本、git 提交与是否 dirty；读不到的字段为 null，不猜。每个训练运行开始和每次恢复时也各记一份。
 
@@ -48,7 +48,7 @@
 
    判据：`cuda`、`cudnn`、`driver`、`gpu` 都不为 null，`gpu` 的计算能力为 12.0。
 
-3. **GPU 不变量。** GPU 测试在 `fork/bilingual/tests/gpu` 中，没有 CUDA 时整体跳过。`BILINGUAL_G0_RECORD` 指定 (g3) 与 (g6) 的记录写到哪里。
+3. **GPU 不变量。** GPU 测试在 `fork/bilingual/tests/gpu` 中，没有 CUDA 时整体跳过；它必须单独运行，与 CPU 测试放在同一个 pytest 会话中时会报错（CPU 测试隐藏了 CUDA）。`BILINGUAL_G0_RECORD` 指定 (g3) 与 (g6) 的记录写到哪里。
 
    ```bash runbook
    BILINGUAL_G0_RECORD=data/runs/_g0/g0.json fork/.venv-bilingual/bin/python -m pytest -q -rs -p no:cacheprovider fork/bilingual/tests/gpu
@@ -74,15 +74,17 @@
 
 ## G0.5 吞吐与显存
 
-约 1–2 小时 [估计]。对每个（族、recipe、seq、microbatch、checkpointing）组合，在 pilot 几何的随机初始化模型上先跑 `--warmup` 步、再计时 `--steps` 步；`seed` 训练全部参数，`expert` 冻结骨干、只训练一个专家。每个点一行 JSON，不放得下的点记为 oom，最后一行是选择。
+约 1.5–2.5 小时 [估计]。对每个（族、recipe、seq、microbatch、checkpointing）组合，在 pilot 几何的随机初始化模型上先跑 `--warmup` 步、再计时 `--steps` 步。计时的就是训练循环本身的一步（`train.loop.Trainer.step`：recipe 的参数组、只算 loss mask 目标的 CE、KL 锚点的参照前向、梯度裁剪、AdamW），输入是 shard 布局的合成窗口。`seed` 训练全部参数，`expert` 冻结骨干、只训练一个专家；第二条命令只在族 I、seq 1024 上测最小集合里另外两种布局：`joint_wide`（B12a 的 2f 宽专家）与 `bridge_c`（ZH、EN 冻结参与前向，训练 Bridge；T2、T3′，T1′ 的布局比它小）。每个点一行 JSON，不放得下的点记为 oom，最后一行是选择。
 
 ```bash runbook
 fork/.venv-bilingual/bin/python -m surogate_bilingual bench --family swiglu,slot --recipe seed,expert --seq 256,512,1024 \
   --microbatch 1,4,8,16,32 --checkpointing off,on --warmup 10 --steps 30 --out data/runs/_bench/g05.jsonl
+fork/.venv-bilingual/bin/python -m surogate_bilingual bench --family swiglu --recipe joint_wide,bridge_c --seq 1024 \
+  --microbatch 1,4,8,16,32 --checkpointing off,on --warmup 10 --steps 30 --out data/runs/_bench/g05_wide_bridge.jsonl
 ```
 
-- **记录：** tokens/s 与每步时间；`max_memory_allocated`、`max_memory_reserved` 与计时结束时 `nvidia-smi` 的 memory.used（缓存分配器保留着峰值时的预留，所以它是峰值时进程的占用加 CUDA context）；各 SDPA 后端是否可用；MFU = 6·N_matmul·tokens/s / PEAK（N_matmul 为每 token 的权重 MAC；冻结的权重不算权重梯度，所以 expert recipe 的 MFU 低估了 GPU 实际做的计算）。
-- **决定：** 文件最后的 choice 行按（族、recipe）给出 seq 1024 下能凑满 `global_batch_tokens` = 65,536、不 OOM、tokens/s 最高的（microbatch, accum, checkpointing）。把选定的组合写进 [pilot_rows.toml](../examples/pilot_rows.toml) 的 `[train]` 节并提交（它们进入运行身份，所以不要用 `--set` 临时改），再用实测的 tokens/s 重算手稿 §13 的预算，重新锁定 token 预算。
+- **记录：** tokens/s 与每步时间；`max_memory_allocated`、`max_memory_reserved` 与计时结束时 `nvidia-smi` 的 memory.used（缓存分配器保留着峰值时的预留，所以它是峰值时进程的占用加 CUDA context）；各 SDPA 后端是否可用；MFU = c·N_matmul·tokens/s / PEAK（N_matmul 为每 token 的权重 MAC，c = 6，带 KL 参照前向的 `expert_kl` 为 8；冻结的权重不算权重梯度，所以冻结骨干的 recipe 的 MFU 低估了 GPU 实际做的计算）。
+- **决定：** 两个文件最后的 choice 行按（族、recipe）给出 seq 1024 下能凑满 `global_batch_tokens` = 65,536、不 OOM、tokens/s 最高的（microbatch, accum, checkpointing）。把选定的组合写进 [pilot_rows.toml](../examples/pilot_rows.toml) 的 `[train]` 节并提交（它们进入运行身份，所以不要用 `--set` 临时改），再用实测的 tokens/s 重算手稿 §13 的预算，重新锁定 token 预算。
 
 [估计]，未实测：
 
@@ -138,9 +140,12 @@ $PY -m surogate_bilingual train fork/bilingual/examples/pilot_rows.toml --stage 
 $PY -m surogate_bilingual train fork/bilingual/examples/pilot_rows.toml --stage g1p-b2-r0
 $PY -m surogate_bilingual train fork/bilingual/examples/pilot_rows.toml --stage g1p-b12a-r0
 $PY -m surogate_bilingual registry list
+$PY -m surogate_bilingual registry budget
 ```
 
-调参台账（手稿 §9.6）：每个训练臂另起两个 lr 试验，例如 `--stage g1p-seed-r0 --set train.lr=3e-4 --name g1p-seed-r0-lr3e-4`，只在 dev 上选。每个运行的 `run.json` 记录 config、`run_id`、P_update 与状态，`metrics.jsonl` 每步一行（tokens/s、step 时间、`max_memory_allocated` 与 `max_memory_reserved` 的峰值）。
+`registry budget` 按（matrix 行、重复）列出已完成运行的 token、P_update 与 GPU 小时，检查 token 对齐（B2 = ZH + EN，B12a = B2，T1′ 两个方向之和 = T2 = T3′ = T3″；未完成的记为 incomplete），并汇总调参试验的算力。
+
+调参台账（手稿 §9.6）：每个训练臂另起两个 lr 试验，例如 `--stage g1p-seed-r0 --set train.lr=3e-4 --set 'run.trial="lr-3e-4"' --name g1p-seed-r0-lr3e-4`，只在 dev 上选；`run.trial` 把它记为调参试验，`registry budget` 把它的 GPU 小时计入调参算力。运行名不能含 `.tmp-`（临时文件的标记）。每个运行的 `run.json` 记录 config、`run_id`、P_update、状态、`compute`（各次调用的步时间之和，CUDA 上折成 GPU 小时）、`storage`（状态与 pack 的字节数）和 `grad_audit`（从未得到非零梯度的可训练张量；前 10 步内一个都没有时运行以 failed 结束），`metrics.jsonl` 每步一行（tokens/s、step 时间、`max_memory_allocated` 与 `max_memory_reserved` 的峰值）。
 
 **pilot 评测（dev）。** 组装（B2、B12a 是单槽位组装，B4、B6 是 ZH+EN 组装），在 dev 的 E3-ctx-cross 上评测 B0、B2、B12a、B4 与 B6，然后由三个重复的预测得出门槛与讨厌参数。评测默认 fp32（`--autocast none`），候选按手稿 §9.1 的规则排序（等长时求和，否则逐 token 平均）。
 
@@ -158,10 +163,10 @@ $PY -m surogate_bilingual eval-tasks --model data/runs/_assembly/g1p-zh-en-r0.js
 $PY -m surogate_bilingual stats pilot --pred data/runs/_eval/g1p --out data/runs/_decisions/g1p.json
 ```
 
-`stats pilot` 读入目录下所有重复的预测：`gate` 给出门槛，`nuisance` 给出各臂对（B12a−B4、B2−B4、B6−B4）每个重复的差、重复间 SD、不一致率与手稿 §9.5 规则给出的重复数 R（SESOI 取 [建议] 默认值 5pp）。
+`stats pilot` 只读入目录下 dev 划分的预测（其他划分的记录不计入，数目记在 `inputs` 中）：`gate` 给出门槛，`nuisance` 给出各臂对（B12a−B4、B2−B4、B6−B4）每个重复的差、重复间 SD、不一致率、题目方差（逐题差的方差，各重复平均）、分歧大小（两臂 gold 边际之差的绝对值均值）与手稿 §9.5 规则给出的重复数 R（SESOI 取 [建议] 默认值 5pp）。
 
 - **通过：** 在 **dev** 上，B0、B2、B12a 中最好的一个（按三个重复的平均）在 E3-ctx-cross 上的正确率 ≥ 随机水平（12.5%）+ 20 个百分点。
-- **输出：** 讨厌参数（不一致率、题目方差、重复间 SD、发散情况）；按手稿 §9.5 的规则定出的重复数 R（`stats power --sd … --sesoi …` 可对其他 SESOI 重算）；在签名的预注册锁定提交中锁定 SESOI 与界值（手稿 §9.7）。pilot 只估计讨厌参数，不估计效应量。
+- **输出：** 讨厌参数（不一致率、题目方差、重复间 SD、分歧大小，都在 `g1p.json` 的 `nuisance` 中；训练发散的运行以 failed 记入 `run.json`，`registry list` 可见）；按手稿 §9.5 的规则定出的重复数 R（`stats power --sd … --sesoi …` 可对其他 SESOI 重算）；在签名的预注册锁定提交中锁定 SESOI 与界值（手稿 §9.7）。pilot 只估计讨厌参数，不估计效应量。
 - **失败：** 重新设计 Track S（例如增加曝光次数或种子 token），不开始确认性运行。
 
 | 项目 | 结果 | 主机 | 提交 | 日期 |
@@ -176,7 +181,7 @@ $PY -m surogate_bilingual stats pilot --pred data/runs/_eval/g1p --out data/runs
 ```bash runbook
 PY=fork/.venv-bilingual/bin/python
 $PY -m surogate_bilingual train fork/bilingual/examples/pilot_rows.toml --stage seed-I-r0
-$PY -m surogate_bilingual eval-nll --model data/runs/seed-I-r0/packs/seed --docs data/splits/dev/*.jsonl --unigram-shard data/shards/seed --out data/runs/_eval/main/r0/B0.nll.json
+$PY -m surogate_bilingual eval-nll --model data/runs/seed-I-r0/packs/seed --arm B0 --replicate 0 --docs data/splits/dev/*.jsonl --unigram-shard data/shards/seed --out data/runs/_eval/main/r0/B0.nll.json
 $PY -m surogate_bilingual eval-tasks --model data/runs/seed-I-r0/packs/seed --arm B0 --replicate 0 --items data/corpus/track_s/items/E3ctx.dev.jsonl --variant mono --out data/runs/_eval/main/r0/B0-mono
 $PY -m surogate_bilingual eval-tasks --model data/runs/seed-I-r0/packs/seed --arm B0 --replicate 0 --prompts fork/bilingual/examples/g1_prompts.jsonl --out data/runs/_eval/main/r0/B0-gen
 ```
@@ -199,7 +204,7 @@ PY=fork/.venv-bilingual/bin/python
 $PY -m surogate_bilingual train fork/bilingual/examples/pilot_rows.toml --stage zh-I-r0
 $PY -m surogate_bilingual train fork/bilingual/examples/pilot_rows.toml --stage en-I-r0
 $PY -m surogate_bilingual assemble --seed data/runs/seed-I-r0/packs/seed --slot zh=data/runs/zh-I-r0/packs/zh --slot en=data/runs/en-I-r0/packs/en --out data/runs/_assembly/zh-en-I-r0.json
-$PY -m surogate_bilingual eval-nll --model data/runs/_assembly/zh-en-I-r0.json --docs data/splits/dev/*.jsonl --out data/runs/_eval/main/r0/zh-en.nll.json
+$PY -m surogate_bilingual eval-nll --model data/runs/_assembly/zh-en-I-r0.json --arm T0 --replicate 0 --docs data/splits/dev/*.jsonl --out data/runs/_eval/main/r0/zh-en.nll.json
 $PY -m surogate_bilingual eval-tasks --model data/runs/seed-I-r0/packs/seed --arm B0 --replicate 0 --items data/corpus/track_s/items/E1.dev.jsonl --out data/runs/_eval/main/r0/B0-E1
 $PY -m surogate_bilingual eval-tasks --model data/runs/_assembly/zh-en-I-r0.json --arm B1 --replicate 0 --items data/corpus/track_s/items/E1.dev.jsonl --out data/runs/_eval/main/r0/B1-E1
 ```
@@ -216,7 +221,7 @@ $PY -m surogate_bilingual eval-tasks --model data/runs/_assembly/zh-en-I-r0.json
 
 不超过 1 小时 [估计]，B2 与 B12a 的训练另计。
 
-- **组装与验证：** 组装 ZH+EN（G2 已写出 manifest）并运行 `verify`；通过条件为 CUDA 上的 G0 容差。
+- **组装与验证：** 组装 ZH+EN（G2 已写出 manifest）并运行 `verify`，按手稿 §9.4 的两种输入：每个 pack 记录的随机 token 探针，以及 `--docs` 给出的真实 dev 文本（取 4 个 max_seq 的窗口，组装模型的强制路由对单独的“种子骨干 + 该专家”模型）。CPU fp32 的一次期望差为 0.0（≤ 1e-5）；CUDA bf16 的一次用 G0 容差。
 - **dev 评测：** 在 dev 的 E3-ctx-cross 上评测 B0、B4、B4-wrong、B4-rand、B4-src 与 B6；B2 与 B12a 训练完成后加入。B4-src 只对有单一知识来源的参数式题目有定义，在 E3-ctx 上每道题都记为跳过（带原因），所以它在 E2 上另评。在 E4 的 dev 子集上做切换代价分解（M、R_new、R_old，以及切换后前 16 个目标 token 的 NLL 峰值）。
 
 ```bash runbook
@@ -224,7 +229,8 @@ PY=fork/.venv-bilingual/bin/python
 ITEMS=data/corpus/track_s/items/E3ctx.dev.jsonl
 OUT=data/runs/_eval/main/r0
 ZHEN=data/runs/_assembly/zh-en-I-r0.json
-$PY -m surogate_bilingual verify $ZHEN --device cuda --autocast bf16 --out data/runs/_assembly/zh-en-I-r0.fidelity.json
+$PY -m surogate_bilingual verify $ZHEN --docs data/splits/dev/*.jsonl --out data/runs/_assembly/zh-en-I-r0.fidelity-cpu.json
+$PY -m surogate_bilingual verify $ZHEN --device cuda --autocast bf16 --docs data/splits/dev/*.jsonl --out data/runs/_assembly/zh-en-I-r0.fidelity.json
 $PY -m surogate_bilingual eval-tasks --model data/runs/seed-I-r0/packs/seed --arm B0 --replicate 0 --items $ITEMS --variant cross --out $OUT/B0
 $PY -m surogate_bilingual eval-tasks --model $ZHEN --arm B4 --replicate 0 --items $ITEMS --variant cross --out $OUT/B4
 $PY -m surogate_bilingual eval-tasks --model $ZHEN --arm B4-wrong --replicate 0 --items $ITEMS --variant cross --out $OUT/B4-wrong
@@ -244,7 +250,7 @@ $PY -m surogate_bilingual matrix --results data/runs/_eval/main
 ```
 
 - **无效性规则（手稿 §9.6，B-O18）：** `futility_r0.json` 记录 (B12a − B4) 与 (B6 − B4) 在 dev 上的值和决定：两者都小于 SESOI_A / 2 时分支 1 判为“无效性停止（不检验）”，不训练族 II，分支 2 照常进行。
-- **test 集：** 在手稿 §9.7 的预注册锁定之前不碰 test 集：`eval-tasks` 与 `switch` 默认只评测 dev，遇到 test 题目时拒绝，除非显式加 `--allow-test`。锁定之后的确认性检验是 `stats confirm`（重复级单侧配对 t 检验与手稿 §9.3 的图形化守门，H_B 的不一致率前提用 dev 预测检查）。
+- **test 集：** 在手稿 §9.7 的预注册锁定之前不碰 test 集：`eval-tasks`、`switch` 与 `eval-nll` 默认只评测 dev，遇到 test 题目或 test 文档时拒绝，除非显式加 `--allow-test`（`eval-nll` 从 `split materialize` 写出的 manifest 读出每个文件的划分）。锁定之后的确认性检验是 `stats confirm`：重复级单侧配对 t 检验与手稿 §9.3 的图形化守门；`--pred` 只取 test 划分的预测，`--dev-pred` 只取 dev 划分的预测（H_B 的不一致率前提），`--nll` 只取 test 划分的 eval-nll 文件（H_C 的 BPB 非劣部分，每个重复 T2 与 T0 各一个，用 `--arm` 与 `--replicate` 标记），同一目录里其他划分的记录不会混入。H_C 是交并检验：增益、E1 非劣与两种语言列的 BPB 非劣缺任何一部分的数据时，H_C 记为“不可检验”，p = 1。T 臂（T2、T3′、T3″）的 answer route 只作用于翻译题（E4）的指令与答案段，所以它们在 E1 上与 T0 逐位相同；T1′ 每个方向一个组装（目标槽位放副本），用 `eval-tasks --arm "T1'" --direction zh>en` 这样的命令逐方向评测。手稿 §7 中没有评测协议的行（RtS、B9-II+aff 等，见 `matrix` 的“评测协议”一列）`eval-tasks` 会拒绝。
 - **对照矩阵：** 最后一条打印手稿 §7 的全部行；有结果的行列出记录到的指标，其余为“未运行”。
 
 | 项目 | 结果 | 主机 | 提交 | 日期 |

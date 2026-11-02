@@ -26,7 +26,8 @@
 | I6 CPU 套件 | 370 个用例：369 个通过，1 个跳过（同 I3，没有 scipy）；I6 新增 51 个。`fork/dev test bilingual` 的墙钟时间 53.2 s、48.5 s、51.6 s（pytest 报告的时间）。I6 中最慢的是运行手册的演练（约 8 s：57 条包命令各做一次 `--dry-run`，其中 55 条再以 tiny 规模真正运行），其次是评测 fixture 的组装与加载（约 1 s）和 bootstrap 覆盖率的 400 次模拟（约 0.5 s） | `FORK_PY=… fork/dev test bilingual`，`--durations` | C1 | I6（本行所在的提交） | 2026-11-02 |
 | I6 统计检验的校准（模拟，不是结果） | 聚类 bootstrap（60 簇 × 8 题，簇效应 SD 0.3，2000 次重抽样）400 次模拟的 95% CI 覆盖率 0.945；重复级单侧 t 检验在零假设下（R = 3，重复间 SD 0.05，300 道 Bernoulli 题）4000 次模拟的一类错误率 0.0505（α = 0.05）；每重复差的 SD 为 0.03、δ = 5pp、单侧 α = 0.0125 时，R = 3、4、5、6 的功效为 0.206、0.414、0.622、0.781（数值积分；R = 5 的 40,000 次模拟为 0.624），所以这一 SD 下 R = 6 仍不足 0.8 | 与 `test_eval_stats.py` 相同的设置，一次性脚本（未入库）打印数值 | C1 | I6 | 2026-11-02 |
 | GPU 测试代码的 CPU 演练（`BILINGUAL_GPU_TESTS_ON_CPU=1`，**不是 G0 结果**） | 12 个用例：10 个通过，2 个只能在 CUDA 上运行的跳过（(g3) SDPA 后端与 scipy 对拍）。CPU bf16 autocast 下：tiny 训练的 pack 的探针 max-abs 为 0.0026（zh）与 0.0030（en），argmax 一致率 1.0；fp32 下差恰为 0.0；随机初始化的 pilot 几何 max-abs 为 0.022（swiglu）与 0.017（slot），swiglu 的 argmax 一致率只有 0.875（未训练模型的 logits 几乎相等，见 spec 的 I6 落地记录第 17 条）；CPU 上 (g4)、(g5) 的 loss 相对差为 0.0 | `BILINGUAL_GPU_TESTS_ON_CPU=1 BILINGUAL_G0_RECORD=… pytest fork/bilingual/tests/gpu` | C1 | I6 | 2026-11-02 |
-| CI 步骤 `Bilingual CPU tests`（I1-A7；I1 至 I6 的用例） | **未运行**：I1 至 I6 的提交都没有推送，fork CI 尚未执行这一步；90 秒的预算在 CI 的 CPU lane 上待测（本机 C1 上约 50 s） | 推送后看 `fork-ci.yml` 中 `fork-tests` job 的这一步 | — | — | — |
+| CR1 CPU 套件（代码评审的修正之后） | 395 个用例：394 个通过，1 个跳过（同 I3，没有 scipy）；CR1 新增 25 个。`fork/dev test bilingual` 连续两次的墙钟时间 51.7 s、50.9 s。最慢的仍是运行手册的演练（约 8 s），其次是 pilot 预算报告的 fixture（约 5.4 s，多了 B12a 一行）与完整规模题目的生成与检查（约 5.4 s） | `FORK_PY=… fork/dev test bilingual`，`--durations` | C1 | CR1（本行所在的提交） | 2026-11-02 |
+| CI 步骤 `Bilingual CPU tests`（I1-A7；I1 至 I6 与 CR1 的用例） | **未运行**：这些提交都没有推送，fork CI 尚未执行这一步；90 秒的预算在 CI 的 CPU lane 上待测（本机 C1 上约 51 s） | 推送后看 `fork-ci.yml` 中 `fork-tests` job 的这一步 | — | — | — |
 
 ## GPU
 

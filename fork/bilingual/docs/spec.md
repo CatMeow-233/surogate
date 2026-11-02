@@ -1,6 +1,6 @@
 # 决定记录与数据契约（P0）
 
-- **状态：** 规格。P0 的步骤 I1–I6 已全部落地，并通过 CPU 测试：脚手架（I1），模型核心、路由、组装、冻结、哈希与参数审计（I2），融合算子、合并与 router 门控（I3），数据管线与 Track S 生成器（I4），训练循环、各 recipe 与运行登记（I5），评测、统计、资源审计与运行手册（I6）（见“实现步骤”中的 I2–I6 落地记录）。没有训练或评测过任何实验模型，所以还没有任何实验结果；没有任何代码在 GPU 上运行过。凡是 RTX 5090 的数字都是 [估计] 或 TBD，以 G0.5 的实测为准。
+- **状态：** 规格。P0 的步骤 I1–I6 已全部落地，并通过 CPU 测试：脚手架（I1），模型核心、路由、组装、冻结、哈希与参数审计（I2），融合算子、合并与 router 门控（I3），数据管线与 Track S 生成器（I4），训练循环、各 recipe 与运行登记（I5），评测、统计、资源审计与运行手册（I6）（见“实现步骤”中的 I2–I6 落地记录）；之后的代码评审 CR1 的修正见“代码评审 CR1”一节。手稿 §13 最小决定性集合中仍有几项没有实现，列在“推迟项”中：RtS 的评测协议、B9-II+aff 的仿射拟合、手稿 §9.1 的中介量与实体/数字保持率。没有训练或评测过任何实验模型，所以还没有任何实验结果；没有任何代码在 GPU 上运行过。凡是 RTX 5090 的数字都是 [估计] 或 TBD，以 G0.5 的实测为准。
 - **来源：** 三份文档，都写于 2026-11-02，都不在本仓库中，由 owner 保存：
   - owner 的预注册稿 v1.1（下称“手稿”；本文的“手稿 §N”指它的章节）；
   - 对 v1.0 研究包的对抗式评审 v1.0（下称“评审”；文中的 NOV-、MA-、SCI-、IMPL- 编号和 NEW-01 指它的问题）；
@@ -53,29 +53,31 @@
 
 ## 模块边界
 
-每个模块只有一项职责；“不得”一栏是禁止它承担的耦合。下表的模块在 I2–I6 中落地。
+每个模块只有一项职责；“不得”一栏是禁止它承担的耦合。“依赖”一栏是包内的实际依赖（CR1 按代码改写）；分层规则由 `fork/bilingual/tests/cpu/test_scaffold.py` 的 `test_src_modules_respect_the_layer_table` 对 src 中每个相对导入（模块级与函数内都算）检查，层次表见该测试的 `LAYER_ALLOWED`。
 
 | 模块 | 职责 | 依赖 | 不得 |
 |---|---|---|---|
-| `config` | 带类型的冻结 config、默认值、profile、config 哈希 | 标准库 | 读数据；在导入时导入 torch |
+| `config` | 带类型的冻结 config、默认值、profile、config 哈希、运行名规则 | canonical | 读数据；在导入时导入 torch |
 | `canonical` | 规范 JSON、sha256、原子写入与替换文件或目录 | 标准库 | 了解任何 schema |
-| `ops.*` | 张量算子：norm、rope、attention、FFN 块、融合数学、合并 | torch | 查看路由或名字；分发 token；读文件 |
+| `devices` | 训练、评测与 bench 共用的设备解析（`auto` 为有 CUDA 时用 CUDA） | torch | |
+| `ops.*` | 张量算子：norm、rope、attention、FFN 块、融合数学、合并；`ops.reads` 是部分读取的声明钩子 | config | 查看路由或名字；分发 token；读文件 |
 | `model.backbone` | θ_S：嵌入兼 tied head、attention、norm、族 II 的读出、LP-k 非专家层上的种子 FFN | ops | 持有专家 |
 | `model.bank` | 按名字、按专家层存放的专家参数容器 | ops | 计算路由 |
 | `model.executor` | 单层内依赖路由的分发：one-hot gather/scatter、双路融合 | ops、routing.plan | 拥有参数；选择路由 |
 | `model.lm` | `RoutedLM` = backbone + bank + executor | model.*、routing.plan | 从 token 推出路由 |
-| `routing.plan` | 值类型 `RoutePlan` 与其校验 | torch | 了解 tokenizer 或数据 |
-| `routing.policies`、`routing.tags` | 由段元数据或完整历史的标签构造 plan | routing.plan | 运行模型 |
+| `routing.plan` | 值类型 `RoutePlan` 与其校验 | torch、config | 了解 tokenizer 或数据 |
+| `routing.policies`、`routing.tags` | 由段元数据、shard route id 或完整历史的标签构造 plan；门控策略（默认值读 `DEFAULTS["routing"]`） | routing.plan、config | 运行模型 |
 | `routing.router` | Router 接口与单调门控函数（训练推迟） | torch | 被 P0 的运行使用 |
 | `assembly.hashing` | 内容哈希与种子指纹 | torch、numpy | 了解文件布局 |
-| `assembly.packs` | pack 读写（safetensors + JSON）、探针记录 | hashing、canonical | 训练 |
+| `assembly.packs` | pack 读写（safetensors + JSON）、探针记录 | hashing、canonical、model.backbone/bank（lm 延迟导入）、registry.env（代码提交） | 训练 |
 | `assembly.freeze` | 哪些张量可以改变；审计 | hashing | 构造优化器 |
-| `assembly.assemble` | 组装 manifest、严格检查、保真度验证 | packs、model | 修改 pack |
-| `audit.*` | 参数、MAC 与显存记账；预算行 | model、ops | 修改模型 |
-| `data.*` | tokenizer、manifest、划分、去污染、shard、采样器、Track S | tokenizers、numpy | 导入 torch 模型 |
-| `train.*` | 唯一的训练循环与各 recipe；状态；调度；目标函数 | model、assembly、data、registry | 在 test 划分上评测 |
-| `eval.*` | 评分、NLL/BPB、生成、切换分解、统计、报告 | model、routing、data | 训练 |
-| `registry.*` | 运行身份、运行目录、环境、矩阵行 | canonical | 持有模型代码 |
+| `assembly.assemble` | 组装 manifest、严格检查、保真度验证（探针与 `--docs` 的真实文本） | packs、model、routing.plan、data（tokenizer、文档，延迟导入） | 修改 pack |
+| `audit.params`、`audit.flops`、`audit.memory` | 参数、MAC 与显存记账；手稿 §5.1 的预算常数（计数层，在训练之下） | ops.reads、routing.plan、config | 导入 train、eval |
+| `audit.budget`、`audit.bench`、`audit.resources` | 预算行、G0.5 扫描（驱动 `train.loop.Trainer.step`）、资源报告（报告层，在训练之上） | 计数层、model、ops、routing、train、registry.env | 修改模型；导入 eval |
+| `data.*` | tokenizer、manifest、划分、去污染（`data.overlap` 是重叠报告的唯一读取方）、shard、采样器、Track S | tokenizers、numpy、config | 导入 torch 模型 |
+| `train.*` | 唯一的训练循环与各 recipe；状态；调度；目标函数 | model、assembly、data、registry、audit 的计数层、devices | 在 test 划分上评测；导入 eval 或报告层 |
+| `eval.*` | 评分、NLL/BPB、生成、切换分解、统计、报告；臂的预设 | model、routing、data、assembly、ops.merge、registry（env、matrix）、devices | 训练；导入 train 或 audit |
+| `registry.*` | 运行身份、运行目录、环境、矩阵行（含评测协议是否实现）、`registry budget` | canonical、config | 持有模型代码 |
 
 三条横向规则：
 
@@ -102,20 +104,20 @@
 | `bilingual-seed/1`、`bilingual-expert/1` | pack 的 `pack.json` | I2 |
 | `bilingual-assembly/1` | 组装 manifest，不复制权重 | I2 |
 | `bilingual-budget/1` | 预算报告 | I2 |
-| `bilingual-fidelity/1` | `verify` 的强制路由保真报告（I2 新增，英文规格中没有） | I2 |
+| `bilingual-fidelity/1` | `verify` 的强制路由保真报告（I2 新增，英文规格中没有）；`docs` 与 `doc_source`：真实 dev 文本上对单独专家模型的比较（CR1） | I2 |
 | `bilingual-manifest/1`、`bilingual-split/1` | 语料 manifest、划分文件；由划分物化出的 manifest 另记每个文件所属的划分（`split`）与来源（`derived_from`） | I4 |
 | `bilingual-tokenizer/1` | tokenizer 旁边的 `tokenizer.meta.json`：训练输入及其 sha256、manifest 哈希、设置（I4 新增，英文规格中没有） | I4 |
-| `bilingual-overlap/1` | 去污染的重叠报告：规则、各规则命中数、被标出的训练文档（I4 新增） | I4 |
+| `bilingual-overlap/1` | 去污染的重叠报告：规则、各规则命中数、被标出的训练文档（I4 新增）；`short_min` 与 `short_skipped`（CR1：短 held-out 段的规则） | I4 |
 | `bilingual-sampler/1` | 采样器的 `state_dict`，I5 写进训练状态的 `extra.json`（I4 新增） | I4 |
 | `bilingual-shard/1` | shard 的头 `shard.json` | I4 |
 | `bilingual-item/1`、`bilingual-datacard/1` | Track S 的题目（每行一项）与数据卡；数据卡分两种 `kind`：`track_s`（生成器）与 `d_seed`（D_seed 混合） | I4 |
 | `bilingual-state/1` | 训练状态的 `extra.json`；另记可训练张量的名字与三个文件的 sha256（I5 新增） | I5 |
 | `bilingual-schedule/1` | 状态中的调度器记录：步数、warmup 步数、总步数与学习率参数（I5 新增，英文规格中没有） | I5 |
 | `bilingual-env/1` | `environment.json`：环境指纹（I5 新增，英文规格只列了字段） | I5 |
-| `bilingual-run/1`、`bilingual-metrics/1` | 运行记录 `run.json`、每步指标 `metrics.jsonl`；指标另有 `targets` 与 `kl` 两个字段（I5 新增） | I5 |
+| `bilingual-run/1`、`bilingual-metrics/1` | 运行记录 `run.json`、每步指标 `metrics.jsonl`；指标另有 `targets` 与 `kl` 两个字段（I5 新增）；`run.json` 另有 `trial`、`finished_tokens`、`compute`、`storage` 与 `grad_audit`（CR1） | I5 |
 | `bilingual-pred/1`、`bilingual-result/1` | 每项 × 每臂的预测、结果列表（`status` 默认为“未运行”）；结果文件另记模型来源、题目文件与 `items_sha256`、路由与评分设置（I6 落地记录第 13 条） | I6 |
-| `bilingual-nll/1`、`bilingual-switch/1` | `eval-nll` 的 2×2 矩阵（带标签）与 unigram 基线；`switch` 的逐题分解与按方向的汇总（I6 新增） | I6 |
-| `bilingual-stats/1` | `stats` 的输出：`kind` 为 power、pilot（G1′ 门槛与讨厌参数）、futility 或 confirm（I6 新增） | I6 |
+| `bilingual-nll/1`、`bilingual-switch/1` | `eval-nll` 的 2×2 矩阵（带标签）与 unigram 基线，另记 `arm`、`replicate`、`split` 与每个文件的划分（CR1）；`switch` 的逐题分解与按方向的汇总（I6 新增） | I6 |
+| `bilingual-stats/1` | `stats` 的输出：`kind` 为 power、pilot（G1′ 门槛与讨厌参数）、futility 或 confirm（I6 新增）；`inputs` 记录用到的划分与被排除的记录数（CR1） | I6 |
 | `bilingual-bench/1`、`bilingual-resource/1`、`bilingual-g0/1` | G0.5 扫描的每行（header、point、choice）；预算加实测资源的报告；GPU 测试写出的 G0 记录（I6 新增） | I6 |
 
 **内容哈希与种子指纹（修正 IMPL-14）。** `content_hash(state)` 对 `sorted(state)` 中的每个名字，依次把下面的字节送入 sha256：
@@ -152,9 +154,9 @@ name.encode("utf-8") + b"\0" + str(dtype).encode() + b"\0" + json(list(shape)).e
 | `model.ffn_width` / `model.slot_width` | 整数 | 1728 / 789 | B-O4 | B10-II：`slot_width` 395 |
 | `model.expert_layers` | `null` 或列表 | `null`（全部层） | 手稿 §7 的 LP 行 | LP-4 = [0..3] ∪ [20..23] |
 | `model.gqa` | `sdpa_gqa`、`repeat` | `sdpa_gqa` | G0.5 | 后端不支持 GQA 时退回 `repeat`；RoPE 表按 (T, device, dtype) 缓存（IMPL-10） |
-| `routing.signal` | `oob`、`tags` | `oob` | B-O3 | 选 `tags` 时所有 shard 遵循同一种标签约定 |
-| `routing.gate_policy` | `one_hot`、`dual_const`、`dual_window` | Top-1 行 `one_hot`，双路行 `dual_const` | B-O5 | |
-| `routing.g` / `routing.window` | 浮点 / 整数 | (0.5, 0.5) / 32 | B-O5 | |
+| `routing.signal` | `oob`（`tags` 推迟） | `oob` | B-O3 | 记入每个运行的 config；行配置写 `tags` 或其他值时拒绝（`tags` 的路由实现在 `routing.tags`，训练与评测还没有接入，CR1） |
+| `routing.gate_policy` | `one_hot`、`dual_const`、`dual_window` | 由臂的预设决定：Top-1 行 `one_hot`，双路行 `dual_const` | B-O5 | 评测设置：`eval-tasks --gate` 按臂覆盖；训练的 plan 都是 one-hot，行配置写它时拒绝（CR1） |
+| `routing.g` / `routing.window` | 浮点 / 整数 | (0.5, 0.5) / 32 | B-O5 | 同上；`eval.items.Routing` 与 `routing.policies.apply_gate_policy` 的默认值都读这里（CR1） |
 | `fusion` | `output`、`concat`、`pre`、`post` | 按行 | 手稿 §7 | `concat` 用于 G0（B7） |
 | `train.activation_checkpointing` | 布尔 | `false` | G0.5 | v1.0 无法关闭它（IMPL-09） |
 | `train.global_batch_tokens` | 整数 | 65,536 | B-O10 | 必须等于 microbatch × seq × accum |
@@ -179,6 +181,10 @@ name.encode("utf-8") + b"\0" + str(dtype).encode() + b"\0" + json(list(shape)).e
 | `model.profile` | profile 名或不设 | 不设 | （I5 新增） | 只用于行配置：先套 profile，再套文件自己的 model 键；不是 `ModelConfig` 的字段 |
 | `train.adam_betas` / `train.adam_eps` | 两个浮点 / 浮点 | (0.9, 0.999) / 1e-8 | [建议]（I5 新增） | torch 与 v1.0 的默认值；手稿没有规定 |
 | `run.*` | 见 `config.DEFAULTS["run"]` | 见左 | （I5 新增） | 运行名、recipe 及其参数、matrix 行、重复号、两个种子、steps 或 tokens、shard、tokenizer、种子 pack、其他 pack 与路由映射、device、保存/保留/记录的间隔；后三者与 device 不进入运行身份 |
+| `eval.merge.lam_grid` / `eval.merge.density` | 5 个浮点 / 0–1 | (0.2, 0.4, 0.6, 0.8, 1.0) / 0.2 | [建议]；手稿 §9.6（CR1 新增） | 所有合并臂（task arithmetic、TIES 的 λ）共用一个 5 点网格，在 dev 上选；`eval-tasks --merge` 必须给出网格上的 `--lam`（`--off-grid` 时记录） |
+| `run.trial` | 字符串或不设 | 不设 | 手稿 §9.6（CR1 新增） | 调参台账的试验标签，记入 `run.json`，`registry budget` 把它的算力计入调参；不进入运行身份 |
+| `profile.*.seed_e4_per_person`（`fork/bilingual/examples/track_s.toml`） | translate / switchback 的篇数 | 1 / 1 | [建议]（CR1 新增） | D_seed 中每个 P_seed 人物的 E4 格式文档，复用该人物的传记渲染，曝光数不变 |
+| `data.decontam.SHORT_MIN`（代码常量） | 每条规则一个整数 | 8 词 / 13 个汉字 / 8 个 token | [建议]（CR1 新增） | 短于 n、不短于它的 held-out 段整段索引，训练段中连续出现即标记；更短的段计入 `short_skipped` |
 | `eval.autocast` / `eval.max_new` / `eval.lang_share` / `eval.n_boot` / `eval.switch_k` | `none`、`bf16` / 整数 / 0–1 / 整数 / 整数 | `none` / 160 / 0.9 / 10,000 / 16 | [建议]；n_boot 与 k 来自手稿 §9.1–9.2（I6 新增） | 评测默认 fp32；E4 每阶段的生成上限；语言检查的文字系统份额；聚类 bootstrap 的重抽样次数；切换后峰值的 token 数 |
 | `eval.alpha_branch` / `eval.sesoi` / `eval.noninferiority` / `eval.g1p` / `eval.power` / `eval.replicates` | 见 `config.DEFAULTS["eval"]` | 0.0125 / H_A 5pp、H_B 3pp、H_C 5pp / E1 2pp、BPB 0.02 / 机会 0.125 + 20pp / 0.8 / 3–6 | B-O8、手稿 §9.3、§9.5（I6 新增） | 都是 [建议]，pilot 揭盲前在签名提交中锁定（手稿 §9.7）；只供 `eval.stats` 读取，不进入运行身份 |
 
@@ -524,18 +530,18 @@ I4-D7 的各项：
 3. **候选的切分：** 问题段与 `answer_sep + 候选` 一起编码（训练时的 QA 文档就是这样一段），检查问题段的 token 是共享前缀；若 tokenizer 在边界上合并，改为单独编码候选并在记录中标 `boundary_merge`（track_s.toml 的模板都以冒号或问号结尾，不会出现）。
 4. **语言检查：** 去掉名字后，答案语言的文字系统在汉字与拉丁字母中占 ≥ 90% [建议]；规格的 fastText 语言识别在推迟项中。
 5. **E4 的两个指标：** `slot_acc` 是语言正确的阶段中答对的槽位占全部槽位的比例；`correct`（结果中为 `all_slots`）要求每个阶段的每个槽位都对且语言都对。手稿说“每个槽位都要精确匹配，并且语言正确”，没有说是槽位级还是题目级；两者都记录，`stats confirm` 的 H_C 增益用 `slot_acc`。**需要 owner 决定。**
-6. **生成：** 到 `<eos>` 或每阶段 160 个 token 为止 [建议]，不在换行处停；回切题的第二阶段在第一阶段的生成之后接换行和回译指令。没有 KV cache，每步重算最后 max_seq 个 token 的窗口。
+6. **生成：** 到 `<eos>` 或每阶段 160 个 token 为止 [建议]；E4 的每个阶段另在第一个含换行的 token 处停止（CR1：训练文档中译文到换行为止，回切文档在换行后接回译指令），该 token 不计入输出；固定生成集（G1）只在 `<eos>` 处停。回切题的第二阶段在第一阶段的生成之后接换行和回译指令。没有 KV cache，每步重算最后 max_seq 个 token 的窗口。
 7. **聚类：** 排序题按问题模板（外框加问句的组合 id）聚类，E4 按全部模板 id 的组合 [建议]。
 8. **R_src：** E3-ctx 没有知识来源，E3-par 的两个事实在两个分区中，两者都按“不能评分”记为跳过并写明原因；这就是 I4 落地记录第 2 条留下的问题在本实现中的答案（另一种做法是按片段路由，需要 owner 决定）。运行手册在 E2 上评测 B4-src。
-9. **守门与判定：** 图中的“拒绝”是 p ≤ 该假设当前的 α；三类判定叠加在上面，从未获得 α 的假设不能判为优于。H_B 的前提用 dev 预测的不一致率（各重复的平均）检查，不满足时 H_B 记为“在这一分歧水平下无法检验”，在图中按未拒绝处理，所以分支 1 不会把 α 转给 H_C（保守；手稿没有规定）。H_C 是交并检验：p = max(增益的 p, 各非劣部分的 p)。
+9. **守门与判定：** 图中的“拒绝”是 p ≤ 该假设当前的 α；三类判定叠加在上面，从未获得 α 的假设不能判为优于。H_B 的前提用 dev 预测的不一致率（各重复的平均）检查，不满足时 H_B 记为“在这一分歧水平下无法检验”，在图中按未拒绝处理，所以分支 1 不会把 α 转给 H_C（保守；手稿没有规定）。H_C 是交并检验：p = max(增益的 p, 各非劣部分的 p)；非劣部分是 E1 正确率与两种语言列的 BPB（CR1 接入，数据来自 `stats confirm --nll`），任何一部分没有数据时 H_C 记为“不可检验”，p = 1。
 10. **t 分布与功效：** 不依赖 scipy：t 的 CDF 用不完全 beta 函数的连分式，0 附近改用另一种形式以免精度损失，分位点用二分；功效默认对 χ² 做数值积分（确定、单调），也可以模拟；SD 为 0 的样本按均值的符号给 p = 0 或 1。
 11. **bootstrap：** 百分位 CI，簇按第一次出现的顺序编号，所以结果与簇标签的类型无关；只作重复内的描述。
 12. **G1′ 门槛与无效性规则：** 门槛取三个臂中各重复平均最高的一个；无效性规则用重复 0 在 dev E3-ctx-cross 上的 (B12a − B4) 与 (B6 − B4)。
 13. **结果文件：** `results.json` 是 `{"format": "bilingual-result/1", ..., "results": [...]}`，而不是规格写的裸列表，因为每个 JSON 文档都要有 `format` 字段；另记模型来源（种子指纹、各专家哈希、融合方式及是否被覆盖）、题目文件的 sha256、`items_sha256`、路由与评分设置、代码提交。评测默认 fp32（`--autocast none`）[建议]。
 14. **测试集的保护：** `eval-tasks` 与 `switch` 默认只评测 dev，遇到 test 题目时拒绝，除非显式加 `--allow-test`（手稿 §9.7 的锁定之后）。
-15. **臂的预设与合并：** 手稿 §7 的行 ID 给出默认的路由、门控、融合与合并方式（`eval.models.ARMS`），每个都可以用参数覆盖；B3a/B3b/B3c 与 B3-II 在组装上以 `--merge` 在内存中合并，λ 与 TIES 的密度按调参台账在 dev 上选；DARE、RegMean/Fisher 与 Re-Basin 的臂（P1）没有接到命令行。
+15. **臂的预设与合并：** 手稿 §7 的行 ID 给出默认的路由、门控、融合与合并方式（`eval.models.ARMS`），每个都可以用参数覆盖；B3a/B3b/B3c 与 B3-II 在组装上以 `--merge` 在内存中合并。CR1 之后：λ 与 TIES 的密度来自 `DEFAULTS["eval"]["merge"]` 的一个 5 点网格，`--lam` 必须给出且在网格上（手稿 §9.6）；没有预设的行 ID 列在 `registry.matrix.MISSING_PROTOCOL` 中并被拒绝，不是行 ID 的标签必须显式给出 `--route`；T2、T3′、T3″ 的 answer route 只作用于翻译题；T1′ 每个方向一个组装，加 `--direction`。DARE、RegMean/Fisher 与 Re-Basin 的臂（P1）没有接到命令行。
 16. **资源字段：** `nvidia-smi` 一项是计时结束时的 memory.used（缓存分配器保留着峰值时的预留），不是轮询得到的峰值；MFU 用 6N 约定，N 为每 token 的权重 MAC，冻结骨干的 expert recipe 因此被低估。没有 CUDA 时 `bench` 拒绝运行，除非显式给 `--device cpu`（只供测试）。
-17. **GPU 测试 (g1) 的随机初始化检查：** 在随机初始化的 pilot 几何上只断言 max-abs，argmax 一致率只记录：未训练模型的 logits 几乎相等，CPU 演练中 bf16 autocast 的 max-abs 为 0.022，argmax 一致率却只有 0.875。argmax 判据只对训练过的 pack 有意义（tiny 训练的 pack 与 G3 的 `verify`）。手稿 §9.4 的探针是均匀随机 token，训练好的模型在这样的输入上也可能有接近的 logits；这一判据是否合适，**需要 owner 在 G0 之前确认**。
+17. **GPU 测试 (g1) 的随机初始化检查：** 在随机初始化的 pilot 几何上只断言 max-abs，argmax 一致率只记录：未训练模型的 logits 几乎相等，CPU 演练中 bf16 autocast 的 max-abs 为 0.022，argmax 一致率却只有 0.875。argmax 判据只对训练过的 pack 有意义（tiny 训练的 pack 与 G3 的 `verify`）。手稿 §9.4 规定强制单路的检查同时用 T = max_seq 的真实 dev 文本与随机 token（CR1 更正：此前这里误写为手稿只用随机 token）；真实文本的一半由 `verify --docs` 实现。仍需 owner 在 G0 之前确认的只有 bf16 的 argmax 一致率门槛（99.5%）是否也用于随机 token 探针。
 18. **运行手册测试的演练：** 规格只要求 `--dry-run`；后面的命令要读前面命令的输出，所以测试在 dry-run 之后以 tiny 规模真正运行每条命令，替换的参数都列在 `test_runbook.py` 的 `TINY` 与 `TRAIN_TINY` 中；fixture 语料只列 5 篇 Track S 种子文档，好让 300 篇自然文本填满 D_seed 中 80% 的份额。运行手册的输出路径按 I5 的决定在 data/runs 下（规格写的是 runs/）。
 19. **默认值的位置：** 评测与统计的默认值（上表 `eval.*` 的新行）都在 `config.DEFAULTS["eval"]` 中；它们不进入训练运行的身份。
 20. **对照矩阵：** T0（主（参照））按 minimal-primary 记；每行另记训练它的 pilot_rows.toml 阶段。
@@ -544,14 +550,67 @@ I4-D7 的各项：
 **仍未验证与未实现：**
 
 - 没有 GPU：tests/gpu 的 (g1)–(g6) 与 scipy 对拍、`bench`、CUDA 上的 bf16 容差与 SDPA 后端都没有运行。
-- 没有实现：RtS（recall-then-switch）的评测协议；B9-II+aff（在 dev 上拟合的仿射参数）；T1′ 的评测需要一种组装命名（T1′ 的副本 pack 与原专家同名，不能和原专家组装在一起）；H_C 的 BPB 非劣部分还没有接入 `stats confirm`（需要每个重复 T2 与 T0 的 NLL 文件），目前只接了 E1；手稿 §9.1 的中介量（每层 \|a_ZH − a_EN\|、\|a\| < 2.40 的比例、权重漂移、CKA）与实体/数字保持率；GLMM 敏感性分析（推迟项）。
+- 没有实现（都移入了“推迟项”）：RtS（recall-then-switch）的评测协议；B9-II+aff（在 dev 上拟合的仿射参数）；手稿 §9.1 的中介量（每层 \|a_ZH − a_EN\|、\|a\| < 2.40 的比例、权重漂移、CKA）与实体/数字保持率；GLMM 敏感性分析。T1′ 的评测与 H_C 的 BPB 非劣部分在 CR1 中实现（见“代码评审 CR1”）。
 - 评测的耗时（没有 KV cache 的生成、对每个候选的前向）在 pilot 几何上没有测；手稿 §13 的“评测约折合 1B token”仍是 [估计]。
 - CI 尚未运行这些用例；本机 C1 上整个 CPU 套件约 50 s（见实测记录），CI 的 CPU lane 上的 90 秒预算待测。
+
+## 代码评审 CR1
+
+**状态：** 已完成（CPU）。对 I1–I6 的代码评审给出 26 条问题；每条都先在本机 C1 上复现或读码核实，再修正并加回归测试（能做成测试的都做了：修正前失败、修正后通过）。没有在 GPU 上运行任何东西。提交依次是：`ruff format` 接管布局（只留数据表上的 `# fmt: skip`），评测与统计，Track S 与去污染，训练、bench 与 CPU 测试的 CUDA 隔离，分层与死代码，以及本节所在的文档提交。
+
+| # | 问题 | 处置 |
+|---|---|---|
+| 1 | E4 的 prompt 格式（指令）从未出现在训练数据中 | 修正，选评审的方案 (a)：Track S 生成器 1.1.0 把 D_parallel 的每个平行对写成 E4 翻译格式（原文 + 换行、train 指令模板、紧接其后的译文），D_seed 中每个 P_seed 人物各有一篇翻译与一篇回切格式文档（复用其传记渲染，曝光数不变）；测试检查两种语言的每个 train 指令模板都出现在训练文档中、dev/test 模板都不出现 |
+| 2 | 短于 n 的 held-out 文本无法被去污染发现 | 修正：长度在 `SHORT_MIN` 与 n 之间的 held-out 段整段索引，训练段中连续出现即标记 |
+| 3 | 含 `.tmp-` 的运行名会被登记表当作临时文件删除 | 修正：`config.run_name_problem` 拒绝这类名字 |
+| 4 | bf16 参数、关闭 autocast 时双路行报错 | 修正：门控乘积在投影前转回算子输入的 dtype（autocast 下不变） |
+| 5 | 变异测试中三处关键不变量没有被测试保护 | 修正：窗口化 NLL（依赖上下文的桩）、KL 锚点方向与梯度、TIES 按幅值求和选符号三个测试，各自杀死评审报告的变异 |
+| 6 | `stats confirm` 把 dev 与 test 预测混在一起；`eval-nll` 没有 test 保护 | 修正：confirm 只用 test、`--dev-pred` 只用 dev、pilot 与 futility 只用 dev，其他划分计数后排除；`eval-nll` 从 materialize 的 manifest 读出划分，test 要 `--allow-test` |
+| 7 | T2 的 answer route 作用于所有题，单语题也由 Bridge 作答 | 修正：只作用于翻译题（E4）；测试检查 T2 在 E1 上与 T0 逐位相同 |
+| 8 | 没有预设的手稿 §7 行 ID 静默退回 R_out | 修正：`registry.matrix.MISSING_PROTOCOL` 列出缺什么并拒绝；自由标签必须显式给 `--route`；加入 T1′、T3′、T3″ 的预设 |
+| 9 | CPU 测试在 GPU 主机上会用 CUDA，G0 第 1 步无法通过 | 修正：conftest 隐藏 CUDA；GPU 测试与 CPU 测试同一会话时报错 |
+| 10 | H_C 的交并检验缺 BPB 非劣部分 | 修正：`stats confirm --nll` 接入两种语言列的 BPB 非劣；缺数据时 H_C 不可检验（p = 1）；T1′ 的评测按方向组装 |
+| 11、20 | `routing` 一节是没人读的配置，B-O5 的默认值被复制 | 修正：`signal` 校验（`tags` 推迟并拒绝）并记入运行 config；gate_policy/g/window 是评测设置，行配置写它们时拒绝，评测与门控策略的默认值都读 `DEFAULTS["routing"]` |
+| 12 | 缺少 GPU 小时、checkpoint 大小、非零梯度审计、调参算力与 token 对齐报告；B12a 没有预算行 | 修正：`run.json` 的 `compute`、`storage`、`grad_audit`、`trial`、`finished_tokens`；`registry budget`；B12a 预算行（golden 文件只多这一行） |
+| 13 | README 与 spec 写“P0 已完成”，但最小集合中仍有未实现项 | 修正：状态说明加限定，未实现项移入推迟项，`matrix` 加“评测协议”列 |
+| 14 | 合并系数是藏在两处的默认值，没有 5 点网格 | 修正：`DEFAULTS["eval"]["merge"]`；`--lam` 必须在网格上 |
+| 15 | `verify` 只用随机 token 探针，没有真实 dev 文本；I6 记录误述手稿 | 修正：`verify --docs`；更正 I6 落地记录第 17 条 |
+| 16 | 运行手册的 G1′ 输出多于命令实际给出的 | 修正：`stats pilot` 另给题目方差与分歧大小，运行手册按实际输出改写 |
+| 17、25 | 测试地图与 fork/README 仍说 GPU 测试“在 I6 加入” | 修正：`fork/tools/gen_maps.py` 的说明与 fork/README 的代码位置表 |
+| 18 | README 让人用 CPU 测试的解释器运行包命令 | 修正：包命令只在 `fork/.venv-bilingual` 中运行，README 给出只有 CPU 时建该环境的步骤，fork/README 的环境表同步 |
+| 19 | G0.5 的 bench 有自己的一份训练步 | 修正：bench 计时 `train.loop.Trainer.step`，另有 `expert_kl`、`joint_wide`、`bridge_c` |
+| 21 | 跨层导入与隐藏的循环依赖，模块表没人检查 | 修正：资源报告移入 `audit.resources`，预算常数移入计数层；`test_scaffold` 按层次表检查每个相对导入；本文的模块表按实际依赖改写 |
+| 22 | 死代码与只供测试的遗留 | 修正其中的大部分；**部分拒绝**：`routing.tags` 的 `plan_from_tags` 与 `tag_ids` 保留，它们是推迟的 `routing.signal = "tags"` 的路由实现与 I2-A8（MA-09）的验收对象，移进测试会丢掉一个规定且测过的部件；只删去纯别名 `escape_user_text` |
+| 23 | 去污染报告的读取实现了三遍 | 修正：`data.overlap` 是唯一的读取方 |
+| 24 | 模型构建、预算常数、设备解析与 TIES 默认值重复 | 修正：`build_model` 加 fusion 覆盖并被评测复用；`UPDATE_BUDGET` 只在 `audit.params`；`surogate_bilingual.devices`；合并默认值见第 14 条 |
+| 26 | 一半的代码靠 292 个 `# fmt: skip` 躲开格式化 | 修正：只留 16 个（数据表），其余交给 `ruff format`（AST 不变） |
+
+**CR1 中的决定（owner 可以推翻）：**
+
+1. **E4 格式进入训练（问题 1 的方案 (a)）。** 另一种做法 (b) 是 E4 的 prompt 去掉指令，只留训练中见过的“原文 + 换行”，删掉 train 指令模板。(a) 保留手稿的回切题与指令遵循，代价是 D_parallel 的 Track S 部分都带指令。D_parallel 只放翻译格式，回切格式只在 D_seed 中，这样 T1′（每次一个方向）、T2、T3′ 仍训练同一批文档。
+2. **E4 的阶段在换行处停止。** 训练文档中译文到换行为止（回切文档在换行后接回译指令），所以生成也在第一个含换行的 token 处停；否则第一阶段会把回译指令和回译一起生成出来，语言检查必然失败。
+3. **Bridge 布局中的指令属于目标侧：** 路由 `bridge`，loss 0。评测时 T2、T3′、T3″ 的 answer route 覆盖翻译题的指令段与答案段；T1′ 的组装把副本放在目标槽位，R_out 把目标语言的指令送到副本。两边一致，而且源语言的 token 从不走 `bridge`，所以 T1′ 遇到另一方向的窗口仍会拒绝。
+4. **去污染的短段下限** 8 词、13 个汉字、8 个 token [建议]（GPT-3 污染研究的短样本规则）；更短的 held-out 段不检验，计数记入报告。
+5. **合并网格** (0.2, 0.4, 0.6, 0.8, 1.0)，TIES 密度 0.2 [建议]；手稿 §9.6 的“合并臂与门控臂共用一个 5 点网格”中，确认性的双路臂按 B-O5 固定 g = (½, ½)，不在网格上调。
+6. **H_C 的 BPB 非劣** 按语言列分成两个交并部分（zh 列、en 列各取该语言自己专家的格子），界 0.02 bit/byte；数据来自每个重复 T2 与 T0 各一个 test 划分的 eval-nll 文件。
+7. **划分的处理：** `stats` 排除（并计数）不属于本命令的划分，而不是整体拒绝，因为运行手册把 dev 与 test 的评测放在同一个目录树下；没有任何一条所需划分的记录、或记录没有划分时报错。
+8. **梯度审计：** 前 10 步内可训练集合没有任何非零梯度时运行失败；没有梯度路径的窗口跳过 backward，按零梯度计。
+9. **CPU 测试隐藏 CUDA**（`CUDA_VISIBLE_DEVICES=""`），GPU 测试必须单独运行。
+10. **B12a 的预算行** 声明为超出预算（P_total = P_active = 159,932,928，P_update = 127,401,984），如实报告。
+11. **bench：** 运行手册的第二条 bench 命令只在 seq 1024 上测 `joint_wide` 与 `bridge_c`，以免网格时长翻倍。
+12. **T1′ 的评测** 用每个方向一个组装（源语言槽位是原专家，目标槽位是该方向的副本），`eval-tasks --arm "T1'" --direction …` 逐方向评测，两个方向的预测在同一个重复下合并进 H_C。
+
+**仍未验证：** 没有 GPU：CUDA 上的 CPU 测试隔离、GPU 小时、bench 的新 recipe 都没有在 5090 上运行。生成器 1.1.0 的完整规模构建时长没有重测（1.0.0 为 5.5 分钟）。E4 是否因此离开地板是实验问题，要 G1′/G3 的数据回答。本机 C1 上 CPU 套件约 55 s。
 
 ## 推迟项（不属于 P0）
 
 | 项目 | 需要什么 | 阶段 |
 |---|---|---|
+| RtS（recall-then-switch，手稿 §7.1 的最小集合次要臂） | 先由来源专家写出事实再切换到目标路由的评测协议，以及输出 token 数对齐的对照；`eval-tasks --arm RtS` 目前拒绝 | 最小集合（未实现） |
+| B9-II+aff（手稿 §7.2 的最小集合次要臂） | 在 dev 上拟合每通道 offset/scale 的步骤与其评测；`--arm B9-II+aff` 目前拒绝 | 最小集合（未实现） |
+| 手稿 §9.1 的中介量与实体/数字保持率 | 每层 \|a_ZH − a_EN\| 的分布、\|a\| < 2.40 的比例、相对种子的权重漂移、ZH 与 EN 隐状态的 CKA；E4 输出中实体与数字的保持率 | 最小集合的预注册次要终点（未实现） |
+| `routing.signal = "tags"` | 用 `routing.tags` 的完整历史标签路由训练与评测；所有 shard 遵循同一种标签约定 | P1 |
+| DARE、RegMean/Fisher、Re-Basin 的臂接入 `eval-tasks` | `ops.merge` 中已有 DARE 与 Re-Basin；RegMean/Fisher 未实现 | P1 |
 | 学习式 Router 的训练（B5；IMPL-12、MA-11、NOV-9） | 在 R-early（r_t = Router(u_{0,t})）、R-late（r_{t+1} = Router(h_t^L)，以 oracle 路由 teacher forcing，并测量 exposure bias）与由 LM head 发出标签之间选一种；门控用 `topk_softmax_gates`；router 参数放在单路径 3,768,064 的余量之内；手稿文献 [7] 式的对齐只用于有可训练表示的中间层 | P1 |
 | 修复阶梯 R0–R5 | 在 D_calib 上校准 router 或边界、B11 adapter、anchor-KL 重训、跨路径校准；每一步与 R0 在相同校准 token 与 GPU 时下比较，报告 Pareto | P1 |
 | Bridge T0–T5 矩阵的运行 | I5 的 recipe 已有；按手稿 §13 运行；T4/T5 需要双路 + Bridge 的 executor | P1 |

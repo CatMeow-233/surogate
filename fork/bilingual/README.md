@@ -4,7 +4,7 @@
 
 研究的问题 [待实验]：从同一个双语种子分叉、在冻结的共享骨干（嵌入兼 tied head、attention、norm）上**各自独立训练**的中文 FFN 专家与英文 FFN 专家，组装后在没有任何联合训练的条件下能否完成跨语言组合；在同一组冻结的专家检查点上，“先混合、再经共享冻结的非线性读出”（pre）与“先读出、再混合”（post）是否不同；独立专家相对单一双语专家要付出多少切换代价与模块化代价。通道拼接等于 Top-2 输出求和是已知恒等式 [已知数学事实]，只作零假设与数值检查，不算贡献。
 
-**当前状态：P0 的实现步骤 I1–I6 已完成（只在 CPU 上验证）。** 包里有模型核心、路由、组装、冻结审计与参数预算（见下文“模型、路由与组装”），融合算子、同初始化合并与 router 门控（见下文“融合、合并与 router 门控”），数据管线与 Track S 生成器（见下文“数据与 Track S”），训练循环、各 recipe 与运行登记（见下文“训练与运行登记”），以及评测、统计、资源审计与 RTX 5090 运行手册（见下文“评测、统计与运行手册”）。没有在 GPU 上训练或评测过任何模型，所以没有任何实验结果。凡涉及 RTX 5090 的吞吐、显存和时长，都是 [估计] 或 TBD，在 [运行手册](docs/runbook.md) 的 G0、G0.5 实测并记入 [实测记录](docs/measurements.md) 之前，不得写成结果。证据层级沿用手稿：[假设]、[建议]、[待实验]、[已知数学事实]、[已有论文结果]、[估计]。
+**当前状态：P0 的实现步骤 I1–I6 与代码评审 CR1 的修正已落地（只在 CPU 上验证）；手稿 §13 最小决定性集合中仍有几项没有实现：RtS 的评测协议、B9-II+aff 的仿射拟合、手稿 §9.1 的中介量与实体/数字保持率（见 [spec 的推迟项](docs/spec.md#推迟项不属于-p0)；`matrix` 的“评测协议”一列逐行写明）。** 包里有模型核心、路由、组装、冻结审计与参数预算（见下文“模型、路由与组装”），融合算子、同初始化合并与 router 门控（见下文“融合、合并与 router 门控”），数据管线与 Track S 生成器（见下文“数据与 Track S”），训练循环、各 recipe 与运行登记（见下文“训练与运行登记”），以及评测、统计、资源审计与 RTX 5090 运行手册（见下文“评测、统计与运行手册”）。没有在 GPU 上训练或评测过任何模型，所以没有任何实验结果。凡涉及 RTX 5090 的吞吐、显存和时长，都是 [估计] 或 TBD，在 [运行手册](docs/runbook.md) 的 G0、G0.5 实测并记入 [实测记录](docs/measurements.md) 之前，不得写成结果。证据层级沿用手稿：[假设]、[建议]、[待实验]、[已知数学事实]、[已有论文结果]、[估计]。
 
 ## 决定 B-D1（已采用，owner 可以推翻）
 
@@ -40,8 +40,17 @@
 
 ## 环境
 
-- **CPU 测试：** `fork/dev test bilingual` 用 `FORK_PY` 指定的解释器，默认是仓库根目录的 `.venv/bin/python`，需要 CPU 版 torch 和 `fork/tools/requirements-cpu-lane.txt`，准备方法见 [fork/README.md 的“首次准备环境”](../README.md#首次准备环境)。测试只把 `fork/bilingual/src` 放到 `sys.path` 最前面，从检出目录导入本包，不安装任何包；`surogate_bilingual` 若从别处导入（已安装的副本、另一份检出），`conftest.py` 让整个会话报错。CPU 测试环境没有 scipy。
-- **GPU 主机（RTX 5090）：** 专用隔离环境 `fork/.venv-bilingual`，依次装入 sm_120 的 CUDA 版 torch（记录确切的 wheel）、`requirements-gpu.txt` 和本包（editable，`--no-deps`），步骤见 [运行手册的 G0](docs/runbook.md#g0-环境与-gpu-不变量)。不要在仓库根目录运行 `uv run` 或 `uv sync`。
+- **CPU 测试：** `fork/dev test bilingual` 用 `FORK_PY` 指定的解释器，默认是仓库根目录的 `.venv/bin/python`，需要 CPU 版 torch 和 `fork/tools/requirements-cpu-lane.txt`，准备方法见 [fork/README.md 的“首次准备环境”](../README.md#首次准备环境)。测试只把 `fork/bilingual/src` 放到 `sys.path` 最前面，从检出目录导入本包，不安装任何包；`surogate_bilingual` 若从别处导入（已安装的副本、另一份检出），`conftest.py` 让整个会话报错。CPU 测试在任何主机上都只用 CPU：`conftest.py` 在会话开始时隐藏 CUDA（`CUDA_VISIBLE_DEVICES=""`，子进程同样），所以 GPU 主机上的 G0 第 1 步也在 CPU 上逐位检查。CPU 测试环境没有 scipy。`FORK_PY` 只用于 `fork/dev test bilingual`，不用来运行本包的命令（AGENTS.md 第 4 条）。
+- **包命令（生成数据、训练、评测）：** 只在隔离环境 `fork/.venv-bilingual` 中运行。GPU 主机（RTX 5090）上依次装入 sm_120 的 CUDA 版 torch（记录确切的 wheel）、`requirements-gpu.txt` 和本包（editable，`--no-deps`），步骤见 [运行手册的 G0](docs/runbook.md#g0-环境与-gpu-不变量)。只有 CPU 的机器（例如先在本机生成 ci 规模的 Track S、检查配置）用 CPU 版 torch 建同一个环境：
+
+  ```bash
+  python3.12 -m venv fork/.venv-bilingual
+  fork/.venv-bilingual/bin/pip install 'torch==2.11.0+cpu' --index-url https://download.pytorch.org/whl/cpu
+  fork/.venv-bilingual/bin/pip install -r fork/bilingual/requirements-gpu.txt
+  fork/.venv-bilingual/bin/pip install -e fork/bilingual --no-deps
+  ```
+
+  以后换到 GPU 主机时重建该环境。不要在仓库根目录运行 `uv run` 或 `uv sync`。
 
 ## 命令行
 
@@ -81,7 +90,7 @@
 预算报告在 meta device 上从模块树重算，不分配权重内存，几秒内完成：
 
 ```bash
-PYTHONPATH=fork/bilingual/src "${FORK_PY:-.venv/bin/python}" -m surogate_bilingual audit --profile pilot
+fork/.venv-bilingual/bin/python -m surogate_bilingual audit --profile pilot
 ```
 
 它与手稿 §5.1 和评审的 `budget_v11.json` 逐项一致，只有 B10-ch 的权重 MAC 例外：本实现计入了块 router 的 108,672 MAC，手稿表没有计入，需要 owner 确认（spec 的 I2 落地记录第 11 条）。改动预算代码后，用同一命令加 `--out fork/bilingual/tests/cpu/golden/budget_pilot.json` 重新生成 golden 文件，并在提交说明中写明数字为什么变。
@@ -107,11 +116,11 @@ fork/dev test bilingual -m identity_check
 - **D_seed 混合**（`data.mixture`）：自然文本 80%、Track S 12%、混语与拼接平行对 5%、带标签文档 3%（B-O7，按 token 计），按文档打乱；带标签文档在开头和每个语言切换点放控制标签（B-O3）。shard 记录混语窗口比例，低于声明的下限时拒绝写入（v1.0 的打包方式只有 2.6e-7）。
 - **Track S**（`data.synth`，SCI-01）：人物名字两种语言都用同一个拉丁字母形式；6 个属性独立均匀地抽取；知识按语言分区（P_seed、P_zh、P_en、P_par）；E1、E2、E3-par、E3-ctx、E4 五族题目，每题带结构化字段，由不调用生成器的检查器重新推出答案；模板按 train/dev/test 不相交，完整规模下每族 ≥ 100 个 test 模板、每族每方向 2,000 道 test 题。E3-ctx 的规则是 7 个颜色到 7 个星期的双射，去掉任一段后答案在候选上均匀；手稿的“规则条数 3–7”这一难度轴因此没有采用，需要 owner 决定（落地记录第 1 条）。
 
-在仓库根目录用 CPU 测试的解释器即可生成 ci 规模的 Track S（约 1 秒）；完整规模在本机 C1 上约 5.5 分钟、1.1 GB（[实测记录](docs/measurements.md)），输出放在 git 忽略的 data 目录下：
+在 `fork/.venv-bilingual` 中即可生成 ci 规模的 Track S（约 1 秒）；完整规模在本机 C1 上约 5.5 分钟、1.1 GB（[实测记录](docs/measurements.md)，生成器 1.0.0；1.1.0 加入 E4 格式的训练文档之后没有重测），输出放在 git 忽略的 data 目录下：
 
 ```bash
-PYTHONPATH=fork/bilingual/src "${FORK_PY:-.venv/bin/python}" -m surogate_bilingual synth --spec fork/bilingual/examples/track_s.toml --profile ci --seed 20261102 --out data/track_s_ci
-PYTHONPATH=fork/bilingual/src "${FORK_PY:-.venv/bin/python}" -m surogate_bilingual synth --spec fork/bilingual/examples/track_s.toml --seed 20261102 --dry-run
+fork/.venv-bilingual/bin/python -m surogate_bilingual synth --spec fork/bilingual/examples/track_s.toml --profile ci --seed 20261102 --out data/track_s_ci
+fork/.venv-bilingual/bin/python -m surogate_bilingual synth --spec fork/bilingual/examples/track_s.toml --seed 20261102 --dry-run
 ```
 
 ## 训练与运行登记（I5）
@@ -124,11 +133,11 @@ PYTHONPATH=fork/bilingual/src "${FORK_PY:-.venv/bin/python}" -m surogate_bilingu
 - **运行登记**（`registry`）：`run_id` 由 config 哈希、数据 manifest、tokenizer、种子指纹、代码提交、recipe 与两个种子决定；运行名绑定唯一的 `run_id`，同名不同 id 时拒绝；工作区 dirty 时拒绝，除非设置 `registry.allow_dirty`（并记录）。运行目录默认在 `--root` 下的 data/runs 中（根目录的 `.gitignore` 已忽略 data），所以运行输出不会让工作区变 dirty，也不会挡住 `fork/dev sync`。每个运行有 `run.json`、`environment.json`（环境指纹）与 `metrics.jsonl`。
 - **行配置**（`examples/`）：`pilot_rows.toml` 中每个训练行一个阶段，`replicates = [0, 1, 2]` 展开成 `-r0`…`-r2`，token 预算与手稿 §13 一致（G1′ 每个重复 0.9B，族 I 2.4B、族 II 1.2B、Bridge 0.4B）；lr 取手稿 §8 网格的中间值，调参台账的其他 lr 用 `--set train.lr=… --name …` 另起运行。全部是 [建议] 默认值，没有运行过。
 
-在仓库根目录用 CPU 测试的解释器即可列出阶段、检查配置（不写任何文件）：
+在 `fork/.venv-bilingual` 中即可列出阶段、检查配置（不写任何文件）：
 
 ```bash
-PYTHONPATH=fork/bilingual/src "${FORK_PY:-.venv/bin/python}" -m surogate_bilingual train fork/bilingual/examples/pilot_rows.toml --list
-PYTHONPATH=fork/bilingual/src "${FORK_PY:-.venv/bin/python}" -m surogate_bilingual env --out environment.json --dry-run
+fork/.venv-bilingual/bin/python -m surogate_bilingual train fork/bilingual/examples/pilot_rows.toml --list
+fork/.venv-bilingual/bin/python -m surogate_bilingual env --out environment.json --dry-run
 ```
 
 `train … --stage S --dry-run` 还要读入并校验该阶段的全部输入（shard、tokenizer、pack），所以只有数据准备好之后才能对 pilot 行运行。
@@ -141,15 +150,24 @@ PYTHONPATH=fork/bilingual/src "${FORK_PY:-.venv/bin/python}" -m surogate_bilingu
 - **生成**（`eval.generate`）：批量 greedy，路由在完整历史上计算后再切片（MA-09），路由轨迹是解码状态的一部分；没有 KV cache（推迟项）。
 - **NLL 与切换**（`eval.nll`、`eval.switch`，命令 `eval-nll`、`switch`）：BPB = nats / (ln 2 · UTF-8 字节)，2×2 矩阵带标签，只在同一列内比较；unigram 基线；切换代价分解 M、R_new、R_old（有翻译后的历史时另有 L_ref），以及切换后前 16 个目标 token 的 NLL 峰值。
 - **统计**（`eval.stats`，命令 `stats`）：Student t 分布（不依赖 scipy）、重复级单侧配对 t 检验、按模板聚类的 bootstrap、TOST、手稿 §9.3 的图形化守门（含 α 转移）与三类判定、功效、MDE 与重复数规则、G1′ 门槛与族 I 先行的无效性规则。
-- **报告与对照矩阵**（`eval.report`，`registry.matrix`，命令 `matrix`）：由预测得出带聚类 CI 的结果行（`bilingual-result/1`）；资源报告（`audit --resources`）把代码计数的预算与实测资源放在一起，实测之前 GPU 字段都是 null、状态 TBD；`matrix` 打印手稿 §7 的全部行，结果默认“未运行”。
-- **G0.5 与显存**（`audit.bench`、`audit.memory`，命令 `bench`）：吞吐与显存扫描（只在 CUDA 上运行，CPU 运行只供测试）、SDPA 后端探测，以及一次前向中 autograd 保存的张量字节数。
+- **报告与对照矩阵**（`eval.report`，`audit.resources`，`registry.matrix`，命令 `matrix`）：由预测得出带聚类 CI 的结果行（`bilingual-result/1`）；资源报告（`audit --resources`）把代码计数的预算与实测资源放在一起，实测之前 GPU 字段都是 null、状态 TBD；`matrix` 打印手稿 §7 的全部行与每行的评测协议是否实现，结果默认“未运行”。
+- **G0.5 与显存**（`audit.bench`、`audit.memory`，命令 `bench`）：吞吐与显存扫描（计时 `train.loop.Trainer.step`；只在 CUDA 上运行，CPU 运行只供测试）、SDPA 后端探测，以及一次前向中 autograd 保存的张量字节数。
 - **运行手册**（[docs/runbook.md](docs/runbook.md)）：G0–G3 的全部命令；`tests/cpu/test_runbook.py` 对每条命令先做 `--dry-run`，再以 tiny 规模把整本手册按顺序真正走一遍（只有 CUDA 才能跑的命令除外）。
 
 列出对照矩阵（不读任何数据）：
 
 ```bash
-PYTHONPATH=fork/bilingual/src "${FORK_PY:-.venv/bin/python}" -m surogate_bilingual matrix
+fork/.venv-bilingual/bin/python -m surogate_bilingual matrix
 ```
+
+## 代码评审 CR1（I6 之后）
+
+对 I1–I6 的 26 条评审问题逐条核实后修正（只在 CPU 上验证；逐条处置与 owner 可以推翻的决定见 [docs/spec.md 的“代码评审 CR1”](docs/spec.md#代码评审-cr1)）。对使用者可见的变化：
+
+- **E4 进入训练格式：** Track S 生成器 1.1.0 让每个 E4 prompt 格式（翻译指令、回切指令）都以 train 模板出现在训练文档中（D_parallel 的平行对、D_seed 的格式样本）；E4 的生成在换行处停止。
+- **评测与统计：** T2、T3′、T3″ 的 answer route 只作用于翻译题（在 E1 上与 T0 逐位相同）；T1′ 按方向组装、加 `--direction` 评测；没有评测协议的手稿 §7 行被拒绝而不是静默退回 R_out（`matrix` 的“评测协议”一列）；合并的 λ 必须取自 `DEFAULTS["eval"]["merge"]` 的 5 点网格；`stats` 按划分取数（confirm 只用 test，pilot、futility 只用 dev）；H_C 的交并检验接入两种语言列的 BPB 非劣（`stats confirm --nll`）；`eval-nll` 记录 arm、重复与划分并保护 test；`verify --docs` 在真实 dev 文本上对单独专家模型检查。
+- **训练与登记：** `run.json` 记录设备时间（CUDA 上折成 GPU 小时）、状态与 pack 的字节数、梯度审计与调参试验标签 `run.trial`；`registry budget` 检查 token 对齐并汇总调参算力；B12a 有预算行；G0.5 的 bench 计时的就是训练循环的一步。
+- **测试：** CPU 测试在任何主机上都只用 CPU；`test_scaffold` 按层次表检查包内导入；`ruff format` 接管代码布局。
 
 ## 实现步骤
 
@@ -163,6 +181,7 @@ PYTHONPATH=fork/bilingual/src "${FORK_PY:-.venv/bin/python}" -m surogate_bilingu
 | I4 | 数据：tokenizer、manifest、划分、去污染、shard、采样器、Track S、D_seed 混合 | 已完成（CPU）；CI 尚未运行，没有处理任何自然语料 |
 | I5 | 训练：单一训练循环、各 recipe、状态与恢复、运行登记 | 已完成（CPU）；CI 尚未运行，GPU 上未运行，没有训练过任何实验模型 |
 | I6 | 评测、统计、资源审计与 RTX 5090 运行手册 | 已完成（CPU）；CI 尚未运行，GPU 测试与运行手册在 GPU 主机上都未运行 |
+| CR1 | 代码评审的 26 条问题：核实、修正与回归测试 | 已完成（CPU）；CI 尚未运行，GPU 上未运行 |
 
 ## 文档
 
