@@ -1,0 +1,365 @@
+# Track S generator spec (MS §6.2; docs/spec.md, I4). Read by `python -m surogate_bilingual synth`.
+#
+# Everything here is a [建议] default of the preregistration draft v1.1 until the owner locks it (MS §9.7). The
+# generator version lives in the code (surogate_bilingual.data.synth.build.TRACK_S_VERSION); the same
+# (version, spec, profile, seed) gives byte-identical output, and the data card records the sha256 of this file.
+#
+# Template lists are append-only: ids are derived from list positions (templates.py), so inserting a string in
+# the middle of a list renames every later template. Train, dev and test pools are disjoint by construction.
+
+[track_s]
+spec_version = 1
+# E3-par month_sum_mod12 numbers the months January = 1 ... December = 12.
+
+# ---------------------------------------------------------------------------------------------------------------
+# Sizes. `full` is the confirmatory build; `ci` is the CPU-test build (same templates, tiny counts).
+# ---------------------------------------------------------------------------------------------------------------
+
+[profile.full]
+partitions = { seed = 4000, zh = 4000, en = 4000, par = 2000 }
+heldout_fraction = 0.5        # of P_zh and P_en: no QA in any training data; E1/E2/E3-par ask about them
+eval_dev_fraction = 0.2       # of every held-out group: dev people; the rest are test people
+par_train_fraction = 0.5      # of P_par: parallel biographies in D_parallel; the rest are E4 people
+values = { city = 200, occupation = 100, employer = 200, hobby = 60 }
+min_rewrites = 5              # distinct biography renderings per person and language, at least
+# Exposures per fact = biography renderings that state it (every rendering states all six facts).
+bio_exposures = { seed = { zh = 50, en = 50 }, zh = { zh = 100 }, en = { en = 100 } }
+parallel_pairs_per_person = 10
+qa_per_fact = { seed = 1, zh = 2, en = 2 }   # QA documents per fact (and per language for P_seed)
+seed_par_samples = 20000      # E3-par format samples over P_seed pairs (both variants, both languages)
+seed_ctx_samples = 80000      # E3-ctx format samples in D_seed, the eight language orders equally
+expert_ctx_samples = 40000    # monolingual E3-ctx samples in D_zh and in D_en each
+items = { test = 2000, dev = 500 }            # per family, variant and direction
+ctx_categories = 7            # K: the rules are a bijection between 7 colours and the 7 weekdays
+ctx_distractors = [0, 3]      # distractor entities in the fact segment, uniform in the range
+e4_attributes = [3, 6]        # facts in an E4 source passage, uniform in the range
+
+[profile.ci]
+partitions = { seed = 40, zh = 60, en = 60, par = 40 }
+heldout_fraction = 0.5
+eval_dev_fraction = 0.25
+par_train_fraction = 0.5
+values = { city = 12, occupation = 12, employer = 12, hobby = 12 }
+min_rewrites = 5
+bio_exposures = { seed = { zh = 5, en = 5 }, zh = { zh = 6 }, en = { en = 6 } }
+parallel_pairs_per_person = 2
+qa_per_fact = { seed = 1, zh = 1, en = 1 }
+seed_par_samples = 40
+seed_ctx_samples = 64
+expert_ctx_samples = 24
+items = { test = 24, dev = 8 }
+ctx_categories = 7
+ctx_distractors = [0, 3]
+e4_attributes = [3, 6]
+
+# ---------------------------------------------------------------------------------------------------------------
+# Chinese templates. A Latin-script placeholder ({name}, {a}, {b}, {entity}) is separated from Han characters by a
+# space or punctuation, so names tokenize the same way in both languages.
+# ---------------------------------------------------------------------------------------------------------------
+
+[templates.zh.bio.year]
+train = [
+  "{name} 出生于{value}。", "{name} 生于{value}。", "{name} 是{value}出生的。", "{value}，{name} 出生了。",
+  "{name} 的出生年份是{value}。", "{name} 降生在{value}。", "据记载，{name} 生于{value}。", "{name} 于{value}来到人世。",
+]
+dev = ["{name} 出生的年份为{value}。"]
+test = ["{name} 在{value}呱呱坠地。", "{name} 诞生于{value}。", "档案显示 {name} 出生于{value}。"]
+
+[templates.zh.bio.month]
+train = [
+  "{name} 的生日在{value}。", "{name} 出生在{value}。", "{name} 是{value}生人。", "{name} 的出生月份是{value}。",
+  "{name} 每年{value}过生日。", "{value}是 {name} 的生日月份。", "{name} 的生日月份为{value}。", "{name} 在{value}庆祝生日。",
+]
+dev = ["{name} 的生日落在{value}。"]
+test = ["{name} 出生的月份是{value}。", "{name} 的生日总在{value}。", "每到{value}，{name} 就过生日。"]
+
+[templates.zh.bio.city]
+train = [
+  "{name} 出生于{value}这座城市。", "{name} 的出生地是{value}。", "{name} 是在{value}出生的。", "{value}是 {name} 的出生地。",
+  "{name} 在{value}出生。", "{name} 的出生城市是{value}。", "{name} 诞生在{value}这座城市。", "{name} 生在{value}。",
+]
+dev = ["{name} 出生的城市是{value}。"]
+test = ["{name} 降生于{value}。", "{value}这座城市是 {name} 出生的地方。", "{name} 的出生地点在{value}。"]
+
+[templates.zh.bio.occupation]
+train = [
+  "{name} 是一名{value}。", "{name} 的职业是{value}。", "{name} 以{value}为业。", "{name} 做{value}这一行。",
+  "{name} 的工作是{value}。", "{name} 是位{value}。", "{name} 从事{value}工作。", "作为{value}，{name} 很敬业。",
+]
+dev = ["{name} 当{value}已经多年。"]
+test = ["{name} 是一位{value}。", "{name} 靠做{value}谋生。", "{name} 的本职是{value}。"]
+
+[templates.zh.bio.employer]
+train = [
+  "{name} 在{value}工作。", "{name} 受雇于{value}。", "{name} 是{value}的员工。", "{name} 就职于{value}。",
+  "{name} 为{value}效力。", "{name} 的雇主是{value}。", "{name} 在{value}上班。", "{value}雇用了 {name}。",
+]
+dev = ["{name} 供职于{value}。"]
+test = ["{name} 目前任职于{value}。", "{name} 是{value}的一名雇员。", "{value}是 {name} 的工作单位。"]
+
+[templates.zh.bio.hobby]
+train = [
+  "{name} 喜欢{value}。", "{name} 的爱好是{value}。", "{name} 业余时间爱{value}。", "{name} 平时喜欢{value}。",
+  "{name} 最大的爱好是{value}。", "{name} 闲暇时最爱{value}。", "{name} 热衷于{value}。", "{value}是 {name} 的爱好。",
+]
+dev = ["{name} 的兴趣是{value}。"]
+test = ["{name} 对{value}情有独钟。", "{name} 一有空就沉迷于{value}。", "{value}是 {name} 最喜欢的消遣。"]
+
+[templates.zh.qa.year]
+train = ["{name} 出生于哪一年？", "{name} 是哪年出生的？", "{name} 的出生年份是？", "{name} 生于哪一年？"]
+dev = ["{name} 的出生年份是哪一年？"]
+test = ["请问 {name} 出生在哪一年？", "{name} 降生于哪一年？"]
+
+[templates.zh.qa.month]
+train = ["{name} 出生在几月？", "{name} 的生日在哪个月？", "{name} 是几月出生的？", "{name} 的出生月份是？"]
+dev = ["{name} 生于几月？"]
+test = ["请问 {name} 的生日在几月？", "{name} 在哪个月出生？"]
+
+[templates.zh.qa.city]
+train = ["{name} 出生在哪座城市？", "{name} 的出生地是哪里？", "{name} 是在哪个城市出生的？", "{name} 的出生城市叫什么？"]
+dev = ["{name} 出生于哪个城市？"]
+test = ["请问 {name} 生于哪座城市？", "{name} 的出生城市是？"]
+
+[templates.zh.qa.occupation]
+train = ["{name} 的职业是什么？", "{name} 做什么工作？", "{name} 从事什么职业？", "{name} 的工作是什么？"]
+dev = ["{name} 以什么为业？"]
+test = ["请问 {name} 是做什么的？", "{name} 干的是哪一行？"]
+
+[templates.zh.qa.employer]
+train = ["{name} 在哪家公司工作？", "{name} 的雇主是谁？", "{name} 受雇于哪家机构？", "{name} 为哪家公司效力？"]
+dev = ["{name} 就职于哪家单位？"]
+test = ["请问 {name} 在哪里上班？", "{name} 的工作单位是哪家？"]
+
+[templates.zh.qa.hobby]
+train = ["{name} 的爱好是什么？", "{name} 业余时间喜欢做什么？", "{name} 平时喜欢什么？", "{name} 有什么爱好？"]
+dev = ["{name} 闲暇时喜欢什么？"]
+test = ["请问 {name} 的兴趣是什么？", "{name} 最喜欢的消遣是什么？"]
+
+[templates.zh.frame]
+train = ["问：{q}\n答：", "问题：{q}\n回答：", "{q}\n答案：", "请回答：{q}\n答：", "提问：{q}\n回答："]
+dev = ["请问：{q}\n答：", "{q}\n回答如下："]
+test = ["下面是一个问题。{q}\n答：", "请简短回答。{q}\n答案：", "{q}\n请作答：", "题目：{q}\n解答：", "考考你：{q}\n答："]
+
+[templates.zh.par.same_city]
+train = ["{a} 和 {b} 出生在同一座城市吗？", "{a} 与 {b} 是在同一个城市出生的吗？", "{a} 和 {b} 的出生城市相同吗？",
+         "{a} 跟 {b} 是同一个城市出生的吗？"]
+dev = ["{a} 和 {b} 生于同一座城市吗？"]
+test = ["请判断：{a} 和 {b} 的出生地是同一座城市吗？", "{a} 与 {b} 生在同一座城市吗？", "{a} 的出生城市和 {b} 的一样吗？",
+        "{a} 和 {b} 是不是同城出生？", "{a} 与 {b} 的出生城市是否一致？"]
+
+[templates.zh.par.month_sum]
+train = ["{a} 和 {b} 的出生月份序号相加后除以 12，余数是多少？", "把 {a} 与 {b} 出生月份的序号相加，模 12 等于几？",
+         "{a} 和 {b} 的出生月序号之和除以 12 余几？"]
+dev = ["{a} 与 {b} 的出生月份序号之和模 12 是多少？"]
+test = ["计算 {a} 和 {b} 出生月份序号的和，除以 12 的余数是？", "{a} 的出生月序号加上 {b} 的，再对 12 取余，结果是多少？",
+        "{a} 与 {b} 出生月份序号相加，对 12 取模得几？", "请求出 {a} 和 {b} 出生月序号之和除以 12 的余数。",
+        "{a}、{b} 两人出生月份序号的和除以 12，余数为多少？"]
+
+[templates.zh.ctx_fact_intro]
+train = ["已知以下信息：", "资料显示：", "记录如下："]
+dev = ["请看下面的记录："]
+test = ["下面是各小组的情况：", "根据登记表：", "已知下列事实：", "以下信息来自名册："]
+
+[templates.zh.ctx_fact]
+train = ["小组 {entity} 的颜色是{category}。", "{entity} 组被标记为{category}。", "{entity} 小组属于{category}。",
+         "编号 {entity} 的小组是{category}的。"]
+dev = ["{entity} 组的标志色为{category}。"]
+test = ["小组 {entity} 使用{category}的旗帜。", "{entity} 组被分到了{category}。", "给 {entity} 组分配的颜色是{category}。",
+        "{entity} 小组的代表色是{category}。"]
+
+[templates.zh.ctx_rule_intro]
+train = ["规则：", "开会安排如下：", "日程规定："]
+dev = ["会议时间表："]
+test = ["本周的安排是：", "按照以下规则开会：", "各颜色小组的会议日：", "时间规定如下："]
+
+[templates.zh.ctx_rule]
+train = ["{category}的小组在{value}开会。", "{category}小组的会议定在{value}。", "凡是{category}的小组，都在{value}碰面。",
+         "{category}组每逢{value}集合。"]
+dev = ["{category}的小组于{value}聚会。"]
+test = ["{category}小组的例会安排在{value}。", "属于{category}的小组会在{value}见面。", "{category}组固定在{value}开会。",
+        "轮到{category}小组开会的日子是{value}。"]
+
+[templates.zh.ctx_q]
+train = ["小组 {entity} 在星期几开会？", "{entity} 组的会议在哪一天？", "{entity} 小组哪天开会？", "编号 {entity} 的小组在一周中的哪一天碰面？"]
+dev = ["{entity} 组什么时候集合？"]
+test = ["{entity} 小组的例会是星期几？", "请问 {entity} 组在哪一天见面？", "{entity} 组会在星期几聚会？", "小组 {entity} 的开会日是哪天？"]
+
+[templates.zh.e4_instr]
+train = ["请把上面的内容翻译成中文：", "将上文译成中文：", "用中文重述上面这段话：", "把这段文字翻成中文："]
+dev = ["请将以上段落译为中文："]
+test = ["请把上面这段话翻译为中文：", "上文的中文译文是：", "用中文改写上面的段落：", "请给出上文的中文翻译：", "把以上内容用中文表达出来："]
+
+[templates.zh.e4_back]
+train = ["现在把你的译文翻译回中文：", "再把上面的英文译回中文：", "请把刚才的英文译文还原成中文："]
+dev = ["接着把英文版本译回中文："]
+test = ["最后把上面的英文翻回中文：", "请将这段英文重新译成中文：", "把英文译文再转写成中文：", "然后把上面的英文改回中文："]
+
+# ---------------------------------------------------------------------------------------------------------------
+# English templates. Occupation values carry no article, so no template puts "a"/"an" before {value}; no
+# template starts a sentence with a lower-case value.
+# ---------------------------------------------------------------------------------------------------------------
+
+[templates.en.bio.year]
+train = [
+  "{name} was born in {value}.", "{name}'s year of birth is {value}.", "{name} came into the world in {value}.",
+  "In {value}, {name} was born.", "The birth year of {name} is {value}.", "{name} was born in the year {value}.",
+  "Records list {value} as the year {name} was born.", "{name} entered the world in {value}.",
+]
+dev = ["{name}'s birth took place in {value}."]
+test = ["{name} first saw daylight in {value}.", "It was in {value} that {name} was born.",
+        "According to the archive, {name} was born in {value}."]
+
+[templates.en.bio.month]
+train = [
+  "{name}'s birthday is in {value}.", "{name} was born in the month of {value}.", "{name} celebrates a birthday every {value}.",
+  "The birth month of {name} is {value}.", "{name} has a birthday in {value}.", "{value} is the month {name} was born in.",
+  "{name}'s birthday falls in {value}.", "Each year in {value}, {name} has a birthday.",
+]
+dev = ["{name} turns a year older every {value}."]
+test = ["{name} was a {value} baby.", "The month of {name}'s birth is {value}.", "Every {value}, {name} marks a birthday."]
+
+[templates.en.bio.city]
+train = [
+  "{name} was born in the city of {value}.", "{name}'s birthplace is {value}.", "{name}'s city of birth is {value}.",
+  "{value} is where {name} was born.", "{name} is a native of {value}.", "The city where {name} was born is {value}.",
+  "{name} was born and raised in {value}.", "{name}'s place of birth is {value}.",
+]
+dev = ["{name} began life in {value}."]
+test = ["{name} hails from {value}.", "{value} is the birthplace of {name}.", "{name} first drew breath in {value}."]
+
+[templates.en.bio.occupation]
+train = [
+  "{name}'s occupation is {value}.", "{name}'s job title is {value}.", "{name} works in the role of {value}.",
+  "{name}'s profession is listed as {value}.", "{name} earns a living in the role of {value}.", "The job of {name} is {value}.",
+  "{name} holds the position of {value}.", "{name}'s line of work is {value}.",
+]
+dev = ["{name} is employed in the role of {value}."]
+test = ["{name} makes a living with the job title {value}.", "The profession of {name} is {value}.",
+        "{name}'s registered occupation is {value}."]
+
+[templates.en.bio.employer]
+train = [
+  "{name} works for {value}.", "{name} is employed by {value}.", "{name}'s employer is {value}.",
+  "{name} is on the staff of {value}.", "{value} employs {name}.", "{name} has a job at {value}.", "{name} works at {value}.",
+  "{name} draws a salary from {value}.",
+]
+dev = ["{name} is part of the team at {value}."]
+test = ["{name} is currently employed at {value}.", "{value} is the company {name} works for.",
+        "{name} earns a paycheck from {value}."]
+
+[templates.en.bio.hobby]
+train = [
+  "{name}'s hobby is {value}.", "{name} enjoys {value}.", "In free time, {name} enjoys {value}.", "{name} loves {value}.",
+  "{name}'s favourite pastime is {value}.", "{name} is passionate about {value}.", "{name} spends weekends on {value}.",
+  "{name} has a passion for {value}.",
+]
+dev = ["{name} is fond of {value}."]
+test = ["{name} unwinds through {value}.", "Whenever possible, {name} turns to {value}.",
+        "{name}'s leisure activity of choice is {value}."]
+
+[templates.en.qa.year]
+train = ["In which year was {name} born?", "What year was {name} born?", "What is {name}'s year of birth?",
+         "{name} was born in which year?"]
+dev = ["Which year did {name} come into the world?"]
+test = ["Can you tell me the year {name} was born?", "When, by year, was {name} born?"]
+
+[templates.en.qa.month]
+train = ["In which month was {name} born?", "What month was {name} born in?", "What is {name}'s birth month?",
+         "{name} was born in which month?"]
+dev = ["Which month is {name}'s birthday in?"]
+test = ["Can you tell me the month {name} was born?", "During which month was {name} born?"]
+
+[templates.en.qa.city]
+train = ["In which city was {name} born?", "What is {name}'s city of birth?", "Where was {name} born?",
+         "{name} was born in which city?"]
+dev = ["Which city is {name}'s birthplace?"]
+test = ["Can you tell me the city where {name} was born?", "Name the city in which {name} was born."]
+
+[templates.en.qa.occupation]
+train = ["What is {name}'s occupation?", "What does {name} do for a living?", "What is {name}'s job?",
+         "What work does {name} do?"]
+dev = ["What is {name}'s profession?"]
+test = ["Can you tell me what job {name} has?", "Which line of work is {name} in?"]
+
+[templates.en.qa.employer]
+train = ["Who is {name}'s employer?", "Which company does {name} work for?", "Where does {name} work?",
+         "Which firm employs {name}?"]
+dev = ["For which organisation does {name} work?"]
+test = ["Can you tell me who employs {name}?", "At which company is {name} employed?"]
+
+[templates.en.qa.hobby]
+train = ["What is {name}'s hobby?", "What does {name} enjoy in their free time?", "What is {name}'s favourite pastime?",
+         "What does {name} like to do for fun?"]
+dev = ["How does {name} spend leisure time?"]
+test = ["Can you tell me {name}'s hobby?", "What does {name} do to relax?"]
+
+[templates.en.frame]
+train = ["Q: {q}\nA:", "Question: {q}\nAnswer:", "{q}\nAnswer:", "Please answer: {q}\nA:", "Query: {q}\nReply:"]
+dev = ["Quick question: {q}\nAnswer:", "{q}\nResponse:"]
+test = ["Here is a question. {q}\nAnswer:", "Answer briefly. {q}\nA:", "{q}\nYour answer:", "Problem: {q}\nSolution:",
+        "Try this one: {q}\nA:"]
+
+[templates.en.par.same_city]
+train = ["Were {a} and {b} born in the same city?", "Is the birth city of {a} the same as that of {b}?",
+         "Do {a} and {b} share a city of birth?", "Did {a} and {b} come into the world in the same city?"]
+dev = ["Are {a} and {b} from the same birth city?"]
+test = ["Tell me whether {a} and {b} were born in one and the same city.", "Was {a} born in the same city as {b}?",
+        "Is {a}'s birthplace the same city as {b}'s?", "Do {a} and {b} have the same city of birth?",
+        "Did {a} and {b} both start life in the same city?"]
+
+[templates.en.par.month_sum]
+train = ["What is the sum of the birth-month numbers of {a} and {b}, modulo 12?",
+         "Add the birth-month numbers of {a} and {b}; what is the remainder after dividing by 12?",
+         "What do the birth-month numbers of {a} and {b} add up to, mod 12?"]
+dev = ["Taking the birth months of {a} and {b} as numbers, what is their sum modulo 12?"]
+test = ["Compute the birth-month number of {a} plus that of {b}, modulo 12.",
+        "What remainder do you get when the birth-month numbers of {a} and {b} are summed and divided by 12?",
+        "Sum {a}'s and {b}'s birth-month numbers; what is the result mod 12?",
+        "Modulo 12, what is the total of the birth-month numbers of {a} and {b}?",
+        "If you add the month numbers of the births of {a} and {b}, what is the remainder modulo 12?"]
+
+[templates.en.ctx_fact_intro]
+train = ["Here are the facts:", "Records show:", "Known information:"]
+dev = ["Consider these records:"]
+test = ["The group registry says:", "Note the following:", "From the roster:", "These facts are given:"]
+
+[templates.en.ctx_fact]
+train = ["Group {entity} is {category}.", "The colour of group {entity} is {category}.",
+         "Group {entity} has been marked {category}.", "{entity} belongs to the {category} team."]
+dev = ["Group {entity} carries a {category} badge."]
+test = ["Group {entity} was assigned {category}.", "The banner of group {entity} is {category}.",
+        "Team {entity} is labelled {category}.", "{entity} is a {category} group."]
+
+[templates.en.ctx_rule_intro]
+train = ["Rules:", "Meeting schedule:", "The schedule is:"]
+dev = ["Timetable:"]
+test = ["This week's plan:", "Meetings follow these rules:", "Meeting days by colour:", "The arrangement is as follows:"]
+
+[templates.en.ctx_rule]
+train = ["Groups that are {category} meet on {value}.", "The {category} groups meet on {value}.",
+         "All {category} groups gather on {value}.", "Every {value}, the {category} groups convene."]
+dev = ["The {category} teams hold their meeting on {value}."]
+test = ["The meeting day for {category} groups is {value}.", "On {value}, the {category} groups get together.",
+        "Each {category} group meets on {value}.", "It is on {value} that the {category} groups meet."]
+
+[templates.en.ctx_q]
+train = ["On which day does group {entity} meet?", "When does group {entity} meet?",
+         "Which day is the meeting of group {entity}?", "What day does {entity} gather?"]
+dev = ["On what day does group {entity} convene?"]
+test = ["Which weekday does group {entity} meet on?", "Tell me the meeting day of group {entity}.",
+        "What is the meeting day for group {entity}?", "Group {entity} meets on which day?"]
+
+[templates.en.e4_instr]
+train = ["Translate the passage above into English:", "Render the text above in English:",
+         "Restate the paragraph above in English:", "Put the text above into English:"]
+dev = ["Give the English version of the passage above:"]
+test = ["Please translate the text above into English:", "The English translation of the passage above is:",
+        "Rewrite the paragraph above in English:", "Provide an English rendering of the text above:",
+        "Express the content above in English:"]
+
+[templates.en.e4_back]
+train = ["Now translate your translation back into English:", "Next, render the Chinese above back into English:",
+         "Turn the Chinese version back into English:"]
+dev = ["Then put the Chinese text back into English:"]
+test = ["Finally, translate the Chinese above back into English:", "Please convert that Chinese text back into English:",
+        "Rewrite the Chinese version in English again:", "Bring the Chinese translation back to English:"]

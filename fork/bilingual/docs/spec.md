@@ -1,6 +1,6 @@
 # 决定记录与数据契约（P0）
 
-- **状态：** 规格。截至步骤 I3，脚手架（I1），模型核心、路由、组装、冻结、哈希与参数审计（I2），以及融合算子、合并与 router 门控（I3）已落地，并通过 CPU 测试（见“实现步骤”中的 I2、I3 落地记录）；数据、训练与评测部分还没有实现。没有任何代码在 GPU 上运行过。凡是 RTX 5090 的数字都是 [估计] 或 TBD，以 G0.5 的实测为准。
+- **状态：** 规格。截至步骤 I4，脚手架（I1），模型核心、路由、组装、冻结、哈希与参数审计（I2），融合算子、合并与 router 门控（I3），以及数据管线与 Track S 生成器（I4）已落地，并通过 CPU 测试（见“实现步骤”中的 I2–I4 落地记录）；训练与评测部分还没有实现，所以还没有任何实验结果。没有任何代码在 GPU 上运行过。凡是 RTX 5090 的数字都是 [估计] 或 TBD，以 G0.5 的实测为准。
 - **来源：** 三份文档，都写于 2026-11-02，都不在本仓库中，由 owner 保存：
   - owner 的预注册稿 v1.1（下称“手稿”；本文的“手稿 §N”指它的章节）；
   - 对 v1.0 研究包的对抗式评审 v1.0（下称“评审”；文中的 NOV-、MA-、SCI-、IMPL- 编号和 NEW-01 指它的问题）；
@@ -103,9 +103,12 @@
 | `bilingual-assembly/1` | 组装 manifest，不复制权重 | I2 |
 | `bilingual-budget/1` | 预算报告 | I2 |
 | `bilingual-fidelity/1` | `verify` 的强制路由保真报告（I2 新增，英文规格中没有） | I2 |
-| `bilingual-manifest/1`、`bilingual-split/1` | 语料 manifest、划分文件 | I4 |
+| `bilingual-manifest/1`、`bilingual-split/1` | 语料 manifest、划分文件；由划分物化出的 manifest 另记每个文件所属的划分（`split`）与来源（`derived_from`） | I4 |
+| `bilingual-tokenizer/1` | tokenizer 旁边的 `tokenizer.meta.json`：训练输入及其 sha256、manifest 哈希、设置（I4 新增，英文规格中没有） | I4 |
+| `bilingual-overlap/1` | 去污染的重叠报告：规则、各规则命中数、被标出的训练文档（I4 新增） | I4 |
+| `bilingual-sampler/1` | 采样器的 `state_dict`，I5 写进训练状态的 `extra.json`（I4 新增） | I4 |
 | `bilingual-shard/1` | shard 的头 `shard.json` | I4 |
-| `bilingual-item/1`、`bilingual-datacard/1` | Track S 的题目（每行一项）与数据卡 | I4 |
+| `bilingual-item/1`、`bilingual-datacard/1` | Track S 的题目（每行一项）与数据卡；数据卡分两种 `kind`：`track_s`（生成器）与 `d_seed`（D_seed 混合） | I4 |
 | `bilingual-state/1` | 训练状态的 `extra.json` | I5 |
 | `bilingual-run/1`、`bilingual-metrics/1` | 运行记录 `run.json`、每步指标 `metrics.jsonl` | I5 |
 | `bilingual-pred/1`、`bilingual-result/1` | 每项 × 每臂的预测、结果列表（`status` 默认为“未运行”） | I6 |
@@ -163,6 +166,11 @@ name.encode("utf-8") + b"\0" + str(dtype).encode() + b"\0" + json(list(shape)).e
 | `tokenizer.normalization` | `none`、`nfkc` | `none` | B-O11 | |
 | `eval.length_norm` | `sum`、`mean`、`auto` | `auto`（候选 token 长度全部相等时 `sum`，否则 `mean`） | 手稿 §9.1 | |
 | `registry.allow_dirty` | 布尔 | `false` | | 记入 `run.json` |
+| `data.seed_mix_parallel_fraction` | 0–1 | 0.5 | [建议]（I4 新增） | `codeswitch_parallel` 的 token 中由拼接平行对占的份额，其余为混语文本 |
+| `data.seed_tags` | `start`、`switch`、`bridge` | `true`、`true`、`false` | B-O3（I4 新增） | 带标签文档在开头与每个语言切换点放标签；bridge 标签默认不进 D_seed |
+| `data.min_mixed_window_fraction` | 浮点 | 0.01 | [建议]（I4 新增） | D_seed shard 在 `train.seq` 下的混语窗口比例下限，低于它时 shard 写入方拒绝 |
+| `data.split_fractions` | 按文档种类的比例 | 见 `config.DEFAULTS` | [建议]（I4 新增） | 七个集合的文档级划分比例 |
+| `data.decontam_rules` | 规则列表 | `en_word13`、`zh_han25`、`token13` | 手稿 §6.1（I4 新增） | |
 
 ## 实现步骤
 
@@ -341,6 +349,61 @@ name.encode("utf-8") + b"\0" + str(dtype).encode() + b"\0" + json(list(shape)).e
 - **I4-D6（采样器，IMPL-02、IMPL-07）：** 相同种子给出相同批次；k 个批次后取 `state_dict` 再加载，继续得到的批次与不中断的运行完全一致；一个 epoch 内覆盖范围中每个位置恰好作一次目标（不重叠的块，每 epoch 随机偏移）；shard 的最后一个 token 可以作目标（回归 v1.0 的 `randint` 上界）；路由与损失掩码与 token 同步切片。
 - **I4-D7（Track S，SCI-01、SCI-08、SCI-11）：** 相同（版本，种子）给出相同的输出字节，每个文件的 sha256 记入数据卡；`checker.py` 由 `structured` 字段独立重算 100% 题目的标准答案并与生成器一致，并确认渲染文本含有答案所需的事实；各族内模板 id 集合在 train、dev、test 之间互不相交，每族 ≥ 100 个 test 模板（完整规模）、每族每方向 ≥ 2,000 道 test 题，实体分区互不相交，test 中的事实对不在任何训练文档中共现；属性值与名字及分区独立（20k 次抽样的卡方 p ≥ 0.001）；E3-par 的泄漏检验：对 `same_city` 与 `month_sum_mod12`，P(gold | 任一单个事实) 是均匀的（卡方 p ≥ 0.001），故意泄漏的对照“谁出生更早”被标出（单事实的 Bayes 正确率 ≥ 0.7，p < 1e-6）；E3-ctx 去掉任一段后标准答案在候选上均匀（逐题结构检查）；E2 与 E3-ctx 的每个候选集都含正确值的另一语言形式，标签平衡在 ±1% 之内；每个事实的曝光次数恰好等于声明值。
 - **I4-D8（D_seed，SCI-02）：** 构成比例与 `data.seed_mix` 相差在 ±0.5% 之内；含混语文档与拼接的平行文档；fixture 的混合窗口比例超过声明的最小值（v1.0 的打包方式为 2.6e-7）。
+
+#### I4 落地记录
+
+**状态：** 已完成（CPU）。I4-D1 至 I4-D8 都是 `fork/bilingual/tests/cpu` 中有名字的用例，全部通过；没有在 GPU 主机上运行，CI 也还没有运行这些用例（见 [实测记录](measurements.md)）。`tokenizer`、`manifest`、`split`、`decontam`、`shard`、`synth` 六个命令随本步骤落地。本步骤只生成数据与检查数据，没有训练，所以仍然没有任何实验结果；Track S 的泄漏检验与独立性检验是对**生成器设计**的检查，不是关于模型的结论。
+
+| 验收 | 检查方式（`fork/bilingual/tests/cpu` 下的用例） |
+|---|---|
+| I4-D1 | `test_data_tokenizer.py` 的七个 `test_i4_d1_*`：fixture 语料含 zh、en、emoji、CJK 扩展 B、全角标点与制表符；特殊 id 为 v1.0 顺序，normalizer 为空；500 个随机字符串（含 4 字节字符与 emoji）及每个标签字符串 0 个 `<unk>`、精确往返；`"，"` 与 `","` 不同；对验收中那句含两个字面标签的中文，`escape_user_text` 的结果不含特殊 id（对照：v1.0 的编码方式把两个字面标签都变成控制 id）；拒绝 `zh_train` 的文件、manifest 中没有的文件和 sha256 不符的文件；同样的输入训练两次逐字节相同 |
+| I4-D2 | `test_data_manifest.py` 的五个 `test_i4_d2_*`：每个文件的 sha256、字节数与文档数（`.txt` 以空行分隔文档）；缺 `licence` 或非 SPDX 风格的 id 报错且不写文件；`licence_verified` 默认 false，未核实的来源列在 `unverified_licences`，D_seed 数据卡照抄（`test_seed_mix.py`）；文件列举顺序反过来、整个语料搬到别处时 `manifest_sha256` 不变，改一个字节就变；篡改的 manifest 或文件被拒绝 |
+| I4-D3 | `test_data_split.py` 的五个 `test_i4_d3_*`：同一种子的划分文件逐字节相同；全角字母、大小写、空白不同的近重复，平行句对的两侧，同一实体的合成文档，在 5 个种子下都落在同一划分；七个集合两两不相交，每个文档恰好出现一次，物化出的文件与划分一致；10k 个文档上每个划分与目标相差 ≤ 1%；去污染删掉的文档只从训练划分中去掉 |
+| I4-D4 | `test_data_decontam.py` 的五个 `test_i4_d4_*`：英文 13 词规则恰好查出植入的英文副本；植入的 40 个汉字的中文副本，按空白分词的 13-gram 查不出（回归），汉字 25-gram 恰好查出；token 13-gram 两者都查出；三条规则合用时过滤恰好删除两篇植入文档；n-gram 哈希与穷举的集合交一致 |
+| I4-D5 | `test_data_shards.py` 的五个 `test_i4_d5_*`：token、偏移、路由、损失掩码往返，用户文本中的字面标签仍是文本；篡改 `routes.bin`、tokenizer 哈希不符、未知 major 版本都被拒绝；词表 ≤ 65535 时为 uint16，否则 uint32（用 70,000 词的替身 tokenizer），dtype 从头中读取，与词表不符时拒绝；`tag_counts` 与 `mixed_window_fraction` 在 seq ∈ {3, 8, 64} 下等于穷举重算，分块扫描与块大小无关；标签占比 0.03 的种子 shard 中每个标签不少于声明的最少次数，去掉带标签文档后写入方拒绝，且不留下目录 |
+| I4-D6 | `test_data_sampler.py` 的五个 `test_i4_d6_*`（含参数化，共 11 个用例）：同一种子同样的批次；k ∈ {0, 1, 9, 13} 个批次后取 `state_dict`，新建的采样器加载后与不中断的运行完全一致，种子或 token 数不同时拒绝；四种 (n_tokens, seq) 下每个 epoch 覆盖范围内每个位置恰好作一次目标；最后一个 token 可以作目标，而 v1.0 的 `random_batch` 在 200 次抽样中最多只到倒数第二个（按路径调用 owner 的文件）；路由按输入位置、损失掩码按目标位置与 token 同步切片 |
+| I4-D7 | `test_track_s.py` 的十七个 `test_i4_d7_*`，细节见下 |
+| I4-D8 | `test_seed_mix.py` 的五个 `test_i4_d8_*`：各成分的 token 比例与 `data.seed_mix` 相差 ≤ 0.5%（由返回的文档独立重算），Track S 整体保留，没有文档用两次，自然文本按 token 中英平衡；含按文字切分为 zh/en 段的混语文档和拼接的平行文档；带标签文档在开头和每个切换点有标签；seq 64 的 D_seed shard 混语窗口比例高于声明的下限 0.01 的 10 倍，而同一批文档按 v1.0 方式打包（先全部 zh 再全部 en）低于下限的一半，且不超过只跨一条 zh/en 接缝的上界；池子不够时报错 |
+| 命令行 | `test_data_cli.py`：manifest → split assign → decontam → split materialize → tokenizer train/check → synth → shard（D_zh 与 `--seed-mix` 的 D_seed）经 `python -m surogate_bilingual` 走一遍；`--dry-run` 不写任何文件；被拒绝的输入以退出码 1 结束并给出原因 |
+
+I4-D7 的各项：
+
+- **确定性：** 同一（版本、规格、profile、种子）再生成一次，每个文件逐字节相同；数据卡记录每个文件的 sha256 与规格文件的 sha256；换种子则不同；输出目录已存在时拒绝。
+- **标准答案：** `checker.py` 不调用生成器，只用闭集词表、人物表与文本：E1/E2/E3-par 由人物表重算，E3-ctx 完全由渲染文本解析（每个事实句恰有一个组号和一个颜色，每条规则恰有一个颜色和一个星期），E4 逐阶段重算槽位；ci 构建的 512 道题与完整规模的 40,000 道题都 100% 一致。参数式题目所需的事实由训练传记的文本扫描确认确实写出。另有一个用例逐族篡改题目（含只改 E3-ctx 事实句中的颜色、不改结构化字段），检查器全部查出。
+- **不相交与规模：** 各族的模板 id（以及组成它们的每个部件）在 train、dev、test 之间不相交；注册表拒绝跨划分重复的文本、紧贴汉字的拉丁占位符和含词表值的 E3-ctx 模板。完整规模：注册表中 test 模板数为 E1 120、E2 120、E3-par 100、E3-ctx 104、E4 远多于 100；实际生成完整规模的 test 题目，16 个（族，变体，方向）每个 2,000 道，各族用到的 test 模板都 ≥ 100。人物分区互不相交、大小与声明一致，题目只问对应划分的留出人物；test 的人物对不在任何训练文档中同时被提到（按文本中的名字），组号在题目之间、题目与训练文本之间都不重复。
+- **独立性与泄漏：** χ² 生存函数对已知分位数 ≤ 1e-6；20k 次抽样中 6 个属性分别对分区、名字两个部件的 18 个 χ² 检验 p ≥ 0.001；3000 × 3000 人的池子上各 6000 道 E3-par：`same_city` 与 `month_sum` 对 A 或 B 任一单个事实 p ≥ 0.001，单事实 Bayes 正确率不超过机会水平 + 0.05，标签计数相差 ≤ 1；“谁出生更早”对照单事实 Bayes 正确率 ≥ 0.7、p < 1e-6，被标出。
+- **E3-ctx 去段检验：** 每道题结构上检查规则是 7 个颜色到 7 个星期候选的双射、所有事实颜色都在其中，所以去掉事实段时答案在 7 个候选上均匀，去掉规则段时（规则是随机双射）同样均匀；另把一道题的规则删到 5 条，检验报错。
+- **候选与标签：** 1,600 道 E2 与 1,600 道 E3-ctx-cross 中每个候选集都含正确值的另一语言形式，8 个候选互不相同；正确位置与 E3-ctx 的正确星期各自与均匀份额相差 ≤ 1%。
+- **曝光：** 不经检查器、直接从文本数出的每个事实的曝光次数恰好等于声明值（P_seed 每种语言 5 次共 10 次，P_zh、P_en 各 6 次，P_par 平行对 4 次；完整规模为 100、100、100、20），每人每种语言至少 5 种不同的传记。
+- **词表：** 每个词表内外两种语言的形式都互不相同，没有一个形式属于两个属性词表；“陶艺家”这类包含另一属性值（“陶艺”）的形式由联合匹配处理（见下文第 13 条）。
+
+**实现中的决定与对英文规格的偏离（owner 可以推翻）：**
+
+1. **E3-ctx 的规则条数固定为 K = 7。** 手稿 §6.2 把规则条数（3–7）列为难度轴，又要求去掉任一段后答案均匀、机会水平为 1/(K+1)、K = 7。三者不能同时成立：规则少于 7 条时，只看规则段就能把答案缩到规则中出现的那几个星期（不看事实段的正确率 1/n > 1/8）。本实现让规则成为 7 个颜色到 7 个星期的随机双射，难度轴保留干扰实体数（0–3）和段落顺序；规格要求 `ctx_categories ≠ 7` 时构建报错并说明原因。另一种做法是 K 随规则条数变化、逐题记录机会水平，但这会让 G1′ 的门槛（机会水平 12.5% + 20 个百分点）失去固定的基准。**需要 owner 决定。**
+2. **E3-par 的 `knowledge_source` 为 null**，另加 `knowledge_sources: {"a": "zh", "b": "en"}`。英文规格说 E3-par 的 `knowledge_source` 取 zh 或 en，但它的两个事实分别在 P_zh 与 P_en 中；`R_src` 对 E3-par 需要按片段路由的规则，留给 I6 与 owner。
+3. **题目格式的补充字段：** `answer_sep`（zh 为空串，en 为一个空格，评分时接在候选前，与训练时 QA 文档的写法一致）；E4 的 `stages`（每个阶段的答案语言、槽位与参照译文，顶层 `slots`、`reference` 是最后一个阶段的）和 `text` 为 null 的 `answer` 段（回切题在生成的答案后用换行接下一段）；E3-par 的结构化字段有 `label` 与人名顺序 `order`；E3-ctx 的结构化字段用英文形式作颜色与星期的键；题目 id 含划分，例如 `E3ctx-cross-zh.en.zh-test-000123`。
+4. **模板是组合的。** 一个角色的模板 id 是各部件 id 用 `+` 连起来（例如问题 = 外框 + 问句），“每族 ≥ 100 个 test 模板”按组合后的 id 计；每个部件池按划分不相交，同一角色内同一文本也不出现在两个划分中（比规格更严，跨属性也不行）。模板 id 由在列表中的位置导出，所以模板列表只能追加。外框（frame）由 E1、E2、E3-par、E3-ctx 共用。
+5. **曝光次数按传记计：** 每篇传记写出全部 6 个事实，一个事实的曝光次数就是写出它的传记篇数，按分区与语言声明（P_seed 中、英文各 50，P_zh、P_en 各 100，P_par 的训练人物每人 10 对平行传记，即 20 次）。QA 文档另计，不算曝光，篇数在数据卡中按族列出。
+6. **人物的分组。** P_zh、P_en 各一半为 `qa_train`（其 QA 进入专家训练数据），另一半留出，再按 `eval_dev_fraction` 分为 dev 与 test 人物，E1、E2、E3-par 只问留出的人物。P_par 一半的人物进入 D_parallel，另一半只用于 E4 的 dev/test，所以 E4 的 test 人物从不出现在训练数据中（手稿只说“对象是 P_par 的传记和模板句”）。D_seed 另含 P_seed 人物对的 E3-par 格式样本（`seed_par_samples`）[建议]：手稿没有规定 E3-par 的训练格式，没有它，“是/否”与余数两种答法在种子中从未出现。
+7. **划分按配额分配**而不是按哈希分桶：各类文档的簇按 sha256(种子, 簇键) 排序后依次填满各划分的配额，每个划分与目标相差不超过一个簇的大小；代价是语料变化时边界上的文档会移动（语料变了 manifest 也就变了，划分按（manifest，种子）重算）。各类文档的默认比例是 [建议]，在 `DEFAULTS["data"]["split_fractions"]` 中。
+8. **物化步骤。** `split materialize` 把每个划分的文档写成 `<out>/<划分>/<来源>.jsonl`，并写出一份由划分导出的 manifest，其中每个文件带 `split`；tokenizer 只接受这份 manifest 中 `seed_train` 的文件，并明确拒绝 calib、dev、test。tokenizer 在全部 `seed_train` 文档上训练，它们是 D_seed 混合的超集（混合按 token 比例对自然文本降采样），不含任何留出文本。
+9. **去污染的顺序与实现。** token 规则需要 tokenizer，所以顺序是：词规则与汉字规则（划分后、物化前）→ 物化 → tokenizer → token 规则（写 shard 前，`shard --exclude`）。n-gram 以 64 位哈希比较，碰撞只会多删、不会漏删；英文的词是 NFKC + casefold 后按空白切分、去掉首尾标点；n-gram 不跨段。报告格式 `bilingual-overlap/1` 是新增的。
+10. **shard 的头**另记 `vocab_size`、`min_tag_counts`、`mixed_window_fraction.floor`、`inputs`（输入文件及其 sha256）与 `extra`（D_seed 的数据卡）。`mixed_window_fraction` 取所有起点的窗口（即均匀随机起点看到的比例，与 v1.0 的 2.6e-7 可比）；`ShardReader` 必须显式传入运行的 `tokenizer_sha256` 与 `vocab_size`，传 None 只用于离线查看，且记录在 `checks` 中。
+11. **采样器的窗口**是 seq 个输入加 1 个目标偏移；`routes` 取输入位置（计算该位置的专家），`loss_mask` 取目标位置。状态 `bilingual-sampler/1` 只有 epoch 与 index 两个游标，另存 n_tokens、seq、种子与 offset 用于校验。
+12. **D_seed 混合**（新模块 `data.mixture`，英文规格的文件树中没有）：Track S 成分整体保留（否则预注册的曝光次数会变），总量 T 由它反推；自然文本按 token 中英平衡；`codeswitch_parallel` 一半是拼接的平行对、一半是混语文本 [建议]；带标签文档先取混语文档，再交替取中英自然文本；标签的最少次数就是混合时插入的次数，交给 shard 写入方核对。新增的四个默认值见上文“开关”。
+13. **属性值的联合匹配。** 中文里两个属性的词表有包含关系（职业“摄影师”含爱好“摄影”，“陶艺家”含“陶艺”），在完整规模题目的第一次检查中，检查器因此误报了 157 道 E4 题（90 道的参照译文、67 道的源文）。`values.find_attributes` 对所有属性词表做联合的最左最长匹配后解决；I6 对生成文本做槽位评分时也必须这样匹配。
+14. **词表内容**（均为 [建议]）：城市是 206 个真实地名（构建取前 n 个）；雇主由 20 个前缀与 10 个行业组合而成，不对应真实公司；英文职业不带冠词，模板也不在值前放 a/an；中文的“翻译”改为“口译员”（interpreter），免得与 E4 指令中的“翻译”混淆；`month_sum` 以一月为 1。
+15. **新模块 `data.docs`**：整个数据管线共用的文档模型（文本段与标签段，各带语言、角色、路由与损失标志）和 JSON Lines 读写；文档读入时以 manifest 中的来源名为准。
+16. **`routing.tags.escape_user_text` 改为调用 `data.tokenizer.encode_user_text`**，两处只有一份实现；因此 `routing.tags` 依赖 `data.tokenizer`（后者不导入 torch）。
+17. **数据卡**分两种：Track S 的（`kind: track_s`，含检查器结果、曝光、泄漏与独立性统计量、模板集合、标签平衡、人物分区）与 D_seed 混合的（`kind: d_seed`）。数据卡中的泄漏统计量是在本次构建自己的题目上算的；ci 规模下题目太少，检验力很低，有检验力的版本在测试中用大池子运行。任何一项检查失败时构建报错，不写数据卡。
+18. **CLI 的子命令：** `split` 有 `assign` 与 `materialize`，`tokenizer` 有 `train` 与 `check`；`--dry-run` 挂在子命令上。
+
+**仍未验证与未实现：**
+
+- 没有下载或处理任何自然语料：中英文自然文本、平行数据与混语文本的来源与许可都待核实（B-O12），数据卡把未核实的来源列出来。手稿 §6.1 的平行数据清洗（语言识别、长度比、对齐分数阈值、人工抽查 200 对）与领域分类器检查**没有实现**，`decontam` 只做去重之外的重叠过滤。
+- Track S 的 test 题目没有再对训练文档做 n-gram 去污染：模板跨划分不相交、人物与组号都是新的，但这一点只由构造保证，没有用 `decontam` 跑过。
+- 完整规模的 Track S 只在本机 C1 上构建过一次（见 [实测记录](measurements.md)），GPU 主机上没有运行；shard 写入与 tokenizer 训练在完整规模上的耗时与内存没有测（混语窗口比例的扫描按块进行，但每个 token 的语言码在写入时保存在内存中，十亿 token 约 1 GB）。
+- CI 上的这些用例与 CPU lane 上的套件耗时。
 
 ### I5：训练
 

@@ -6,7 +6,8 @@ back to the default route. Here the plan is built once over the whole history an
 it with `RoutePlan.slice`.
 
 `escape_user_text` encodes user text so that a literal "<|en|>" in it is ordinary text, never the special id
-(IMPL-03); it needs a `tokenizers.Tokenizer` (tokenizers >= 0.20, `encode_special_tokens`).
+(IMPL-03); it needs a `tokenizers.Tokenizer` (tokenizers >= 0.20, `encode_special_tokens`) and delegates to
+`data.tokenizer.encode_user_text`, which the shard writer uses too.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from collections.abc import Mapping, Sequence
 
 import torch
 
-from ..config import SPECIAL_TOKENS
+from ..data.tokenizer import encode_user_text
 from .plan import PlanError, RoutePlan
 
 # The control tags of the v1.0 tokenizer and the expert each one selects.
@@ -50,14 +51,6 @@ def plan_from_tags(ids: Sequence[int], tag_to_name: Mapping[int, str], names: Se
 
 
 def escape_user_text(tok, text: str) -> list[int]:
-    """Token ids of user text with every special-token string encoded as plain text."""
-    previous = tok.encode_special_tokens
-    tok.encode_special_tokens = True
-    try:
-        ids = tok.encode(text, add_special_tokens=False).ids
-    finally:
-        tok.encode_special_tokens = previous
-    specials = {tok.token_to_id(s) for s in SPECIAL_TOKENS} - {None}
-    if specials & set(ids):
-        raise RuntimeError("escaped user text still contains special ids; the tokenizer does not escape them")
-    return ids
+    """Token ids of user text with every special-token string encoded as plain text. The one implementation is
+    `data.tokenizer.encode_user_text`; this name is the routing-side entry point of the API."""
+    return encode_user_text(tok, text)

@@ -2,7 +2,7 @@
 
 命令都在 GPU 主机的仓库根目录、环境 `fork/.venv-bilingual` 中运行。门槛按顺序进行：某一步以非零退出码结束、或判据不成立，就停止，保存输出，不进入下一个门槛；判据不成立时记录实测值，不要放宽阈值。每个结果都按主机、提交和日期记入 [实测记录](measurements.md)。本手册中的时长、吞吐和显存数字在实测之前都是 [估计]。
 
-**当前状态（截至步骤 I3）：本手册中的门槛全部未运行。** 现在能运行的只有 G0 的第 1 步（建环境、跑 CPU 测试）。`assemble`、`verify`、`audit` 三个命令已在 I2 落地，但前两个需要的种子与专家 pack 要等 I5 的训练才有；其余命令（`env`、`bench`、`synth`、`train` 与各评测命令）在步骤 I4–I6 落地，在此之前 `python -m surogate_bilingual 命令` 以退出码 2 结束并说明命令在哪个步骤实现。步骤 I6 补全本手册，届时可运行的命令块会由测试以 `--dry-run` 逐条检查。
+**当前状态（截至步骤 I4）：本手册中的门槛全部未运行。** 现在能运行的是 G0 的第 1 步（建环境、跑 CPU 测试）和 G1′ 之前的数据准备（`synth` 与数据管线的各命令，I4）。`assemble`、`verify`、`audit` 三个命令已在 I2 落地，但前两个需要的种子与专家 pack 要等 I5 的训练才有；其余命令（`env`、`bench`、`train` 与各评测命令）在步骤 I5–I6 落地，在此之前 `python -m surogate_bilingual 命令` 以退出码 2 结束并说明命令在哪个步骤实现。步骤 I6 补全本手册，届时可运行的命令块会由测试以 `--dry-run` 逐条检查。
 
 运行输出的位置还没有定：英文规格把运行目录放在仓库根目录的 runs 下，而根目录的 `.gitignore` 只忽略 data 目录、不忽略 runs，未跟踪的运行输出会让工作区变 dirty（`code_dirty`）。I5 落地运行登记时一并决定（例如放在 `fork/bilingual` 下并由 `fork/.gitignore` 忽略，或经环境变量放到仓库之外）。
 
@@ -67,6 +67,33 @@
 ## G1′ 可测性 pilot
 
 `mech8` profile，3 个重复，约 3–11 小时 [估计]。先由 Track S 生成规格生成数据（`synth`，I4），再按 pilot 行配置运行 `g1p-*` 各阶段（`train`，I5）：每个重复（r0–r2）种子 0.3B、ZH 与 EN 各 0.1B、B2 0.2B、B12a 0.2B token。
+
+**数据准备（I4，CPU 即可，命令已落地）。** 先生成 Track S，再处理自然语料。自然语料的来源与许可要 owner 先选定并核实（B-O12），在此之前只能运行第一条命令。语料目录中的 spec 由 owner 编写：每个来源一个 `[[source]]`（字段见 [spec 的“语料 manifest 与划分”](spec.md#数据契约摘要)），其中 Track S 的 D_seed 成分作为 `kind = "synthetic"` 的来源列入（files 为 `track_s/seed/*.jsonl`），这样它进入 `seed_train`，tokenizer 也在它上面训练；D_zh、D_en、D_parallel 的 Track S 成分不进 manifest，写 shard 时用 `--add` 加入。自然语料来源的 glob 不要匹配到 `track_s/` 下的文件。
+
+```bash
+PY=fork/.venv-bilingual/bin/python
+$PY -m surogate_bilingual synth --spec fork/bilingual/examples/track_s.toml --seed 20261102 --out data/corpus/track_s
+$PY -m surogate_bilingual manifest --spec data/corpus/spec.toml --root data/corpus --out data/manifest.json
+$PY -m surogate_bilingual split assign --manifest data/manifest.json --seed 20261102 --out data/split.json
+$PY -m surogate_bilingual decontam --manifest data/manifest.json --split data/split.json --out data/overlap_text.json
+$PY -m surogate_bilingual split materialize --manifest data/manifest.json --split data/split.json --exclude data/overlap_text.json --out data/splits
+$PY -m surogate_bilingual tokenizer train --manifest data/splits/manifest.json --out data/tokenizer/tokenizer.json
+$PY -m surogate_bilingual tokenizer check data/tokenizer/tokenizer.json
+$PY -m surogate_bilingual decontam --manifest data/splits/manifest.json --rules token13 --tokenizer data/tokenizer/tokenizer.json --out data/overlap_token.json
+$PY -m surogate_bilingual shard --manifest data/splits/manifest.json --split seed_train --tokenizer data/tokenizer/tokenizer.json --route seed --seed-mix --exclude data/overlap_token.json --out data/shards/seed
+$PY -m surogate_bilingual shard --manifest data/splits/manifest.json --split zh_train --tokenizer data/tokenizer/tokenizer.json --route zh --add data/corpus/track_s/zh/track_s.jsonl --exclude data/overlap_token.json --out data/shards/zh
+$PY -m surogate_bilingual shard --manifest data/splits/manifest.json --split en_train --tokenizer data/tokenizer/tokenizer.json --route en --add data/corpus/track_s/en/track_s.jsonl --exclude data/overlap_token.json --out data/shards/en
+```
+
+判据：`synth` 以退出码 0 结束并写出 `datacard.json`（任何一项检查失败时它报错、不写数据卡）；数据卡的 `status` 全部为 true；`tokenizer check` 报告 0 个 `<unk>` 与 0 个往返失败；D_seed shard 的头中 `extra.seed_mix.max_share_error` ≤ 0.005，`mixed_window_fraction.value` 高于下限 0.01。D_parallel shard（Bridge 用）的路由与损失掩码由 I5 的 Bridge recipe 决定，在 I5 补上。把 `datacard.json`、`data/split.json`、tokenizer 与各 shard 头的 sha256 记入实测记录；test 文件的 sha256 在任何 test 评测之前写入签名的预注册锁定提交（手稿 §9.7）。完整规模的 `synth` 在本机 C1 上约 5.5 分钟、1.1 GB [CPU 实测，见实测记录]；自然语料各步在完整规模上的耗时没有测过。
+
+| 项目 | 结果 | 主机 | 提交 | 日期 |
+|---|---|---|---|---|
+| Track S 完整构建（种子 20261102）与数据卡 sha256 | 未运行（GPU 主机）；C1 上的一次构建见实测记录 | | | |
+| 自然语料的来源与许可核实（B-O12） | 未开始 | | | |
+| tokenizer、各 shard 与它们的 sha256 | 未运行 | | | |
+
+**pilot 运行（I5 落地后）：**
 
 - **通过：** 在 **dev** 上，B0、B2、B12a 中最好的一个在 E3-ctx-cross 上的正确率 ≥ 随机水平（12.5%）+ 20 个百分点。
 - **输出：** 讨厌参数（不一致率、题目方差、重复间 SD、发散情况）；按手稿 §9.5 的规则定出的重复数 R；在签名的预注册锁定提交中锁定 SESOI 与界值（手稿 §9.7）。

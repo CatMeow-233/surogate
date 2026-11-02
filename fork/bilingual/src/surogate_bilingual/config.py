@@ -73,6 +73,23 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     "data": {
         "window": "packed",  # documents separated by <eos>; "doc_aligned" is deferred
         "seed_mix": {"natural": 0.80, "track_s": 0.12, "codeswitch_parallel": 0.05, "tagged": 0.03},  # B-O7
+        # [建议] the share of the codeswitch_parallel tokens taken by concatenated parallel pairs; the rest is
+        # code-switched text (MS §6.1 names both and no ratio)
+        "seed_mix_parallel_fraction": 0.5,
+        # B-O3: a tagged D_seed document opens with the tag of its language and carries one at every language
+        # switch; tags are ordinary input and target tokens. <|bridge|> stays out of D_seed unless set (MS §6.4)
+        "seed_tags": {"start": True, "switch": True, "bridge": False},
+        # [建议] the declared floor of the D_seed shard's mixed-window fraction at train.seq (v1.0: 2.6e-7)
+        "min_mixed_window_fraction": 0.01,
+        # [建议] document-level split fractions per kind (SCI-10); the seven sets are disjoint by construction
+        "split_fractions": {
+            "zh": {"seed_train": 0.70, "zh_train": 0.20, "calib": 0.02, "dev": 0.04, "test": 0.04},
+            "en": {"seed_train": 0.70, "en_train": 0.20, "calib": 0.02, "dev": 0.04, "test": 0.04},
+            "parallel": {"seed_train": 0.30, "parallel_train": 0.60, "calib": 0.02, "dev": 0.04, "test": 0.04},
+            "codeswitch": {"seed_train": 0.90, "calib": 0.02, "dev": 0.04, "test": 0.04},
+            "synthetic": {"seed_train": 1.0},  # Track S assigns its own sets (data.synth); this covers strays
+        },
+        "decontam_rules": ["en_word13", "zh_han25", "token13"],  # MS §6.1, SCI-10
     },
     "tokenizer": {
         "vocab_size": 32768,

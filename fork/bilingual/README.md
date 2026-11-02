@@ -4,7 +4,7 @@
 
 研究的问题 [待实验]：从同一个双语种子分叉、在冻结的共享骨干（嵌入兼 tied head、attention、norm）上**各自独立训练**的中文 FFN 专家与英文 FFN 专家，组装后在没有任何联合训练的条件下能否完成跨语言组合；在同一组冻结的专家检查点上，“先混合、再经共享冻结的非线性读出”（pre）与“先读出、再混合”（post）是否不同；独立专家相对单一双语专家要付出多少切换代价与模块化代价。通道拼接等于 Top-2 输出求和是已知恒等式 [已知数学事实]，只作零假设与数值检查，不算贡献。
 
-**当前状态：实现步骤 I1–I3 已完成（只在 CPU 上验证）。** 包里有模型核心、路由、组装、冻结审计与参数预算（见下文“模型、路由与组装”），以及融合算子、同初始化合并与 router 门控（见下文“融合、合并与 router 门控”）；还没有数据、训练循环与评测代码，所以没有任何实验结果。凡涉及 RTX 5090 的吞吐、显存和时长，都是 [估计] 或 TBD，在 [运行手册](docs/runbook.md) 的 G0、G0.5 实测并记入 [实测记录](docs/measurements.md) 之前，不得写成结果。证据层级沿用手稿：[假设]、[建议]、[待实验]、[已知数学事实]、[已有论文结果]、[估计]。
+**当前状态：实现步骤 I1–I4 已完成（只在 CPU 上验证）。** 包里有模型核心、路由、组装、冻结审计与参数预算（见下文“模型、路由与组装”），融合算子、同初始化合并与 router 门控（见下文“融合、合并与 router 门控”），以及数据管线与 Track S 生成器（见下文“数据与 Track S”）；还没有训练循环与评测代码，所以没有任何实验结果。凡涉及 RTX 5090 的吞吐、显存和时长，都是 [估计] 或 TBD，在 [运行手册](docs/runbook.md) 的 G0、G0.5 实测并记入 [实测记录](docs/measurements.md) 之前，不得写成结果。证据层级沿用手稿：[假设]、[建议]、[待实验]、[已知数学事实]、[已有论文结果]、[估计]。
 
 ## 决定 B-D1（已采用，owner 可以推翻）
 
@@ -26,10 +26,11 @@
 | [requirements-gpu.txt](requirements-gpu.txt) | GPU 主机环境 `fork/.venv-bilingual` 的依赖；torch 按 [运行手册的 G0](docs/runbook.md#g0-环境与-gpu-不变量) 另装 |
 | [src/surogate_bilingual/](src/surogate_bilingual/) | 包代码。`import surogate_bilingual` 不导入 torch，也不导入任何 `surogate` 模块；子模块按需导入 torch |
 | [docs/](docs/) | 决定与数据契约、运行手册和实测记录，见下文“文档” |
+| [examples/](examples/) | Track S 的生成规格 [track_s.toml](examples/track_s.toml)：人物与属性的规模、曝光次数、题量和全部模板（I4）；I5 在这里加入运行配置 |
 | [tests/cpu/](tests/cpu/) | CPU 测试，用 `fork/dev test bilingual` 运行；`golden/` 中是 pilot 几何的预算报告；`-m identity_check` 只运行恒等式检查 |
 | [reference/](reference/) | owner 的 v1.0 代码与数据，逐字节原样保存，sha256 固定在 `MANIFEST.json` 中；不打包，包代码不导入，只供测试按路径加载，见 [reference/README.md](reference/README.md) |
 
-后续步骤还会加入运行配置的 examples 目录（I4、I5）和 GPU 测试目录（I6）。
+后续步骤还会在 examples 中加入运行配置（I5），并加入 GPU 测试目录（I6）。
 
 本包不进任何 wheel：根目录 `pyproject.toml` 的原生 wheel 只打包 `surogate/`，实验 wheel 只打包 `fork/experimental/src` 中的 `surogate.experimental*`。`tests/cpu/test_scaffold.py` 从这两个 pyproject 读出打包目录并检查本包不在其中，还检查：
 
@@ -99,6 +100,21 @@ PYTHONPATH=fork/bilingual/src "${FORK_PY:-.venv/bin/python}" -m surogate_bilingu
 fork/dev test bilingual -m identity_check
 ```
 
+## 数据与 Track S（I4）
+
+以下都只在 CPU 上验证过；验收、决定与偏离见 [docs/spec.md 的 I4 落地记录](docs/spec.md#i4-落地记录)。这些代码只生成和检查数据，不训练模型，所以这里的检查都不是实验结果。
+
+- **管线**（`data`）：语料 manifest（每个来源必须声明许可，未核实的许可在数据卡中列出）→ 文档级划分（七个集合不相交；近重复、平行句对、同一实体的合成文档各自聚成一簇）→ 去污染（英文 13 词、中文 25 个汉字、13 个 token 三种 n-gram）→ 物化各划分 → tokenizer（byte-level BPE，256 字节初始字母表，不做 NFKC，只在 `seed_train` 上训练）→ shard（token、文档偏移、逐 token 路由与损失掩码，头中钉住 tokenizer、manifest 与划分的 sha256）→ 确定、可恢复的采样器（每个 epoch 内每个位置恰好作一次目标）。
+- **D_seed 混合**（`data.mixture`）：自然文本 80%、Track S 12%、混语与拼接平行对 5%、带标签文档 3%（B-O7，按 token 计），按文档打乱；带标签文档在开头和每个语言切换点放控制标签（B-O3）。shard 记录混语窗口比例，低于声明的下限时拒绝写入（v1.0 的打包方式只有 2.6e-7）。
+- **Track S**（`data.synth`，SCI-01）：人物名字两种语言都用同一个拉丁字母形式；6 个属性独立均匀地抽取；知识按语言分区（P_seed、P_zh、P_en、P_par）；E1、E2、E3-par、E3-ctx、E4 五族题目，每题带结构化字段，由不调用生成器的检查器重新推出答案；模板按 train/dev/test 不相交，完整规模下每族 ≥ 100 个 test 模板、每族每方向 2,000 道 test 题。E3-ctx 的规则是 7 个颜色到 7 个星期的双射，去掉任一段后答案在候选上均匀；手稿的“规则条数 3–7”这一难度轴因此没有采用，需要 owner 决定（落地记录第 1 条）。
+
+在仓库根目录用 CPU 测试的解释器即可生成 ci 规模的 Track S（约 1 秒）；完整规模在本机 C1 上约 5.5 分钟、1.1 GB（[实测记录](docs/measurements.md)），输出放在 git 忽略的 data 目录下：
+
+```bash
+PYTHONPATH=fork/bilingual/src "${FORK_PY:-.venv/bin/python}" -m surogate_bilingual synth --spec fork/bilingual/examples/track_s.toml --profile ci --seed 20261102 --out data/track_s_ci
+PYTHONPATH=fork/bilingual/src "${FORK_PY:-.venv/bin/python}" -m surogate_bilingual synth --spec fork/bilingual/examples/track_s.toml --seed 20261102 --dry-run
+```
+
 ## 实现步骤
 
 每个步骤由一个或多个签名提交落地；提交前 `fork/dev map`、`fork/dev check` 和 `fork/dev test bilingual` 都要通过。各步骤的交付物和验收条件见 [docs/spec.md 的“实现步骤”](docs/spec.md#实现步骤)。
@@ -108,7 +124,7 @@ fork/dev test bilingual -m identity_check
 | I1 | 脚手架与仓库接线 | 已完成（CPU）；CI 尚未运行，见 [实测记录](docs/measurements.md) |
 | I2 | 模型核心、路由、组装、冻结、哈希、参数审计 | 已完成（CPU）；CI 尚未运行，GPU 上未运行 |
 | I3 | 融合算子与合并，fp64 参照测试（复用 v1.0 的 `verify_merge_math.py`） | 已完成（CPU）；CI 尚未运行，GPU 上未运行 |
-| I4 | 数据：tokenizer、manifest、划分、去污染、shard、采样器、Track S | 未开始 |
+| I4 | 数据：tokenizer、manifest、划分、去污染、shard、采样器、Track S、D_seed 混合 | 已完成（CPU）；CI 尚未运行，没有处理任何自然语料 |
 | I5 | 训练：单一训练循环、各 recipe、状态与恢复、运行登记 | 未开始 |
 | I6 | 评测、统计与 RTX 5090 运行手册 | 未开始 |
 
