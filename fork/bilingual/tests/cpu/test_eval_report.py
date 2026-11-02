@@ -127,6 +127,39 @@ def test_memory_accounting_and_the_cpu_bench():
     assert choice[0]["microbatch"] == 4 and choice[0]["accum"] == 1 and choice[0]["checkpointing"] is True
 
 
+def test_the_bench_times_the_training_step_of_every_recipe(monkeypatch):
+    """CR1 review: G0.5 measures train.loop.Trainer.step (recipe groups, masked CE, KL reference, clipping), not a
+    private copy of the step; every bench recipe runs, and family-I-only recipes stay out of family II."""
+    from surogate_bilingual.train import loop
+
+    calls = []
+    real = loop.Trainer.step
+
+    def counted(self, windows, lr):
+        calls.append((self.recipe.kind, self.cfg.anchor_kl, float(windows[0]["loss_mask"].mean())))
+        return real(self, windows, lr)
+
+    monkeypatch.setattr(loop.Trainer, "step", counted)
+    cfg = profile("tiny", "swiglu")
+    for recipe in bench.RECIPES:
+        point = {"family": "swiglu", "recipe": recipe, "seq": 8, "microbatch": 2, "checkpointing": False}
+        rec = bench.bench_point(cfg, point, warmup=1, steps=1, device=torch.device("cpu"))
+        assert rec["status"] == "ok" and rec["trainable_parameters"] > 0, recipe
+    kinds = {(k, kl, m) for k, kl, m in calls}
+    assert (
+        ("expert", bench.BENCH_KL, 1.0) in kinds and ("bridge", 0.0, 0.5) in kinds and ("joint_wide", 0.0, 1.0) in kinds
+    )
+    assert len(calls) == 2 * len(bench.RECIPES)
+    wide = bench.bench_point(cfg, {**point, "recipe": "joint_wide"}, warmup=0, steps=1, device=torch.device("cpu"))
+    assert wide["trainable_parameters"] == 2 * sum(p.numel() for p in RoutedLM(cfg, ["zh"]).bank.parameters())
+    points = bench.grid(["swiglu", "slot"], list(bench.RECIPES), [8], [2], [False])
+    assert {(p["family"], p["recipe"]) for p in points if p["family"] == "slot"} == {
+        ("slot", "seed"),
+        ("slot", "expert"),
+        ("slot", "expert_kl"),
+    }
+
+
 def test_bench_command_refuses_without_cuda_and_runs_on_an_explicit_cpu(tmp_path, capsys):
     out = tmp_path / "g05.jsonl"
     grid = [

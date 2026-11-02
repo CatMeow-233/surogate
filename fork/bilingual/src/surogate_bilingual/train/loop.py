@@ -213,7 +213,8 @@ class Trainer:
                 kl = objectives.kl_sum(logits, ref_logits, mask)
                 loss = loss + anchor * kl
                 kl_total += float(kl.detach())
-            (loss / n).backward()
+            if loss.requires_grad:  # no path to a trained tensor (e.g. every target follows a frozen-route
+                (loss / n).backward()  # position): a zero gradient for this window, checked by the step audit
             ce_total += float(ce.detach())
         kl_mean = kl_total / n if anchor > 0 else None
         return {
@@ -223,8 +224,17 @@ class Trainer:
             "loss": (ce_total + (anchor * kl_total if anchor > 0 else 0.0)) / n,
         }
 
+    def nonzero_gradients(self) -> list[bool]:
+        """Per trainable tensor (FreezePlan order): whether its accumulated gradient has a nonzero entry."""
+        if not self.params:
+            return []
+        zero = torch.zeros((), device=self.device)
+        peaks = [p.grad.detach().abs().amax().float() if p.grad is not None else zero for p in self.params]
+        return [bool(x) for x in (torch.stack(peaks) > 0).cpu().tolist()]
+
     def step(self, windows: Sequence[Mapping[str, np.ndarray]], lr: float) -> dict[str, Any]:
         stats = self.gradients(windows)
+        stats["nonzero"] = self.nonzero_gradients()
         max_norm = self.cfg.grad_clip if self.cfg.grad_clip > 0 else math.inf
         norm = float(torch.nn.utils.clip_grad_norm_(self.params, max_norm))
         if not math.isfinite(stats["loss"]) or not math.isfinite(norm):
@@ -345,6 +355,7 @@ def prepare(
         "p_update": updated,
         "within_update_budget": updated <= UPDATE_BUDGET,
         "experts": list(model.expert_names),
+        "trial": spec.trial,
     }
     sched = schedule.Schedule(total, run.train.lr, run.train.warmup_frac, run.train.min_lr_frac)
     return Prepared(
@@ -383,11 +394,14 @@ def _environment(run_dir: Path, step: int) -> None:
     registry_env.write_environment(run_dir / name)
 
 
-def _resume(p: Prepared, run_dir: Path, run_id: str, sampler: EpochChunkSampler, resume: bool) -> tuple[int, int]:
+def _resume(
+    p: Prepared, run_dir: Path, run_id: str, sampler: EpochChunkSampler, resume: bool
+) -> tuple[int, int, float]:
+    """(step, tokens, device seconds) of the latest state, after restoring it; (0, 0, 0.0) for a fresh run."""
     state.clean_stale(run_dir)
     latest = state.latest_state(run_dir)
     if latest is None:
-        return 0, 0
+        return 0, 0, 0.0
     if not resume:
         raise TrainError(f"{run_dir} already holds states (latest {latest.name}); resume it or use another run name")
     loaded = state.load_state(latest, run_id=run_id, map_location=p.device)
@@ -407,14 +421,17 @@ def _resume(p: Prepared, run_dir: Path, run_id: str, sampler: EpochChunkSampler,
     sampler.load_state_dict(loaded.extra["sampler"])
     state.restore_torch_rng(loaded.torch_rng)
     state.restore_rng(loaded.extra["rng"])
-    return loaded.step, int(loaded.extra["tokens"])
+    return loaded.step, int(loaded.extra["tokens"]), float(loaded.extra.get("device_seconds", 0.0))
 
 
-def _save(p: Prepared, run_dir: Path, run_id: str, step: int, tokens: int, sampler: EpochChunkSampler) -> None:
+def _save(
+    p: Prepared, run_dir: Path, run_id: str, step: int, tokens: int, sampler: EpochChunkSampler, seconds: float
+) -> None:
     trainable = dict(zip(p.plan.trainable_names, p.plan.parameters(), strict=True))
     extra = {
         "run_id": run_id,
         "tokens": tokens,
+        "device_seconds": seconds,
         "frozen_hashes": p.frozen_hashes,
         "scheduler": p.schedule.state_dict(step),
         "sampler": sampler.state_dict(),
@@ -457,6 +474,39 @@ def _packs(p: Prepared, run_dir: Path, doc: Mapping[str, Any], step: int, tokens
     return p.recipe.write_packs(p.model, run_dir, p.resolved.inputs, meta)
 
 
+GRAD_AUDIT_STEPS = 10  # a run whose trained set gets no nonzero gradient in its first steps fails there
+
+
+def _tree_bytes(path: Path) -> int:
+    return sum(f.stat().st_size for f in Path(path).rglob("*") if f.is_file()) if Path(path).is_dir() else 0
+
+
+def _records(
+    p: Prepared, run_dir: Path, seconds: float, seen: Sequence[bool], audited: int, previous: Mapping[str, Any]
+) -> dict[str, Any]:
+    """The per-run records of MS §9.1 / §10 that the loop measures: device time (GPU hours on CUDA), state and pack
+    bytes, and the gradient audit: which trainable tensors got a nonzero gradient, over every invocation of the run
+    (`previous` is the run.json this invocation started from)."""
+    cuda = p.device.type == "cuda"
+    before = previous.get("grad_audit") or {"steps": 0, "never_nonzero": list(p.plan.trainable_names)}
+    still_zero = set(before["never_nonzero"])
+    return {
+        "compute": {
+            "device": p.device.type,
+            "device_seconds": seconds,  # summed step times of every invocation (carried in the state)
+            "gpu_hours": seconds / 3600.0 if cuda else None,
+        },
+        "storage": {"state_bytes": _tree_bytes(run_dir / "state"), "pack_bytes": _tree_bytes(run_dir / "packs")},
+        "grad_audit": {
+            "steps": int(before["steps"]) + audited,
+            "trainable_tensors": len(seen),
+            "never_nonzero": [
+                n for n, ok in zip(p.plan.trainable_names, seen, strict=True) if not ok and n in still_zero
+            ],
+        },
+    }
+
+
 def train(
     run: RunConfig,
     recipe: Recipe | None = None,
@@ -479,8 +529,10 @@ def train(
     sampler = EpochChunkSampler(len(p.resolved.shard), t.seq, spec.data_seed)
     metrics_path = run_dir / metrics.FILE
     total = p.schedule.total
+    seen = [False] * len(p.plan.trainable_names)
+    audited = 0
     try:
-        start, tokens = _resume(p, run_dir, run_id, sampler, resume)
+        start, tokens, seconds = _resume(p, run_dir, run_id, sampler, resume)
         metrics.truncate(metrics_path, start)
         _environment(run_dir, start)
         result = RunResult(
@@ -499,8 +551,10 @@ def train(
         registry.update_run(run_dir, status="running", failure=None)
         if p.device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(p.device)
+        audit_until = start + min(GRAD_AUDIT_STEPS, total - start)
         for index in range(start, total):
             if stop_after is not None and index >= stop_after:
+                registry.update_run(run_dir, **_records(p, run_dir, seconds, seen, audited, doc))
                 return result
             began = time.perf_counter()
             lr = p.schedule.lr(index)
@@ -509,6 +563,14 @@ def train(
             if p.device.type == "cuda":
                 torch.cuda.synchronize(p.device)
             elapsed = time.perf_counter() - began
+            seconds += elapsed
+            seen = [a or b for a, b in zip(seen, stats["nonzero"], strict=True)]
+            audited += 1
+            if index + 1 == audit_until and not any(seen):
+                raise TrainError(
+                    f"no trainable tensor got a nonzero gradient in {audited} steps: the shard's loss-bearing tokens"
+                    f" never run through the trained expert {p.recipe.trained!r} (check run.routes / the shard)"
+                )
             step, tokens = index + 1, tokens + t.global_batch_tokens
             result.step, result.tokens = step, tokens
             result.losses.append(stats["loss"])
@@ -531,7 +593,7 @@ def train(
                     ),
                 )
             if step == total or step == stop_after or (spec.save_every and step % spec.save_every == 0):
-                _save(p, run_dir, run_id, step, tokens, sampler)
+                _save(p, run_dir, run_id, step, tokens, sampler, seconds)
         result.packs = _packs(p, run_dir, doc, result.step, result.tokens)
     except BaseException as exc:
         registry.update_run(run_dir, status="failed", failure=f"{type(exc).__name__}: {exc}")
@@ -541,7 +603,9 @@ def train(
         status="done",
         failure=None,
         finished_step=result.step,
+        finished_tokens=result.tokens,
         packs={k: str(v.relative_to(run_dir)) for k, v in result.packs.items()},
+        **_records(p, run_dir, seconds, seen, audited, doc),
     )
     result.status = "done"
     return result

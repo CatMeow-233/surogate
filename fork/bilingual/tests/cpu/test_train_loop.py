@@ -400,3 +400,33 @@ def test_a_finished_run_is_idempotent(tiny_trained, tiny_stage):
         content_hash({f"ffn.{k.removeprefix('bank.experts.zh.')}": v for k, v in final.items()})
         == seed["hashes"]["expert"]
     )
+
+
+def test_run_json_records_compute_storage_and_the_gradient_audit(tiny_trained):
+    """CR1 review (MS §9.1, §10): device time (GPU hours on CUDA, null here), state and pack bytes, the gradient
+    audit, the tuning trial and the finished tokens are recorded per run."""
+    for stage in ("tiny-seed", "tiny-zh"):
+        doc = json.loads((tiny_trained["runs"] / stage / "run.json").read_text())
+        assert doc["compute"]["device"] == "cpu" and doc["compute"]["gpu_hours"] is None
+        assert doc["compute"]["device_seconds"] > 0
+        assert doc["storage"]["state_bytes"] > 0 and doc["storage"]["pack_bytes"] > 0
+        audit = doc["grad_audit"]
+        assert audit["steps"] == doc["finished_step"] and audit["never_nonzero"] == []
+        assert audit["trainable_tensors"] > 0 and doc["trial"] is None
+        assert doc["finished_tokens"] == doc["finished_step"] * doc["config"]["train"]["global_batch_tokens"]
+
+
+def test_a_run_whose_trained_expert_gets_no_gradient_fails_early(tiny_trained, tiny_stage, tmp_path):
+    """CR1 review: routes that send every token to a frozen context expert used to finish with an unchanged pack."""
+    run = tiny_stage(
+        "tiny-zh",
+        'run.packs={en="data/runs/tiny-en/packs/en"}',
+        'run.routes={zh="en"}',
+        'run.name="tiny-zh-misrouted"',
+        'run.trial="probe"',
+    )
+    runs = tmp_path / "runs"
+    with pytest.raises(TrainError, match="no trainable tensor got a nonzero gradient"):
+        train(run, root=tiny_trained["root"], runs=runs)
+    doc = json.loads((runs / "tiny-zh-misrouted" / "run.json").read_text())
+    assert doc["status"] == "failed" and doc["trial"] == "probe" and not (runs / "tiny-zh-misrouted" / "packs").exists()

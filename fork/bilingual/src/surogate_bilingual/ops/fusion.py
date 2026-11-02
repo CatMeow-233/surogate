@@ -70,6 +70,20 @@ def stack_swiglu(experts: Sequence[SwiGLU]) -> StackedSwiGLU:
     )
 
 
+def _as_input(x: torch.Tensor, like: torch.Tensor) -> torch.Tensor:
+    """x in the dtype of the operator's input `like` for the projection that follows. The gate product is promoted
+    (fp32 gates on bf16 activations give fp32); with bf16 parameters and no autocast the input, and so the weights,
+    are bf16 and F.linear needs one dtype. Under autocast nothing is cast here (autocast casts as before); fp32 and
+    fp64 runs are unchanged. The weights are not touched, so the read audit sees one read per projection."""
+    if x.dtype == like.dtype:
+        return x
+    try:
+        autocast = torch.is_autocast_enabled(x.device.type)
+    except RuntimeError:  # a device type without autocast (meta)
+        autocast = False
+    return x if autocast else x.to(like.dtype)
+
+
 def concat_forward(x: torch.Tensor, stacked: StackedSwiGLU, block_gates: torch.Tensor) -> torch.Tensor:
     """down_cat( diag(g_1 1_{f_1}, ..., g_E 1_{f_E}) [SiLU(gate_cat x) * (up_cat x)] ), per token."""
     hidden = F.silu(F.linear(x, stacked.gate)) * F.linear(x, stacked.up)
@@ -77,19 +91,19 @@ def concat_forward(x: torch.Tensor, stacked: StackedSwiGLU, block_gates: torch.T
     scale = torch.repeat_interleave(block_gates, widths, dim=-1).to(
         torch.promote_types(block_gates.dtype, hidden.dtype)
     )
-    return F.linear(hidden * scale, stacked.down)
+    return F.linear(_as_input(hidden * scale, x), stacked.down)
 
 
 def slot_pre(u: torch.Tensor, experts: Sequence[SlotExpert], readout: SlotReadout, gates: torch.Tensor) -> torch.Tensor:
     mixed = mix_outputs([e.pre_activation(u) for e in experts], gates)
-    return readout(mixed)
+    return readout(_as_input(mixed, u))
 
 
 def slot_post(
     u: torch.Tensor, experts: Sequence[SlotExpert], readout: SlotReadout, gates: torch.Tensor
 ) -> torch.Tensor:
     mixed = mix_outputs([readout.activate(e.pre_activation(u)) for e in experts], gates)
-    return readout.Q(mixed)
+    return readout.Q(_as_input(mixed, u))
 
 
 def _check_gates(gates: torch.Tensor, n_experts: int) -> None:

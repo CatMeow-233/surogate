@@ -67,6 +67,8 @@ BUDGET_V11 = {
     "B10-II-dual": (96276480, 96276480, 21235200, 96209920, 108792832),
     "II-n512-single": (108856320, 81331200, 27525120, 81264640, 93847552),
     "II-n512-dual": (108856320, 108856320, 27525120, 108789760, 121372672),
+    # B12a (CR1): one 2f-wide expert; P_total = shared + 2 paths, all of it active, 2 paths updated
+    "B12a": (159932928, 159932928, 127401984, 159907840, 172490752),
 }
 B10_CH_ROUTER_MACS = 24 * 8 * (512 + 54)  # budget_v11.json leaves the rank-8 block router out of B10-ch's MACs
 
@@ -82,15 +84,15 @@ def test_i2_a12_every_row_matches_the_closed_form(pilot):
     assert set(rows) == set(BUDGET_V11) | {"2B"}
 
 
-def test_i2_a12_only_dual_rows_exceed_the_active_budget(pilot):
+def test_i2_a12_only_dual_rows_and_b12a_exceed_the_active_budget(pilot):
     _, rows = pilot
     over = {rid for rid, row in rows.items() if not row["within_active_budget"]}
-    assert over == {"B6/B7", "II-dual", "II-n512-dual"}  # B6/B7 and the family-II dual rows
+    assert over == {"B6/B7", "II-dual", "II-n512-dual", "B12a"}  # the dual rows and the B12a ceiling
     assert over == {rid for rid, row in rows.items() if not row["declared_in_budget"]}
     for rid, row in rows.items():
         if row["declared_in_budget"]:  # only rows declared in budget are asserted within it (MA-12)
             assert row["within_active_budget"] and row["within_update_budget"] in (True, None), rid
-    assert all(row["within_update_budget"] for rid, row in rows.items() if rid != "2B")
+    assert {rid for rid, row in rows.items() if rid != "2B" and not row["within_update_budget"]} == {"B12a"}
 
 
 # --- I2-A13: executed P_active -----------------------------------------------------------------------------------

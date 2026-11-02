@@ -14,7 +14,9 @@ data_manifest_sha256, tokenizer_sha256, seed_fingerprint, code_commit, recipe, i
 run whose name is bound to another id is refused; the same name with the same id resumes. A dirty checkout
 (`code_dirty: true`) is refused unless `allow_dirty` is set, and the flag is then recorded in run.json.
 
-`registry list` / `registry show NAME` read run directories; they never write.
+`registry list` / `registry show NAME` / `registry budget` read run directories; they never write. `budget` tabulates
+tokens, P_update and device time per matrix row and replicate, checks the token matching of the pilot rows
+(TOKEN_MATCHES) and totals the tuning-ledger trials (`run.trial`).
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from ..canonical import atomic_write_json, check_format, remove_stale_temps, sha256_json
-from ..config import RUN_NAME_PATTERN
+from ..config import run_name_problem
 from . import env
 
 RUN_FORMAT = "bilingual-run/1"
@@ -64,8 +66,9 @@ def run_id(identity: Mapping[str, Any]) -> str:
 
 
 def check_name(name: str) -> str:
-    if not isinstance(name, str) or not RUN_NAME_PATTERN.fullmatch(name) or ".." in name:
-        raise RegistryError(f"run names must match {RUN_NAME_PATTERN.pattern} (no '..'): {name!r}")
+    problem = run_name_problem(name)
+    if problem:
+        raise RegistryError(problem)
     return name
 
 
@@ -163,10 +166,76 @@ def list_runs(runs: Path) -> list[dict[str, Any]]:
     return out
 
 
+# Token matching of the pilot (MS §8.4, §13): per replicate, the finished tokens of the left row equal the summed
+# finished tokens of the right row(s). B2 = ZH + EN (both B1 runs); B12a = B2; T1' (both directions) = T2 = T3' = T3''.
+TOKEN_MATCHES = (("B2", "B1"), ("B12a", "B2"), ("T2", "T1'"), ("T3'", "T2"), ("T3''", "T2"))
+
+
+def budget_table(runs: Path) -> dict[str, Any]:
+    """Tokens, P_update and device time per (matrix row, replicate) of the confirmatory runs, the token-matching
+    checks, and the tuning-ledger trials (run.trial) with their compute (MS §9.6: tuning counts toward the FLOPs)."""
+    groups: dict[tuple, dict[str, Any]] = {}
+    tuning = []
+    for doc in list_runs(runs):
+        if doc.get("status") == "missing":
+            continue
+        tokens = doc.get("finished_tokens") if doc.get("status") == "done" else None
+        seconds = (doc.get("compute") or {}).get("device_seconds")
+        gpu_hours = (doc.get("compute") or {}).get("gpu_hours")
+        if doc.get("trial") is not None:
+            tuning.append(
+                {
+                    "run": doc["run_name"],
+                    "row": doc.get("matrix_row"),
+                    "replicate": doc.get("replicate"),
+                    "trial": doc["trial"],
+                    "status": doc.get("status"),
+                    "tokens": tokens,
+                    "gpu_hours": gpu_hours,
+                }
+            )
+            continue
+        key = (doc.get("matrix_row"), doc.get("replicate"))
+        g = groups.setdefault(
+            key, {"row": key[0], "replicate": key[1], "runs": [], "tokens": 0, "p_update": [], "gpu_hours": 0.0}
+        )
+        g["runs"].append(doc["run_name"])
+        g["p_update"].append(doc.get("p_update"))
+        g["tokens"] = None if tokens is None or g["tokens"] is None else g["tokens"] + tokens
+        g["gpu_hours"] = None if gpu_hours is None or g["gpu_hours"] is None else g["gpu_hours"] + gpu_hours
+        g.setdefault("device_seconds", 0.0)
+        g["device_seconds"] = None if seconds is None or g["device_seconds"] is None else g["device_seconds"] + seconds
+    checks = []
+    for left, right in TOKEN_MATCHES:
+        for rep in sorted({r for (row, r) in groups if row in (left, right)}, key=str):
+            a, b = groups.get((left, rep)), groups.get((right, rep))
+            if a is None or b is None or a["tokens"] is None or b["tokens"] is None:
+                status = "incomplete"
+            else:
+                status = "matched" if a["tokens"] == b["tokens"] else "mismatch"
+            checks.append(
+                {
+                    "rows": [left, right],
+                    "replicate": rep,
+                    "tokens": [a and a["tokens"], b and b["tokens"]],
+                    "status": status,
+                }
+            )
+    hours = [t["gpu_hours"] for t in tuning]
+    return {
+        "rows": [groups[k] for k in sorted(groups, key=str)],
+        "token_matches": checks,
+        "tuning": {
+            "trials": tuning,
+            "gpu_hours": sum(hours) if hours and all(h is not None for h in hours) else None,
+        },
+    }
+
+
 def main(argv: Sequence[str]) -> int:
-    """`registry list [--runs DIR]` | `registry show NAME [--runs DIR]` (read-only; --dry-run is accepted)"""
+    """`registry list|budget [--runs DIR]` | `registry show NAME [--runs DIR]` (read-only; --dry-run is accepted)"""
     ap = argparse.ArgumentParser(prog="python -m surogate_bilingual registry", description="list or show runs")
-    ap.add_argument("action", choices=["list", "show"])
+    ap.add_argument("action", choices=["list", "show", "budget"])
     ap.add_argument("name", nargs="?")
     ap.add_argument("--runs", type=Path, default=RUNS_DIR, help="default: data/runs")
     ap.add_argument("--dry-run", action="store_true", help="no effect: the command only reads")
@@ -176,8 +245,11 @@ def main(argv: Sequence[str]) -> int:
             for doc in list_runs(args.runs):
                 print(
                     f"{doc['run_name']}\t{doc['run_id']}\t{doc.get('status')}\t{doc.get('recipe')}\t"
-                    f"{doc.get('matrix_row')}\tr{doc.get('replicate')}"
+                    f"{doc.get('matrix_row')}\tr{doc.get('replicate')}\t{doc.get('trial') or '-'}"
                 )
+            return 0
+        if args.action == "budget":
+            print(json.dumps(budget_table(args.runs), indent=1, sort_keys=True, ensure_ascii=False))
             return 0
         if not args.name:
             ap.error("show needs a run name")

@@ -140,6 +140,23 @@ def test_i2_a3_every_dispatch_path_runs_under_bf16_autocast(family, fusion):
             assert torch.equal(forced, alone), name
 
 
+@pytest.mark.parametrize("family,fusion", FAMILY_FUSIONS)
+def test_every_dispatch_path_runs_with_bf16_parameters_and_no_autocast(family, fusion):
+    """CR1 review: with bf16 parameters (RoutedLM(dtype=...), load_assembly(dtype=...), verify --dtype bfloat16) and
+    autocast off, the fp32-promoted gate products of concat, pre and post met bf16 weights in F.linear and raised.
+    The dual rows now run and stay close to the fp32 model."""
+    model = model_for("smoke", family, fusion)
+    half = RoutedLM(model.cfg, NAMES, fusion, dtype=torch.bfloat16).eval()
+    half.load_state_dict({k: v.to(torch.bfloat16) for k, v in model.state_dict().items()})
+    x = torch.randint(5, model.cfg.vocab_size, (2, 37))
+    with torch.no_grad():
+        for kind in ("one_hot", "dual", "mixed"):
+            plan = random_plan(NAMES, 2, 37, kind, seed=5)
+            out = half(x, plan)
+            assert out.dtype == torch.bfloat16 and bool(torch.isfinite(out).all()), kind
+            assert float((out.float() - model(x, plan)).abs().max()) <= 0.25, kind  # bf16 rounding only
+
+
 def test_i2_a3_the_v10_dispatch_is_the_regression_it_guards(moe_pilot):
     """Documented negative: v1.0 `_ffn` scatters bf16 expert outputs into an fp32 buffer and fails under autocast."""
     torch.manual_seed(0)

@@ -204,3 +204,31 @@ def test_verify_compares_the_forced_route_with_each_standalone_expert_on_real_te
     doc = json.loads(out.read_text())
     assert doc["passed"] and len(doc["docs"]) == 2 and doc["doc_source"]["files"][str(docs)]
     assert cli(["verify", str(tiny_assemblies["zh_en"]), "--docs", str(tmp_path / "missing.jsonl"), "--dry-run"]) == 1
+
+
+class TwoBackStub(torch.nn.Module):
+    """Logits that depend on the current AND the previous token of the window (a sentinel before the window), so
+    a target scored with less context than max_seq - stride gets another value (CR1 mutation N16)."""
+
+    def __init__(self, max_seq: int, vocab: int = 48):
+        super().__init__()
+        self.anchor = torch.nn.Parameter(torch.zeros(1))
+        g = torch.Generator().manual_seed(4)
+        self.now = torch.randn(vocab, vocab, generator=g)
+        self.before = torch.randn(vocab + 1, vocab, generator=g)  # row `vocab` = no previous token in the window
+        self.cfg = SimpleNamespace(max_seq=max_seq)
+        self.vocab = vocab
+
+    def forward(self, tokens, plan=None):
+        prev = torch.cat([torch.full_like(tokens[:, :1], self.vocab), tokens[:, :-1]], dim=1)
+        return self.now[tokens] + self.before[prev]
+
+
+def test_windowed_token_nll_scores_each_target_once_with_full_context():
+    ids = [int(x) for x in torch.randint(0, 48, (61,), generator=torch.Generator().manual_seed(9))]
+    full = nll.token_nll(TwoBackStub(max_seq=128), ids)  # one window: every target has all its context
+    for width, stride in ((16, 8), (16, 14), (12, 5), (9, 1)):
+        windowed = nll.token_nll(TwoBackStub(max_seq=width), ids, stride=stride)
+        # targets after the first window have at least width - stride >= 2 tokens of context, which this stub
+        # needs (its logits read one token back): the value must equal the full-context one, target by target
+        assert np.isfinite(windowed).all() and float(np.abs(full - windowed).max()) <= 1e-5, (width, stride)

@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .canonical import sha256_json
+from .canonical import TEMP_MARK, sha256_json
 
 # The special tokens of the v1.0 tokenizer, in their v1.0 order (B-O11): ids 0..4. Probe batches and the
 # non-special vocabulary start after them.
@@ -146,6 +146,9 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "expert": None,  # expert / joint_wide: the name of the trained expert
         "target": None,  # target_copy (T1'): the expert whose copy is trained
         "source": None,  # target_copy (T1'): the frozen source-language expert
+        # a tuning-ledger trial (MS §9.6), e.g. "lr-3e-4": recorded in run.json and tabulated as tuning compute by
+        # `registry budget`; not part of the run identity (the trial's own settings, such as train.lr, are)
+        "trial": None,
         "device": "auto",  # auto = cuda when available, else cpu
         "save_every": 200,  # [建议] state every N steps; the last step always saves
         "keep_every": 0,  # retention: the last two states, plus every state whose step is a multiple of this
@@ -160,6 +163,19 @@ RECIPES = ("seed", "expert", "joint_wide", "bridge", "target_copy", "router")
 ROW_ONLY_MODEL_KEYS = ("gqa", "profile")  # model keys of a row file that are not ModelConfig fields
 DEVICES = ("auto", "cpu", "cuda")
 RUN_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def run_name_problem(name) -> str | None:
+    """Why `name` cannot be a run name, or None. Besides the pattern: no "..", and never the temporary-file mark
+    of canonical (".tmp-"): the registry deletes every entry of the runs directory that holds it as a crash
+    leftover, so a run of that name would lose its directory at the next start."""
+    if not isinstance(name, str) or not RUN_NAME_PATTERN.fullmatch(name):
+        return f"run names must match {RUN_NAME_PATTERN.pattern}: {name!r}"
+    if ".." in name:
+        return f"run names may not contain '..': {name!r}"
+    if TEMP_MARK in name:
+        return f"run names may not contain {TEMP_MARK!r}, the mark of temporary files: {name!r}"
+    return None
 
 
 def _default(section: str, key: str):
@@ -371,14 +387,16 @@ class RunSpec:
     expert: str | None = None
     target: str | None = None
     source: str | None = None
+    trial: str | None = None
     device: str = "auto"
     save_every: int = 200
     keep_every: int = 0
     log_every: int = 1
 
     def __post_init__(self):
-        if not isinstance(self.name, str) or not RUN_NAME_PATTERN.fullmatch(self.name) or ".." in self.name:
-            raise ValueError(f"run.name must match {RUN_NAME_PATTERN.pattern} (no '..'): {self.name!r}")
+        problem = run_name_problem(self.name)
+        if problem:
+            raise ValueError(f"run.name: {problem}")
         if self.recipe not in RECIPES:
             raise ValueError(f"run.recipe must be one of {RECIPES}: {self.recipe!r}")
         for name in ("init_seed", "data_seed"):
@@ -386,6 +404,8 @@ class RunSpec:
                 raise ValueError(f"run.{name} must be set (IMPL-01: every run records both seeds)")
         if not self.shard:
             raise ValueError("run.shard must name the training shard")
+        if self.trial is not None and (not isinstance(self.trial, str) or not self.trial):
+            raise ValueError(f"run.trial must be a non-empty label or unset: {self.trial!r}")
         steps, tokens = _optional_int("steps", self.steps), _optional_int("tokens", self.tokens)
         if (steps is None) == (tokens is None):
             raise ValueError("set exactly one of run.steps and run.tokens")

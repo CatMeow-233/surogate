@@ -1,8 +1,14 @@
 """CPU tests run against this checkout: fork/bilingual/src goes first on sys.path, and a `surogate_bilingual`
 imported from anywhere else (an installed copy, another checkout) errors the session before any test runs.
 Nothing else is put on sys.path; the suite does not import the native `surogate` package.
+
+The suite is a CPU suite on every host, the RTX 5090 included (runbook G0 step 1 runs it there): `pytest_configure`
+hides CUDA (CUDA_VISIBLE_DEVICES="") before any test imports torch, for this process and every subprocess it starts,
+so "auto" devices resolve to the CPU, the bitwise checks run where they hold, and the CUDA-only runbook commands
+(`bench`) are only dry-run. tests/gpu refuses to run in the same session (it would find no CUDA).
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -22,6 +28,15 @@ import importlib.util  # noqa: E402
 import pytest  # noqa: E402
 
 REFERENCE = Path(__file__).resolve().parents[2] / "reference"
+CPU_SUITE_MARK = "BILINGUAL_CPU_SUITE"
+
+
+def pytest_configure(config):
+    torch = sys.modules.get("torch")
+    if torch is not None and torch.cuda.is_initialized():
+        raise pytest.UsageError("CUDA was initialised before the CPU suite started; run tests/cpu in its own session")
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    os.environ[CPU_SUITE_MARK] = "1"
 
 
 @pytest.fixture(autouse=True)

@@ -119,3 +119,23 @@ def test_i5_t7_seed_recipe_never_decays_norms_or_the_embedding(family):
         assert any(n.endswith("readout.b") for n in no_decay)
         assert any(n.endswith("readout.Q.weight") for n in groups["decay"]["names"])
     assert set(groups["decay"]["names"]) | no_decay == set(plan.trainable_names)
+
+
+def test_the_kl_anchor_is_kl_of_the_seed_to_the_expert_with_its_gradient():
+    """CR1 mutation N9 (MS §8.2): kl_sum is D_KL(p_seed || p_i) = sum_v p_seed (log p_seed - log p_i), not the
+    reverse; checked on hand-made distributions, with the gradient sign that pulls the expert toward the seed."""
+    from surogate_bilingual.train.objectives import kl_sum
+
+    p_ref = torch.tensor([0.9, 0.05, 0.05], dtype=torch.float64)
+    p = torch.tensor([0.2, 0.4, 0.4], dtype=torch.float64)
+    forward = float((p_ref * (p_ref / p).log()).sum())
+    reverse = float((p * (p / p_ref).log()).sum())
+    assert abs(forward - reverse) > 0.05  # the two directions differ here
+    logits = p.log().reshape(1, 1, 3).clone().requires_grad_(True)
+    mask = torch.ones(1, 1, dtype=torch.bool)
+    kl = kl_sum(logits, p_ref.log().reshape(1, 1, 3), mask)
+    assert abs(float(kl.detach()) - forward) <= 1e-6  # the objective is computed in fp32
+    kl.backward()
+    # d KL(p_ref || softmax(z)) / dz = softmax(z) - p_ref: negative where the seed puts more mass
+    assert torch.allclose(logits.grad[0, 0], p - p_ref, atol=1e-6, rtol=0)
+    assert float(logits.grad[0, 0, 0]) < 0 < float(logits.grad[0, 0, 1])

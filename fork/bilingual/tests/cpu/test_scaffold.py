@@ -334,3 +334,19 @@ def test_ci_and_the_sync_checks_run_the_suite():
     source = (REPO / "fork" / "tools" / "sync_upstream.py").read_text(encoding="utf-8")
     checks = next(n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.FunctionDef) and n.name == "checks")
     assert '"bilingual"' in ast.get_source_segment(source, checks)
+
+
+def test_the_cpu_suite_hides_cuda_on_every_host():
+    """CR1 review: on the GPU host the suite trained on CUDA in bf16 (auto device), failed I5-T13 and ran the full G0.5
+    bench grid. conftest hides CUDA before torch is used, for subprocesses too."""
+    import os
+    import subprocess
+    import sys
+
+    import torch
+
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "" and os.environ["BILINGUAL_CPU_SUITE"] == "1"
+    assert not torch.cuda.is_available()
+    code = "import os, torch; print(os.environ['CUDA_VISIBLE_DEVICES'] == '' and not torch.cuda.is_available())"
+    out = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=120)
+    assert out.stdout.strip() == "True"

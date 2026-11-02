@@ -82,6 +82,23 @@
    "within_update_budget": true
   },
   {
+   "P_active": 159932928,
+   "P_active_dual": null,
+   "P_total": 159932928,
+   "P_update": 127401984,
+   "declared_in_budget": false,
+   "family": "swiglu",
+   "id": "B12a",
+   "label": "B12a joint-wide ceiling: one 2f-wide expert (over budget by design, MS §7.1)",
+   "macs_T1024": 172490752,
+   "method": "executed",
+   "note": "the capacity-matched ceiling of G1' and of the modularity cost; reported, not in the budget",
+   "standalone_P_total": null,
+   "weight_macs": 159907840,
+   "within_active_budget": false,
+   "within_update_budget": false
+  },
+  {
    "P_active": 96231936,
    "P_active_dual": null,
    "P_total": 96231936,

@@ -254,3 +254,15 @@ def test_i3_c10_solve_lap_refuses_large_numpy_problems_and_bad_input(monkeypatch
             solve_lap(bad)
     with pytest.raises(ValueError):
         solve_lap(np.eye(2), "hungarian")
+
+
+def test_ties_elects_the_sign_of_the_summed_magnitudes_not_of_the_sign_count():
+    """CR1 mutation N1: one large positive delta outweighs two small negative ones. TIES elects the sign of the sum
+    of the trimmed values (+), so only the positive value survives; electing by counting signs would give -."""
+    seed = {"w": torch.zeros(1, dtype=torch.float64)}
+    experts = [
+        {"w": torch.tensor([3.0], dtype=torch.float64)},
+        *({"w": torch.tensor([-1.0], dtype=torch.float64)},) * 2,
+    ]
+    out = ties(seed, experts, 1.0, 1.0)["w"]
+    assert float(out) == 3.0  # +: the mean of the agreeing values {3.0}; sign counting would give -1.0

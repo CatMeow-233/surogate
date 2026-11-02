@@ -135,7 +135,7 @@ def test_i3_c13_budget_rows_carry_flags_and_only_declared_rows_are_asserted_with
             assert row["within_active_budget"] and row["within_update_budget"] is not False, row["id"]
     over = {row["id"] for row in doc["rows"] if not row["declared_in_budget"]}
     # the capability line: reported over budget, never asserted within it, and the report still completes
-    assert over == {"B6/B7", "II-dual", "II-n512-dual"}
+    assert over == {"B6/B7", "II-dual", "II-n512-dual", "B12a"}
     assert not any(rows[i]["within_active_budget"] for i in over)
 
 

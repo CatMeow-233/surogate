@@ -1,16 +1,23 @@
 """The G0.5 throughput and memory grid (`bench`; docs/runbook.md, G0.5) and the SDPA backend probe of G0 (g3).
 
 For every (family, recipe, seq, microbatch, checkpointing) point the bench builds the profile's model (random init,
-no data or packs needed), runs `warmup` optimizer steps on a fixed random batch and times `steps` more:
+no data or packs needed) and times the training step itself: `train.loop.Trainer.step` with the recipe's freeze
+plan, parameter groups, objectives (masked CE on the loss-mask targets, the KL-anchor reference forward when the
+recipe has one), gradient clipping and AdamW, on synthetic windows of the shard layout (inputs, targets, loss mask,
+routes). There is no second copy of the step, so a change of the training step is measured as it is. Recipes:
 
-- `seed`: every parameter trains (the seed run); `expert`: the backbone is frozen and one expert trains;
-- bf16 autocast on CUDA (parameters fp32), AdamW, masked-free CE over all positions;
+- `seed`: every parameter trains (the seed run); `expert`: the backbone is frozen and one expert trains (B1, the
+  family-II experts); `expert_kl`: the same with the KL anchor to a frozen seed model (train.anchor_kl, P1);
+- `joint_wide` (family I): the 2f-wide B12a expert; `bridge_c` (family I): ZH and EN frozen in the forward, the
+  Bridge trained, the first half of each window the source prefix (loss 0), the second half the target (T2, T3').
+  T1' trains one copy beside one frozen expert, a smaller layout than `bridge_c`;
+- bf16 autocast on CUDA (parameters fp32);
 - recorded (`bilingual-bench/1`, one JSON line per point): tokens/s, mean step time, max_memory_allocated and
   max_memory_reserved, the nvidia-smi memory.used after the measured steps (the caching allocator keeps its peak
   reservation, so this is the process's footprint at the peak plus the CUDA context), the analytic weight MACs per
-  token and MFU = 6 * N_matmul * tokens/s / PEAK (N_matmul = weight MACs per token, the 6N convention; frozen weights
-  skip their weight gradients, so the expert recipe's MFU understates what the GPU does), and "oom" for points that
-  do not fit.
+  token and MFU = c * N_matmul * tokens/s / PEAK (N_matmul = weight MACs per token; c = 6, plus 2 for the KL
+  reference forward; frozen weights skip their weight gradients, so the MFU of the frozen-backbone recipes
+  understates what the GPU does), and "oom" for points that do not fit.
 - a last line (kind "choice") picks, per (family, recipe), the point at the training seq whose microbatch divides
   `global_batch_tokens / seq` with the highest tokens/s; accum = global_batch_tokens / (microbatch * seq).
 
@@ -31,18 +38,22 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 from torch.nn import functional as F
 
 from ..canonical import atomic_write_bytes, canonical_json
-from ..config import FAMILIES, N_SPECIAL, PROFILES, profile
+from ..config import FAMILIES, N_SPECIAL, PROFILES, profile, run_config
 from ..model.lm import RoutedLM
 from .flops import macs_per_token
 from .memory import CudaPeak
 
 BENCH_FORMAT = "bilingual-bench/1"
 PEAK_TFLOPS = 209.5  # [估计] to verify against the NVIDIA spec sheet (G0 g6)
-RECIPES = ("seed", "expert")
+RECIPES = ("seed", "expert", "expert_kl", "joint_wide", "bridge_c")
+FAMILY_I_ONLY = ("joint_wide", "bridge_c")
+BENCH_KL = 0.1  # the anchor weight of the expert_kl points; its value does not change the cost
+ROUTE_NAMES = ("zh", "en", "bridge", "seed")  # the shard default (data.shards)
 BACKENDS = ("FLASH_ATTENTION", "EFFICIENT_ATTENTION", "CUDNN_ATTENTION", "MATH")
 
 
@@ -57,12 +68,14 @@ def _onoff(text: str) -> bool:
 
 
 def grid(families, recipes, seqs, microbatches, checkpointing) -> list[dict[str, Any]]:
+    """The product of the axes, without the family-I-only recipes on family II."""
     bad = [f for f in families if f not in FAMILIES] + [r for r in recipes if r not in RECIPES]
     if bad:
         raise ValueError(f"unknown families or recipes: {bad}")
     return [
         {"family": f, "recipe": r, "seq": s, "microbatch": m, "checkpointing": c}
         for f, r, s, m, c in itertools.product(families, recipes, seqs, microbatches, checkpointing)
+        if f == "swiglu" or r not in FAMILY_I_ONLY
     ]
 
 
@@ -103,6 +116,33 @@ def _smi_used_gib(device: torch.device) -> float | None:
         return None
 
 
+def bench_recipe(name: str):
+    """(recipe, KL anchor weight) of a bench recipe name."""
+    from ..train.recipes import BridgeRecipe, ExpertRecipe, JointWideRecipe, SeedRecipe
+
+    return {
+        "seed": (SeedRecipe(), 0.0),
+        "expert": (ExpertRecipe("zh"), 0.0),
+        "expert_kl": (ExpertRecipe("zh", anchor_kl=BENCH_KL), BENCH_KL),
+        "joint_wide": (JointWideRecipe("joint"), 0.0),
+        "bridge_c": (BridgeRecipe("bridge", variant="c"), 0.0),
+    }[name]
+
+
+def synthetic_window(cfg, recipe_name: str, mb: int, seq: int) -> dict[str, np.ndarray]:
+    """One shard window (data.shards.ShardReader.windows layout) of uniform random tokens: every target has loss 1
+    and the route of the trained expert, except under `bridge_c`, whose first half is a zh source prefix (loss 0)."""
+    rng = np.random.default_rng(0)
+    batch = rng.integers(N_SPECIAL, cfg.vocab_size, size=(mb, seq + 1), dtype=np.int64)
+    routes = np.full((mb, seq), ROUTE_NAMES.index("seed"), dtype=np.uint8)
+    mask = np.ones((mb, seq), dtype=np.bool_)
+    if recipe_name == "bridge_c":
+        half = seq // 2
+        routes[:, :half], routes[:, half:] = ROUTE_NAMES.index("zh"), ROUTE_NAMES.index("bridge")
+        mask[:, :half] = False
+    return {"inputs": batch[:, :-1], "targets": batch[:, 1:], "loss_mask": mask, "routes": routes}
+
+
 def bench_point(
     cfg,
     point: dict[str, Any],
@@ -113,52 +153,60 @@ def bench_point(
     gqa: str = "sdpa_gqa",
     peak_tflops: float = PEAK_TFLOPS,
 ) -> dict[str, Any]:
-    seq, mb, ckpt, recipe = point["seq"], point["microbatch"], point["checkpointing"], point["recipe"]
-    names = ["seed"] if recipe == "seed" else ["zh"]
+    from ..train.loop import Trainer, precision
+
+    seq, mb, ckpt, name = point["seq"], point["microbatch"], point["checkpointing"], point["recipe"]
+    prec = precision("auto", device)
     record: dict[str, Any] = {
         "format": BENCH_FORMAT,
         "kind": "point",
         **point,
         "device": str(device),
-        "precision": "bf16" if device.type == "cuda" else "fp32",
+        "precision": prec,
         "gqa": gqa,
         "warmup": warmup,
         "steps": steps,
     }
-    model = optimizer = None
+    model = trainer = reference = None
     try:
-        model = RoutedLM(cfg, names, gqa=gqa, device=device, init_seed=0).train()
-        if recipe == "expert":
-            for p in model.backbone.parameters():
-                p.requires_grad_(False)
-        trainable = [p for p in model.parameters() if p.requires_grad]
-        optimizer = torch.optim.AdamW(trainable, lr=1e-4)
-        generator = torch.Generator().manual_seed(0)
-        batch = torch.randint(N_SPECIAL, cfg.vocab_size, (mb, seq + 1), generator=generator).to(device)
-        x, y = batch[:, :-1], batch[:, 1:]
-
-        def step():
-            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
-                logits = model(x, None, checkpointing=ckpt)
-            loss = F.cross_entropy(logits.float().reshape(-1, cfg.vocab_size), y.reshape(-1))
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-            return loss
-
+        recipe, kl = bench_recipe(name)
+        model_cfg = recipe.model_config(cfg)
+        run = run_config(
+            {
+                "model": cfg.to_dict(),
+                "train": {
+                    "microbatch": mb,
+                    "seq": seq,
+                    "accum": 1,
+                    "global_batch_tokens": mb * seq,
+                    "lr": 1e-4,
+                    "activation_checkpointing": ckpt,
+                    "anchor_kl": kl,
+                },
+            }
+        )
+        model = RoutedLM(model_cfg, recipe.names(), gqa=gqa, device=device, init_seed=0).train()
+        if kl > 0:
+            reference = RoutedLM(cfg, ["seed"], gqa=gqa, device=device, init_seed=1).requires_grad_(False).eval()
+        plan = recipe.freeze_plan(model).apply()
+        trainer = Trainer(
+            model, plan, recipe, run, device=device, precision=prec, route_names=ROUTE_NAMES, reference=reference
+        )
+        window = synthetic_window(model_cfg, name, mb, seq)
         for _ in range(warmup):
-            step()
+            trainer.step([window], 1e-4)
         with CudaPeak(device) as peak:
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             began = time.perf_counter()
             for _ in range(steps):
-                loss = step()
+                stats = trainer.step([window], 1e-4)
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             elapsed = time.perf_counter() - began
         tokens_per_s = mb * seq * steps / elapsed
-        macs = macs_per_token(cfg, "single")
+        macs = macs_per_token(model_cfg, "single")
+        factor = 6.0 + (2.0 if kl > 0 else 0.0)
         record.update(
             status="ok",
             tokens_per_s=tokens_per_s,
@@ -167,15 +215,16 @@ def bench_point(
             max_memory_reserved_gib=peak.reserved_gib,
             nvidia_smi_used_gib=_smi_used_gib(device),
             weight_macs_per_token=macs,
-            trainable_parameters=sum(p.numel() for p in trainable),
-            final_loss=float(loss.detach()),
-            mfu=(6.0 * macs * tokens_per_s / (peak_tflops * 1e12)) if device.type == "cuda" else None,
+            trainable_parameters=sum(p.numel() for p in plan.parameters()),
+            final_loss=float(stats["loss"]),
+            mfu=(factor * macs * tokens_per_s / (peak_tflops * 1e12)) if device.type == "cuda" else None,
+            mfu_factor=factor,
             peak_tflops=peak_tflops,
         )
     except torch.cuda.OutOfMemoryError as exc:
         record.update(status="oom", error=str(exc).splitlines()[0][:300])
     finally:
-        model = optimizer = None  # free the point's memory before the next one
+        model = trainer = reference = None  # free the point's memory before the next one
         if device.type == "cuda":
             torch.cuda.empty_cache()
     return record

@@ -35,7 +35,7 @@ from ..model.lm import RoutedLM
 from ..ops.fusion import ZeroInitAdapter
 from ..routing.plan import RoutePlan
 from ..routing.policies import apply_gate_policy
-from ..train.recipes import ExpertRecipe
+from ..train.recipes import ExpertRecipe, JointWideRecipe
 from .flops import macs_per_token
 from .params import p_active, p_total, p_update
 
@@ -136,6 +136,15 @@ def budget_rows(profile_name: str = "pilot") -> list[BudgetRow]:
         _bank_rows("B6/B7", "B6/B7 family I dual", cfg1, zh_en, "dual", False),
         _bank_rows("ZH+EN+Bridge", "ZH+EN+Bridge Top-1", cfg1, zh_en + ["bridge"], "single", True),
         _bank_rows("31-paths", "31 paths Top-1 (no router)", cfg1, [f"p{i:02d}" for i in range(31)], "single", True),
+        _bank_rows(
+            "B12a",
+            "B12a joint-wide ceiling: one 2f-wide expert (over budget by design, MS §7.1)",
+            JointWideRecipe("joint").model_config(cfg1),
+            ["joint"],
+            "single",
+            False,
+            note="the capacity-matched ceiling of G1' and of the modularity cost; reported, not in the budget",
+        ),
     ]
     half = cfg1.replace(ffn_width=f // 2)
     rows.append(

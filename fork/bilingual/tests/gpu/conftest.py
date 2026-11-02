@@ -34,6 +34,11 @@ _spec.loader.exec_module(cpu)
 def gpu_device() -> str | None:
     import torch
 
+    if os.environ.get(cpu.CPU_SUITE_MARK) == "1":
+        pytest.fail(
+            "tests/cpu hid CUDA in this session (CUDA_VISIBLE_DEVICES=''); run tests/gpu in its own pytest session"
+        )
+
     if torch.cuda.is_available():
         return "cuda"
     return "cpu" if os.environ.get("BILINGUAL_GPU_TESTS_ON_CPU") == "1" else None

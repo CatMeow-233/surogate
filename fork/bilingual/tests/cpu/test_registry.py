@@ -48,6 +48,24 @@ def test_i5_t14_a_name_is_bound_to_one_run_id(tmp_path):
         registry.open_run(tmp_path, "../escape", IDENTITY, {}, allow_dirty=False, code=clean)
 
 
+def test_a_run_name_with_the_temporary_file_mark_is_refused(tmp_path, tiny_stage):
+    """CR1 review probe: a run named like a crash leftover ("*.tmp-*") was deleted by the next open_run."""
+    clean = ("abc", False)
+    for name in ("seed-I-r0.tmp-lr6e-4", "x.tmp-1"):
+        with pytest.raises(registry.RegistryError, match="temporary files"):
+            registry.open_run(tmp_path, name, IDENTITY, {}, allow_dirty=False, code=clean)
+        with pytest.raises(ValueError, match="temporary files"):
+            tiny_stage("tiny-seed", f'run.name="{name}"')
+    kept, _, _ = registry.open_run(tmp_path, "seed-I-r0-lr6e-4", IDENTITY, {}, allow_dirty=False, code=clean)
+    (kept / "state").mkdir()
+    registry.open_run(tmp_path, "zh-I-r0", {**IDENTITY, "init_seed": 5}, {}, allow_dirty=False, code=clean)
+    assert (kept / "state").is_dir() and sorted(p.name for p in tmp_path.iterdir()) == [
+        "index.json",
+        "seed-I-r0-lr6e-4",
+        "zh-I-r0",
+    ]
+
+
 def test_i5_t14_a_dirty_tree_is_refused_unless_allowed_and_then_recorded(tmp_path, monkeypatch):
     monkeypatch.setattr(env, "code_identity", lambda: ("abc", True))
     with pytest.raises(registry.RegistryError, match="code_dirty"):
@@ -91,3 +109,37 @@ def test_env_and_registry_commands(tiny_trained, tmp_path, capsys):
     assert cli(["registry", "show", "tiny-zh", "--runs", str(tiny_trained["runs"])]) == 0
     assert json.loads(capsys.readouterr().out)["recipe"] == "expert"
     assert cli(["registry", "show", "nope", "--runs", str(tiny_trained["runs"])]) == 1
+
+
+def test_registry_budget_checks_token_matching_and_totals_tuning(tmp_path, capsys):
+    """CR1 review: matched-token claims (B2 = ZH + EN, B12a = B2, the T arms) are checked from the registry, and
+    tuning trials (run.trial) are tabulated with their compute."""
+    clean = ("abc", False)
+    runs = [
+        ("zh-I-r0", "B1", 0, None, 100, 0.5),
+        ("en-I-r0", "B1", 0, None, 100, 0.5),
+        ("b2-I-r0", "B2", 0, None, 200, 1.0),
+        ("b12a-I-r0", "B12a", 0, None, 150, 1.5),
+        ("seed-I-r0-lr3e-4", "B0", 0, "lr-3e-4", 300, 2.0),
+    ]
+    for i, (name, row, rep, trial, tokens, hours) in enumerate(runs):
+        run_dir, _, _ = registry.open_run(
+            tmp_path,
+            name,
+            {**IDENTITY, "init_seed": i},
+            {"matrix_row": row, "replicate": rep, "trial": trial, "p_update": 7},
+            allow_dirty=False,
+            code=clean,
+        )
+        registry.update_run(
+            run_dir, status="done", finished_tokens=tokens, compute={"device_seconds": hours * 3600, "gpu_hours": hours}
+        )
+    table = registry.budget_table(tmp_path)
+    by = {(r["row"], r["replicate"]): r for r in table["rows"]}
+    assert by[("B1", 0)]["tokens"] == 200 and by[("B1", 0)]["gpu_hours"] == 1.0 and len(by[("B1", 0)]["runs"]) == 2
+    status = {(tuple(c["rows"]), c["replicate"]): c["status"] for c in table["token_matches"]}
+    assert status[(("B2", "B1"), 0)] == "matched" and status[(("B12a", "B2"), 0)] == "mismatch"
+    assert ("B0", 0) not in by and table["tuning"]["gpu_hours"] == 2.0
+    assert table["tuning"]["trials"][0]["trial"] == "lr-3e-4"
+    assert cli(["registry", "budget", "--runs", str(tmp_path)]) == 0
+    assert '"mismatch"' in capsys.readouterr().out
