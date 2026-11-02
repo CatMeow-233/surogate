@@ -7,3 +7,9 @@
 /tlc/src/*.egg-info/
 /tlc/build/
 /tlc/dist/
+# fork/bilingual: its GPU-host environment, and what installing or building the package writes into it. No trailing
+# slash on the environment, so that `git check-ignore fork/.venv-bilingual` holds before the directory exists.
+/.venv-bilingual
+/bilingual/src/*.egg-info/
+/bilingual/build/
+/bilingual/dist/

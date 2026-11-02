@@ -1,0 +1,12 @@
+# Python dependencies of fork/.venv-bilingual on the GPU host, without torch: install a CUDA torch build for
+# sm_120 (RTX 5090) first and record the exact wheel (docs/runbook.md, G0). The versions below are the ones the
+# CPU tests ran with in development; the CPU lane installs its own set (fork/tools/requirements-cpu-lane.txt),
+# which has no scipy. The G0 step writes the environment's full `pip freeze` next to its environment record.
+numpy==2.5.4
+tokenizers==0.23.3
+safetensors==0.8.0
+# Optional: large assignment (LAP) solves and the scipy cross-check of the numpy solver. The package runs
+# without it; its version is recorded at G0.
+scipy
+pytest==9.1.1
+pytest-timeout==2.4.0

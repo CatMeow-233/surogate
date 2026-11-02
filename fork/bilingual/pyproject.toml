@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools==84.2.1"]
+build-backend = "setuptools.build_meta"
+
+# Not published. Installed editable into fork/.venv-bilingual on the GPU host (docs/runbook.md, G0).
+[project]
+name = "surogate-bilingual"
+version = "0.1.0.dev0"
+description = "Independently trained Chinese and English FFN experts on a frozen shared backbone (pure PyTorch)"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+# Runtime requirements: torch (a CUDA build for the GPU host, installed on its own), numpy, tokenizers,
+# safetensors; scipy is optional. They are listed in requirements-gpu.txt rather than here, so that installing
+# this package never lets a resolver replace the torch build the environment was created with.
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["surogate_bilingual*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/cpu"]
+addopts = "-p no:cacheprovider --import-mode=importlib"
+
+# The repository's ruff settings, plus one exclusion: reference/ holds the owner's v1.0 files byte for byte
+# (their sha256 is pinned in reference/MANIFEST.json), and `fork/dev fmt` would otherwise rewrite them.
+[tool.ruff]
+extend = "../../pyproject.toml"
+extend-exclude = ["reference"]

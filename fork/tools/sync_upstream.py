@@ -427,7 +427,9 @@ def refresh(target):
 def checks(fast):
     suites = [["fork/dev", "check"]]
     if not fast:
-        suites += [["fork/dev", "test", suite] for suite in ("patches", "experimental", "tlc", "tools", "cpu")]
+        suites += [
+            ["fork/dev", "test", suite] for suite in ("patches", "experimental", "tlc", "bilingual", "tools", "cpu")
+        ]
     failed = [" ".join(cmd) for cmd in suites if run(*cmd) != 0]
     if failed:
         print(f"\nFailed: {', '.join(failed)}.")

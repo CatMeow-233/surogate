@@ -1,0 +1,40 @@
+{
+  "archive": {
+    "name": "zh_en_merge_loss_comparison_v1.zip",
+    "received": "2026-11-02",
+    "sha256": "2f53a0528ce9f379f7155b1d4dc2fa8b04701d5a3949ec9d0c8e1a29f77e0664"
+  },
+  "files": {
+    "compare.py": {
+      "archive_member": "moe_merge_loss_comparison/compare.py",
+      "bytes": 2683,
+      "sha256": "e15f34e1ba8b691fc049613d6abbd173be0472260611453c24ac9df1e9a1365d"
+    },
+    "eval_cases.example.jsonl": {
+      "archive_member": "moe_merge_loss_comparison/language_baseline/eval_cases.example.jsonl",
+      "bytes": 1547,
+      "sha256": "4d2deff0ba33b5a448b77797121af283c911085d33260f345950a48bf73a39b1"
+    },
+    "evaluate.py": {
+      "archive_member": "moe_merge_loss_comparison/language_baseline/evaluate.py",
+      "bytes": 4468,
+      "sha256": "22385629489cebd0fd1a23f11e431dab6093e8d239edc299e8f7590260eb6a61"
+    },
+    "moe_pilot.py": {
+      "archive_member": "moe_merge_loss_comparison/language_baseline/moe_pilot.py",
+      "bytes": 21462,
+      "sha256": "17c9949bd2b48ffebe885149ce6f8bd869f3af0ec54b39ccf19a0eab7c07b6d4"
+    },
+    "smoke_results.json": {
+      "archive_member": "moe_merge_loss_comparison/smoke_results.json",
+      "bytes": 429,
+      "sha256": "ce8b389f070449387538d09c6f5223d6ddc4b205a21f0023c0d72db8f72bd90d"
+    },
+    "verify_merge_math.py": {
+      "archive_member": "moe_merge_loss_comparison/verify_merge_math.py",
+      "bytes": 12615,
+      "sha256": "51f4a47b860747aff9bb8822ba3780f2c1f240a368cf890a1f9cdcefef9630e7"
+    }
+  },
+  "format": "bilingual-reference/1"
+}

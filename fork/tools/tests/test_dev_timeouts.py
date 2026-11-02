@@ -43,7 +43,12 @@ def run(tree, env, *args, **extra):
 
 @pytest.mark.parametrize(
     ("suite", "path"),
-    [("patches", "fork/patches/tests"), ("tlc", "fork/tlc/tests/cpu"), ("tools", "fork/tools/tests")],
+    [
+        ("patches", "fork/patches/tests"),
+        ("tlc", "fork/tlc/tests/cpu"),
+        ("bilingual", "fork/bilingual/tests/cpu"),
+        ("tools", "fork/tools/tests"),
+    ],
 )
 def test_suites_pass_the_limit_and_extra_arguments(fake_tree, suite, path):
     tree, env, log = fake_tree

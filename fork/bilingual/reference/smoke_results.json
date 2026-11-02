@@ -1,0 +1,16 @@
+{
+  "scope": "synthetic unit comparison, not language model result",
+  "results": [
+    {
+      "seed": 0,
+      "oracle": 0.0,
+      "hard_top1": 0.0,
+      "wrong_route": 0.27553117275238037,
+      "weight_average": 0.09681094437837601,
+      "top2_average": 0.06888279318809509,
+      "2n_concat": 0.06888280063867569,
+      "2n_top2_max_abs_diff": 2.980232238769531e-07,
+      "single_route_bias_calibration": 0.0
+    }
+  ]
+}

@@ -6,7 +6,7 @@
 
 | 类 | 含义 | 文件数 |
 |---|---|---|
-| F | fork 自有文档 | 29 |
+| F | fork 自有文档 | 34 |
 | N | 上游工程笔记：日志、跟踪清单、设计稿、测量记录 | 26 |
 | P | 来源与授权说明（vendored 代码、NOTICE） | 5 |
 | U | 上游用户与开发者文档 | 72 |
@@ -17,6 +17,11 @@
 - `docs/experimental/training.md`
 - `docs/upstream-notes/README.md`
 - `fork/README.md`
+- `fork/bilingual/README.md`
+- `fork/bilingual/docs/measurements.md`
+- `fork/bilingual/docs/runbook.md`
+- `fork/bilingual/docs/spec.md`
+- `fork/bilingual/reference/README.md`
 - `fork/docs/build-and-release.md`
 - `fork/docs/maps/docs.md`
 - `fork/docs/maps/native.md`

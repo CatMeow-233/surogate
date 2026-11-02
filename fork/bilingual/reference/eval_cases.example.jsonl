@@ -1,0 +1,8 @@
+{"id":"zh-basic-01","group":"monolingual_zh","prompt":"<|zh|>问题：17加26等于多少？答案：","target_language":"zh","must_contain":["43"],"max_new":24}
+{"id":"en-basic-01","group":"monolingual_en","prompt":"<|en|>Question: What is 17 plus 26? Answer:","target_language":"en","must_contain":["43"],"max_new":24}
+{"id":"zh-target-01","group":"cross_input","prompt":"<|zh|>请用英语解释什么是太阳能。<|en|>Answer:","target_language":"en","max_new":50}
+{"id":"en-target-01","group":"cross_input","prompt":"<|en|>Explain the meaning of gravity in Chinese. <|zh|>回答：","target_language":"zh","max_new":50}
+{"id":"bridge-zh-en-01","group":"bridge_translation","needs_expert":"bridge","prompt":"<|zh|>把‘科学帮助我们理解世界’翻译成英语。<|bridge|>Translation:","target_language":"en","max_new":48}
+{"id":"bridge-en-zh-01","group":"bridge_translation","needs_expert":"bridge","prompt":"<|en|>Translate 'The temperature is 25 degrees' into Chinese. <|bridge|>译文：","target_language":"zh","must_contain":["25"],"max_new":48}
+{"id":"bridge-entity-01","group":"bridge_translation","needs_expert":"bridge","prompt":"<|zh|>把‘Alice在2024年买了3本书’翻译成英文，保留人名与数字。<|bridge|>Translation:","target_language":"en","must_contain":["2024","3"],"max_new":48}
+{"id":"auto-switch-01","group":"autonomous_switch","prompt":"<|zh|>请先用中文用一句话介绍光合作用，再用英文说明，最后用中文总结。用<|en|>和<|zh|>标记切换语言。\n","max_new":100}

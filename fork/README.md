@@ -13,7 +13,7 @@
 | 查看全部命令和产物 | `fork/dev help` |
 | 提交前检查 | `fork/dev map`（重新生成地图和 ledger 表格），然后 `fork/dev check`（ledger、地图、文档链接和 make 目标） |
 | 构建训练扩展或服务引擎 | `fork/dev build train`、`fork/dev build serve` |
-| 测试 | `fork/dev test cpu`、`patches`、`experimental`、`tlc`、`tools`、`openmp` 不需要 GPU；`native`、`gpu` 在 GPU 主机上运行。各自的内容和所需环境见 [测试命令](docs/build-and-release.md#测试命令) |
+| 测试 | `fork/dev test cpu`、`patches`、`experimental`、`tlc`、`bilingual`、`tools`、`openmp` 不需要 GPU；`native`、`gpu` 在 GPU 主机上运行。各自的内容和所需环境见 [测试命令](docs/build-and-release.md#测试命令) |
 | 从检出目录运行实验训练器 | `fork/dev exp-train <配置>` |
 | 发布实验版本 | 按 [发布实验版本](docs/build-and-release.md#发布实验版本) 的清单操作 |
 | 发布原生 wheel（RTX 50 系列） | 在 GitHub 上手动运行：Actions → Native Wheel Release → Run workflow，选 `main` 并勾选 `publish`；推送不会发布。见 [发布原生版本](docs/build-and-release.md#发布原生版本) |
@@ -29,7 +29,8 @@
 |---|---|
 | `fork/.venv-experimental` | 实验训练器 `fork/experimental`（不含原生扩展），由 `fork/dev test experimental` 和 `fork/dev exp-train` 自己创建，只需要 uv；TLC 的纯 PyTorch 原型 `fork/tlc/prototypes`（不打包）也可以在这里运行 |
 | `fork/.venv-tlc` | GPU 主机上的 TLC 包 `fork/tlc`：以 editable 方式装入，需要原生训练器，见 [tlc/docs/runbook.md 的 G0](tlc/docs/runbook.md#g0-环境)；GPU 主机上的 TLC 原型（运行手册 G1 的 goldens）也在这里运行 |
-| 仓库根目录的 `.venv`（或 `FORK_PY`） | 其余 Python 命令：`fork/dev test cpu`、`fork/dev test patches`、`fork/dev test tlc`、`fork/dev test tools`、同步的检查步骤；都需要 `fork/tools/requirements-cpu-lane.txt` 中的 pytest 和 pytest-timeout。TLC 的 CPU 测试只从检出目录导入 `fork/tlc/src`，不在这里安装 TLC 包，也不需要原生扩展 |
+| `fork/.venv-bilingual` | GPU 主机上的双语独立专家包 `fork/bilingual`（纯 PyTorch，不用原生训练器）：CUDA 版 torch、`fork/bilingual/requirements-gpu.txt`，再以 editable 方式装入本包，见 [bilingual/docs/runbook.md 的 G0](bilingual/docs/runbook.md#g0-环境与-gpu-不变量) |
+| 仓库根目录的 `.venv`（或 `FORK_PY`） | 其余 Python 命令：`fork/dev test cpu`、`fork/dev test patches`、`fork/dev test tlc`、`fork/dev test bilingual`、`fork/dev test tools`、同步的检查步骤；都需要 `fork/tools/requirements-cpu-lane.txt` 中的 pytest 和 pytest-timeout。TLC 与双语包的 CPU 测试只从检出目录导入 `fork/tlc/src`、`fork/bilingual/src`，不在这里安装这两个包，也不需要原生扩展 |
 
 - GPU 主机：按上游 [README.md](../README.md) 中 “For development” 的步骤创建 `.venv`（`uv venv --python 3.12`，然后 `uv pip install -e .`，会完整构建原生扩展）。之后修改训练侧 C++ 时用 `fork/dev build train`，它只重建 `_surogate` 并把 `.so` 复制进 `.venv`。
 - 只用 CPU：与 fork CI 相同，不构建原生扩展。无法访问 download.pytorch.org 时改装 PyPI 的 `torch==2.11.0`，并在运行 `fork/dev test experimental` 时设置 `FORK_TORCH_INDEX=pypi`。
@@ -51,6 +52,7 @@ python3.12 -m venv .venv
 | fork：Python 补丁调用的代码 | | `surogate/_fork`（随原生 wheel 发布） | 由 `surogate/grpo/trainer.py`（ledger T6、T7、T10）、`surogate/train/trainer.py`（T10）、`surogate/grpo/shared_model.py`（T11、T28）和 `surogate/grpo/decode_scheduler.py`（T12）在函数内导入 |
 | fork：原生代码 | `fork/native`：CMake 挂接、头文件、C++ 测试，以及上游代码调用、编译进 `surogate-common`（随原生 wheel 发布）的源文件 `fork/native/src`（ledger T3、T14、T15、T21、T24）和编译进服务引擎 `sinfer_ops` 的 `fork/native/serve`（ledger T16） | | `csrc/CMakeLists.txt` 中紧跟 `surogate-common` 的 `target_link_libraries` 之后的两行挂接点，见 [native/README.md](native/README.md) |
 | TLC 实验 | 无 | 独立 fork 包 `fork/tlc`：代码 `fork/tlc/src/surogate_tlc`，测试 `fork/tlc/tests/cpu` 与 `fork/tlc/tests/gpu`，纯 PyTorch 原型 `fork/tlc/prototypes`（不打包），打包 `fork/tlc/pyproject.toml`（不发布，也不进原生 wheel） | editable 安装进 `fork/.venv-tlc` 后运行 `python -m surogate_tlc <命令>`（模型目录、训练与评测）和 `python -m surogate_tlc.data.<工具>`（数据），运行配置为 `fork/tlc/examples/p0.yaml`；CPU 测试 `fork/dev test tlc`；说明见 [tlc/README.md](tlc/README.md)，GPU 运行手册见 [tlc/docs/runbook.md](tlc/docs/runbook.md) |
+| 双语独立专家实验 | 无 | 独立的纯 PyTorch 包 `fork/bilingual`：代码 `fork/bilingual/src/surogate_bilingual`，CPU 测试 `fork/bilingual/tests/cpu`，owner 的 v1.0 代码原样存放在 `fork/bilingual/reference`（不打包、不被导入），打包 `fork/bilingual/pyproject.toml`（不发布，也不进任何 wheel）；不使用原生训练器（决定 B-D1） | editable 安装进 `fork/.venv-bilingual` 后运行 `python -m surogate_bilingual <命令>`；CPU 测试 `fork/dev test bilingual`；说明见 [bilingual/README.md](bilingual/README.md)，决定与数据契约见 [bilingual/docs/spec.md](bilingual/docs/spec.md) |
 | 实验训练 | 无 | 独立项目 `fork/experimental`：代码 `fork/experimental/src/surogate/experimental`，测试 `fork/experimental/tests`，文档 `fork/experimental/docs`，示例 `fork/experimental/examples`，打包 `fork/experimental/pyproject.toml` 与 `fork/experimental/build_release.py` | `python -m surogate.experimental.train` 或脚本 `surogate-experimental-train`（`fork/experimental/pyproject.toml` 的 `[project.scripts]`）；从检出目录运行用 `fork/dev exp-train`；发布工作流 `.github/workflows/experimental-release.yml` |
 
 更细的位置由 `fork/tools/gen_maps.py` 从当前代码生成：
@@ -105,6 +107,7 @@ GRPO 补丁（T6–T8、T11、T12、T28）和 T10 的 dispatch-PP 拒绝调用�
 - [native/README.md](native/README.md)：fork 原生代码（C++ 与 CMake）的目录、`csrc/CMakeLists.txt` 中两行挂接点的约定，以及 OpenMP 接线测试的运行方法。
 - [docs/upstream-errata.md](docs/upstream-errata.md)：上游已知的失效引用、过时配置和测试缺陷；fork 不修改这些上游文件，只记录绕行方法。
 - [tlc/README.md](tlc/README.md)：TLC 包的目录、环境、命令行与 P0 的行；[tlc/docs/](tlc/docs/) 中是模型目录与 checkpoint 契约、初始化与 Mamba-2 数值参照（model.md），语料、去污染、合成绑定任务、tokenizer 与数据 shard（data.md），训练驱动与评测（training.md），RTX 5090 运行手册与 GPU 预算（runbook.md），以及实测记录（measurements.md）。
+- [bilingual/README.md](bilingual/README.md)：双语独立专家包的目录、环境、命令行与实现步骤；[bilingual/docs/](bilingual/docs/) 中是决定记录与数据契约（spec.md）、RTX 5090 运行手册（runbook.md）和实测记录（measurements.md）。
 - [experimental/README.md](experimental/README.md) 与 [experimental/docs/training.md](experimental/docs/training.md)：实验训练器的安装、配置和发布产物。
 
 ## 规则
