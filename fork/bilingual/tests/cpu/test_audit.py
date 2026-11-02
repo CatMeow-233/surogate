@@ -12,7 +12,6 @@ import torch
 from torch import nn
 
 from surogate_bilingual.__main__ import main as cli
-from surogate_bilingual.audit.budget import report
 from surogate_bilingual.audit.flops import counted_flops, linear_flops, macs_per_token
 from surogate_bilingual.audit.params import declare_partial_read, p_active, p_total, p_update
 from surogate_bilingual.config import profile
@@ -21,12 +20,6 @@ from surogate_bilingual.routing.plan import RoutePlan
 from surogate_bilingual.routing.policies import apply_gate_policy
 
 GOLDEN = Path(__file__).resolve().parent / "golden" / "budget_pilot.json"
-
-
-@pytest.fixture(scope="module")
-def pilot():
-    doc = json.loads(json.dumps(report("pilot")))  # the JSON view, as the golden file holds it
-    return doc, {row["id"]: row for row in doc["rows"]}
 
 
 # --- I2-A12: exact budgets ---------------------------------------------------------------------------------------

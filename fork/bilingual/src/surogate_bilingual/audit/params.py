@@ -4,10 +4,11 @@
 - `p_update(opt)`: every parameter the optimizer holds, each storage once.
 - `p_active(model, tokens, plan)`: the parameters the forward actually reads, found by running it under a
   `TorchFunctionMode` that records every parameter passed to a torch function. An operator that reads only part of
-  a parameter (a sliced weight, e.g. `channel_select` in step I3) must declare how many elements it reads with
-  `declare_partial_read`, because the mode sees the whole Parameter go into the slicing call (IMPL-21); a declared
-  count replaces the full size of that parameter. With `per_token=True` the count is the largest over the distinct
-  gate patterns of the plan (what one token reads); with `per_token=False` it is the union over the batch.
+  a parameter (a sliced weight, e.g. `ops.fusion.channel_select`) must declare how many elements it reads with
+  `declare_partial_read` (defined in `ops.reads`, so that operators never import the audit), because the mode sees
+  the whole Parameter go into the slicing call (IMPL-21); a declared count replaces the full size of that
+  parameter. With `per_token=True` the count is the largest over the distinct gate patterns of the plan (what one
+  token reads); with `per_token=False` it is the union over the batch.
 
 Storages are told apart by `untyped_storage().data_ptr()`; on the meta device, where every pointer is 0, by
 parameter identity.
@@ -15,16 +16,16 @@ parameter identity.
 
 from __future__ import annotations
 
-import contextvars
 from collections.abc import Iterable
 
 import torch
 from torch import nn
 from torch.overrides import TorchFunctionMode
 
+from ..ops.reads import declare_partial_read, partial_read_sink
 from ..routing.plan import RoutePlan
 
-_RECORDER: contextvars.ContextVar[_ActiveRecorder | None] = contextvars.ContextVar("bilingual_audit", default=None)
+__all__ = ["declare_partial_read", "gate_patterns", "p_active", "p_total", "p_update"]
 
 
 def _key(p: torch.Tensor) -> tuple:
@@ -47,13 +48,6 @@ def p_total(model: nn.Module) -> int:
 
 def p_update(opt: torch.optim.Optimizer) -> int:
     return _count_unique(p for group in opt.param_groups for p in group["params"])
-
-
-def declare_partial_read(param: torch.Tensor, n_elements: int) -> None:
-    """Called by an operator that reads only `n_elements` of `param` (no-op outside an audit)."""
-    recorder = _RECORDER.get()
-    if recorder is not None:
-        recorder.declare(param, int(n_elements))
 
 
 def _walk(obj):
@@ -104,12 +98,8 @@ class _ActiveRecorder(TorchFunctionMode):
 
 def _active_once(model: nn.Module, tokens: torch.Tensor, plan: RoutePlan | None) -> int:
     recorder = _ActiveRecorder(model)
-    token = _RECORDER.set(recorder)
-    try:
-        with torch.no_grad(), recorder:
-            model(tokens, plan)
-    finally:
-        _RECORDER.reset(token)
+    with partial_read_sink(recorder.declare), torch.no_grad(), recorder:
+        model(tokens, plan)
     return recorder.count()
 
 

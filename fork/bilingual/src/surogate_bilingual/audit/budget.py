@@ -7,7 +7,8 @@ For every row the code builds the row's model on the meta device (no memory) and
 - P_active by running the forward under the `p_active` recorder with the row's plan (`method = "executed"`). Rows
   whose extra modules have no forward before P1 (the B10-ch block router, the B11 adapters, the router of the 2B
   extrapolation) add those modules' parameters to the executed count, or count the selected channel blocks, by
-  declaration (`method = "structural"`);
+  declaration (`method = "structural"`). The B11 adapters are `ops.fusion.ZeroInitAdapter` modules; the B10-ch
+  channel count equals what `ops.fusion.channel_select` declares for 27 of 54 blocks (test_fusion.py, I3-C7);
 - weight MACs per token with `macs_per_token`, and the same at T = 1024.
 
 `within_*` compare with the 100M budgets; `declared_in_budget` is whether MS §4.6 puts the row on the hard-budget
@@ -31,6 +32,7 @@ from torch import nn
 from ..canonical import atomic_write_json
 from ..config import PROFILES, ModelConfig, profile
 from ..model.lm import RoutedLM
+from ..ops.fusion import ZeroInitAdapter
 from ..routing.plan import RoutePlan
 from ..routing.policies import apply_gate_policy
 from ..train.recipes import ExpertRecipe
@@ -166,7 +168,7 @@ def budget_rows(profile_name: str = "pilot") -> list[BudgetRow]:
     if single < ACTIVE_BUDGET:
         ranks.insert(0, math.floor((ACTIVE_BUDGET - single) / (2 * d * L)))
     for r in ranks:
-        adapters = _per_layer(cfg1, _linear_chain(d, r, d))
+        adapters = _per_layer(cfg1, lambda r=r: ZeroInitAdapter(d, r))
         rows.append(
             _row(
                 f"B11-r{r}", f"B11 Top-1 + zero-init adapter r={r}", cfg1, p_total(bank) + p_total(adapters),

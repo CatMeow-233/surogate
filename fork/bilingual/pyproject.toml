@@ -22,6 +22,9 @@ include = ["surogate_bilingual*"]
 [tool.pytest.ini_options]
 testpaths = ["tests/cpu"]
 addopts = "-p no:cacheprovider --import-mode=importlib"
+# 恒等式检查 (identity checks, e.g. the identities of the v1.0 compare.py): known mathematics checked numerically,
+# never reported as experimental results (docs/spec.md, I3-C14).
+markers = ["identity_check: 恒等式检查（identity check）；不是实验结果，永不作为结果报告"]
 
 # The repository's ruff settings, plus one exclusion: reference/ holds the owner's v1.0 files byte for byte
 # (their sha256 is pinned in reference/MANIFEST.json), and `fork/dev fmt` would otherwise rewrite them.

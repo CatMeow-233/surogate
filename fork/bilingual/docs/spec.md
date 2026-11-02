@@ -1,6 +1,6 @@
 # 决定记录与数据契约（P0）
 
-- **状态：** 规格。截至步骤 I2，脚手架（I1）以及模型核心、路由、组装、冻结、哈希与参数审计（I2）已落地，并通过 CPU 测试（见“实现步骤”中的 I2 落地记录）；数据、训练与评测部分还没有实现。没有任何代码在 GPU 上运行过。凡是 RTX 5090 的数字都是 [估计] 或 TBD，以 G0.5 的实测为准。
+- **状态：** 规格。截至步骤 I3，脚手架（I1），模型核心、路由、组装、冻结、哈希与参数审计（I2），以及融合算子、合并与 router 门控（I3）已落地，并通过 CPU 测试（见“实现步骤”中的 I2、I3 落地记录）；数据、训练与评测部分还没有实现。没有任何代码在 GPU 上运行过。凡是 RTX 5090 的数字都是 [估计] 或 TBD，以 G0.5 的实测为准。
 - **来源：** 三份文档，都写于 2026-11-02，都不在本仓库中，由 owner 保存：
   - owner 的预注册稿 v1.1（下称“手稿”；本文的“手稿 §N”指它的章节）；
   - 对 v1.0 研究包的对抗式评审 v1.0（下称“评审”；文中的 NOV-、MA-、SCI-、IMPL- 编号和 NEW-01 指它的问题）；
@@ -77,10 +77,11 @@
 | `eval.*` | 评分、NLL/BPB、生成、切换分解、统计、报告 | model、routing、data | 训练 |
 | `registry.*` | 运行身份、运行目录、环境、矩阵行 | canonical | 持有模型代码 |
 
-两条横向规则：
+三条横向规则：
 
 - 算子从不看到路由，分发只在 `model.executor` 中进行。这修正了 v1.0 手册中的接口 `InputSlotExpandedFFN.forward(h, route, fusion)`（IMPL-21）。
 - 只有 `model.lm` 和 `eval.*` 接受 `RoutePlan`。`train.loop` 经 `routing.policies` 从 shard 的 route id 得到 plan。
+- 只读参数一部分的算子（`ops.fusion.channel_select`）经 `ops.reads.declare_partial_read` 告诉参数审计它读了多少元素。这个钩子放在 `ops` 中，所以算子不依赖 `audit`（I3 落地记录第 2 条）。
 
 命令行由 `surogate_bilingual.__main__.COMMANDS` 一张表定义，见 [README 的“命令行”](../README.md#命令行)。表中每一项写明实现它的子模块、入口函数和落地步骤；`verify` 与 `assemble` 同在 `assembly.assemble` 中（入口分别是 `verify_main` 与 `main`）。`bench` 暂定放在 `audit.bench`：英文规格的文件树中没有为它列出模块，I6 落地时再确认。
 
@@ -286,6 +287,47 @@ name.encode("utf-8") + b"\0" + str(dtype).encode() + b"\0" + json(list(shape)).e
 - **I3-C12：** 移植秩约束 ridge（v1.0 检查 7）与 JS 分解（检查 8），检查 8 的说明限定为与上下文无关的预测器。
 - **I3-C13：** 预算行带 `within_budget` 与 `declared_in_budget`，只对声明在预算内的行断言在预算内。
 - **I3-C14（MA-10、SCI-17、IMPL-16）：** `compare.py` 中的恒等式改为标注“恒等式检查”的单元测试，永不作为结果报告；`test_compare.py` 的断言在这里移植。
+
+#### I3 落地记录
+
+**状态：** 已完成（CPU）。移植测试与 I3-C1 至 I3-C14 都是 `fork/bilingual/tests/cpu` 中有名字的用例，全部通过；只有 I3-C10 的 scipy 对拍在没有 scipy 的环境中跳过，本机另用放在临时目录中的 scipy 运行过一次（见 [实测记录](measurements.md)）。没有在 GPU 上运行，CI 也还没有运行这些用例。I3 不增加命令。这些用例检查的都是 [已知数学事实] 或基线的定义，不是实验结果。
+
+| 验收 | 检查方式（`fork/bilingual/tests/cpu` 下的用例） |
+|---|---|
+| 移植测试 | `test_verify_merge_math_port.py` 的 `test_i3_port_verify_merge_math_main_reports_every_assertion_passed`：按路径加载 owner 的文件，调用 `main`，读回它写出的 JSON |
+| I3-C1 | `test_fusion.py` 的五个 `test_i3_c1_*`：常数 g 折进 W_down；逐 token 块门控 ≤ 1e-12；四个反例（静态拼接、不带门控的 down 偏置、输入侧门控、每专家 post-norm，另验证随块门控的偏置 ≤ 1e-12）；pre-norm γ 折进权重列；fp32 容差 1e-5 |
+| I3-C2 | `test_i3_c2_*`：族 I 的通道置换经 `merge.permute_channels` 完成；族 II 的槽位置换另有一例 |
+| I3-C3 | `test_i3_c3_*`：零连接等于拼接，one-hot 端点逐位等于独立专家，连接改变双路输出（v1.0 检查 4）；常数 g 下等于重参数化后的拼接、秩 r 时等于带门控的 LoRA（都 ≤ 1e-12）；参数计数 286,654,464、每个投影/方向/层 2·f·r = 3456·r，并与算子因子张量的非对角元素数一致 |
+| I3-C4 | `test_i3_c4_*`：one-hot 端点差恰为 0.0；相同专家复现种子在 tiny 模型的 logits 上检查（四种融合，各 10 组逐 token 的单纯形门控 ≤ 1e-12；slot 族的 b 取随机值，因为初始化时 b = 0，偏置约定测不出来）；g = (1, 1) 时四种融合的相对误差都 > 0.1，post 与 output 恰为种子的 2 倍；SiLU″ 的闭式先与 autograd 对拍，再在网格上检查 sup = 0.5、零点 ±2.3994、x = 3 处为负、最小值 −0.037；tanh 的紧常数；Jensen 界在 10⁵ 对上成立（舍入余量 1e-13），δ = 1e-2 与 1e-3 时比值 ≥ 0.99；线性 φ 下 post − pre = Q·b，单纯形上两者相等 |
+| I3-C5 | `test_i3_c5_*`：含 v1.0 检查 1（输入复制在线性时坍缩为求和）；交叉项的符号见下文偏离 1；逐 token 门控下最好的固定第一层留下 > 0.1 的相对残差 |
+| I3-C6 | `test_i3_c6_*`：tiny 与 pilot（meta device）上 pre 与 post 的 P_total、P_active 相等，pilot 双路为 138,639,360；用 `TorchFunctionMode` 计数，`slot_post` 与 `slot_pre` 各只做一次 Q 矩阵乘 |
+| I3-C7 | `test_i3_c7_*`：形状钩子记录每个 torch 函数输出的形状，断言没有 [N, ≥ f] 的中间量；对照（先算整个专家再掩码）被同一个钩子查出；`p_active` 只计入选中的通道（3·d·f，v1.0 检查 6 的计数）；pilot 几何下 54 块选 27 块时声明的元素数乘以层数等于 B10-ch 行的通道计数 63,700,992；非法选择报错 |
+| I3-C8 | `test_i3_c8_two_half_width_experts_concatenated_are_one_dense_swiglu` |
+| I3-C9 | `test_i3_c9_zero_init_adapter_adds_exactly_zero_and_trains_its_up_projection`；另检查初始化时 down 的梯度为 0、参数为 2·d·r |
+| I3-C10 | `test_merge.py` 的 `test_i3_c10_*`：另有 TIES 的手算例、DARE 与键顺序无关、合并拒绝不一致的输入、族 II 的 Re-Basin、numpy Hungarian 在 50 个有同值的整数矩阵上与穷举的最优值相等、n = 256 时找回植入的置换，以及 `solve_lap` 的各种拒绝 |
+| I3-C11 | `test_router_monotone.py` 的 `test_i3_c11_*`：fp32 与 fp64、k = 1 与 2；新专家在 5%–95% 的 token 上胜出，所以检查不是空的；选了新专家的 token 的旧门控确实改变；k ≤ 2 的门控是合法的 `RoutePlan` |
+| I3-C12 | `test_verify_merge_math_port.py` 的 `test_i3_c12_*`：秩约束 ridge 的满秩解等于闭式 ridge 解，各秩的目标差等于谱尾，与 owner 的 `ridge_rank_delta` 一致，随机的秩 r 扰动不会更好；JS 分解在 2 类（v1.0 的 p、q）与 7 类上成立 |
+| I3-C13 | `test_i3_c13_*`：只有声明在预算内的行被断言在预算内，超预算的恰好是 B6/B7、II-dual、II-n512-dual；v1.0 检查 11 的 shared、path、各行总数与代码计数一致，v1.0 的两专家通道选择布局就是 B10-ch 行（96,340,608） |
+| I3-C14 | `test_fusion.py` 中带 `identity_check` 标记的四个 `test_i3_c14_identity_check_*`，含 v1.0 `test_compare.py` 的三条断言；`fork/dev test bilingual -m identity_check` 只运行它们 |
+
+**实现中的决定与对英文规格的偏离（owner 可以推翻）：**
+
+1. **I3-C5 交叉项的符号。** 英文规格写的是“逐张量合并减乘积合并等于 g₁g₂(W₁−W₂)(R₁−R₂)”。由 g₁ + g₂ = 1 推得 W̄R̄ − Σ gᵢWᵢRᵢ = −g₁g₂(W₁−W₂)(R₁−R₂)，方向相反。测试断言正确的方向（乘积合并减逐张量合并等于 g₁g₂(W₁−W₂)(R₁−R₂)），并断言规格写的方向不成立。评审 MA-02 与手稿 §4.3 第 2 条只说“相差交叉项”，没有写方向，不需要改。
+2. **部分读取的声明钩子移到 `ops.reads`。** I2 把 `declare_partial_read` 放在 `audit.params` 中；`channel_select` 若从那里导入，`ops` 就依赖了 `audit`，违反模块边界（`ops` 只依赖 torch）。现在钩子在 `ops.reads`，`audit.params` 在一次前向期间安装接收端，并为已有的调用者重新导出 `declare_partial_read`。
+3. **`rebasin_align` 按规格返回（对齐后的状态, 恒等比例）。** 每层的置换由 `rebasin_permutations` 给出，报告用的标签由 `alignment_label` 给出（恒等比例为 1.0 时是 `"equivalent to averaging"`）；规格签名之外另加可选参数 `solver`。
+4. **合并的细节**（规格没有规定，均为 [建议]）：合并只接受专家 FFN 状态（`ffn.*` 键），遇到 `backbone.*` 键报错；在 float64 中计算，再转回输入的 dtype；`weight_average` 的权重必须在单纯形上；`ties` 按张量修剪（常见实现的做法；论文对整个 task vector 修剪，全局版本没有实现），保留 ⌈density·n⌉ 个元素，同值时按稳定排序取前者；`dare` 每个张量的掩码来自独立的生成器，种子由 (rng_seed, 专家序号, 键名) 的 sha256 派生，所以与 dict 顺序无关。
+5. **Re-Basin 也支持族 II：** 可置换的是 n 个槽位（R 的行、W 的列），Q 与 b 共享，不参与置换。规格只写了族 I 的相似度公式。
+6. **numpy Hungarian** 是带势函数的 O(n³) 最短增广路算法，在列上向量化。`solver="auto"` 有 scipy 时用 scipy，否则用 numpy，而 numpy 拒绝 n > 256，所以 pilot 的 n = 1728 在没有 scipy 的环境中报错并提示 scipy。
+7. **`cross_link_lowrank` 的因子布局：** A、B 都是 [2, E, E, f, r]（投影 gate/up、接收专家 i、发送专家 j、通道、秩），对角线 i = j 忽略；连接读取发送专家自己的 pre-activation，与 v1.0 的 `cross_mix` 相同；全秩连接写成 A = C、B = I。参数计数由 `cross_link_params` 给出。
+8. **`channel_select` 的选择对所有 token 相同**，每个专家至多出现一次；B10-ch 的逐 token 块 router 在 P1。
+9. **B11 的预算行改用 `ZeroInitAdapter` 构造**（I2 中是两层无偏置 Linear），参数与 MAC 不变，golden 文件不变。
+10. **算子不校验门控。** 单纯形由 `RoutePlan.validate` 保证；算子接受 g = (1, 1) 这样被禁止的门控，只是为了让测试展示它破坏了什么（MA-04）。
+11. **`identity_check` 标记**注册在 `fork/bilingual/pyproject.toml` 的 pytest 配置中，用于 `compare.py` 的恒等式（I3-C14）。
+12. **`topk_softmax_gates`** 先取 top-k，再只对选中的 logit 做 softmax；第 k 名上的同值由 `torch.topk` 决定，不在不变性之内。`Router` 只是 Protocol，训练推迟。
+13. **v1.0 各项检查的移植位置：** 检查 1–6 在 `test_fusion.py`，检查 7、8、11 在 `test_verify_merge_math_port.py`，检查 9 在 `test_router_monotone.py`，检查 10 由 I2-A11（`test_freeze.py`：经优化器作用于 nn.Module，并对每个冻结张量做内容哈希）覆盖。
+14. **scipy 对拍在 GPU 主机上的运行方式。** 英文规格说 tests/gpu 也在 `fork/.venv-bilingual` 中以 CPU 运行这一对拍；tests/gpu 要到 I6 才有，所以本步骤改为在 [运行手册](runbook.md#g0-环境与-gpu-不变量) G0 第 1 步的判据中要求：CPU 套件在该环境中没有跳过的用例，`test_i3_c10_numpy_hungarian_equals_scipy` 必须运行并通过。
+
+**仍未验证：** 这些算子在 CUDA 上的行为；CI 上的这些用例与 CPU lane 上的套件耗时；scipy 对拍尚未在 `fork/.venv-bilingual` 中运行。
 
 ### I4：数据
 

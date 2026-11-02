@@ -2,7 +2,7 @@
 
 命令都在 GPU 主机的仓库根目录、环境 `fork/.venv-bilingual` 中运行。门槛按顺序进行：某一步以非零退出码结束、或判据不成立，就停止，保存输出，不进入下一个门槛；判据不成立时记录实测值，不要放宽阈值。每个结果都按主机、提交和日期记入 [实测记录](measurements.md)。本手册中的时长、吞吐和显存数字在实测之前都是 [估计]。
 
-**当前状态（步骤 I1）：本手册中的门槛全部未运行。** 现在能运行的只有 G0 的第 1 步（建环境、跑 CPU 测试）。其余命令（`env`、`bench`、`synth`、`train`、`assemble`、`verify` 与各评测命令）在步骤 I2–I6 落地；在此之前，`python -m surogate_bilingual 命令` 以退出码 2 结束并说明命令在哪个步骤实现。步骤 I6 补全本手册，届时可运行的命令块会由测试以 `--dry-run` 逐条检查。
+**当前状态（截至步骤 I3）：本手册中的门槛全部未运行。** 现在能运行的只有 G0 的第 1 步（建环境、跑 CPU 测试）。`assemble`、`verify`、`audit` 三个命令已在 I2 落地，但前两个需要的种子与专家 pack 要等 I5 的训练才有；其余命令（`env`、`bench`、`synth`、`train` 与各评测命令）在步骤 I4–I6 落地，在此之前 `python -m surogate_bilingual 命令` 以退出码 2 结束并说明命令在哪个步骤实现。步骤 I6 补全本手册，届时可运行的命令块会由测试以 `--dry-run` 逐条检查。
 
 运行输出的位置还没有定：英文规格把运行目录放在仓库根目录的 runs 下，而根目录的 `.gitignore` 只忽略 data 目录、不忽略 runs，未跟踪的运行输出会让工作区变 dirty（`code_dirty`）。I5 落地运行登记时一并决定（例如放在 `fork/bilingual` 下并由 `fork/.gitignore` 忽略，或经环境变量放到仓库之外）。
 
@@ -23,7 +23,7 @@
    fork/.venv-bilingual/bin/python -m pytest -q -p no:cacheprovider fork/bilingual/tests/cpu
    ```
 
-   判据：倒数第二条输出的计算能力为 `(12, 0)`；CPU 测试全部通过（在 GPU 主机上 scipy 已装，依赖 scipy 的用例也会运行）。把 torch 的确切版本（含 `+cu` 后缀）、CUDA 版本、驱动版本（`nvidia-smi`）和 `requirements.lock` 的 sha256 记入实测记录。`fork/.venv-bilingual` 被 `fork/.gitignore` 忽略，所以其中的锁文件不会让工作区变 dirty。
+   判据：倒数第二条输出的计算能力为 `(12, 0)`；CPU 测试全部通过，并且没有跳过的用例：在 GPU 主机上 scipy 已装，CPU lane 上跳过的 `test_i3_c10_numpy_hungarian_equals_scipy`（numpy Hungarian 对 scipy 的对拍）在这里必须运行并通过；pilot 的 Re-Basin（n = 1728）也只能在这里用 scipy 求解。把 torch 的确切版本（含 `+cu` 后缀）、CUDA 版本、驱动版本（`nvidia-smi`）和 `requirements.lock` 的 sha256 记入实测记录。`fork/.venv-bilingual` 被 `fork/.gitignore` 忽略，所以其中的锁文件不会让工作区变 dirty。
 
 2. **环境指纹（I5 落地后）。** 计划中的命令为 `fork/.venv-bilingual/bin/python -m surogate_bilingual env --out <运行目录>/_env/environment.json`，写出 Python、torch、CUDA/cuDNN、驱动、GPU、CPU、线程数、git 提交与是否 dirty。
 

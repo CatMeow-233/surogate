@@ -35,10 +35,36 @@ def _one_cpu_thread():
     torch.set_num_threads(previous)
 
 
-@pytest.fixture(scope="session")
-def moe_pilot():
-    """The owner's v1.0 `reference/moe_pilot.py`, loaded by path (it is not a package module)."""
-    spec = importlib.util.spec_from_file_location("bilingual_reference_moe_pilot", REFERENCE / "moe_pilot.py")
+def load_reference(stem: str):
+    """One of the owner's v1.0 scripts in `reference/`, loaded by path (they are not package modules)."""
+    spec = importlib.util.spec_from_file_location(f"bilingual_reference_{stem}", REFERENCE / f"{stem}.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture(scope="session")
+def moe_pilot():
+    return load_reference("moe_pilot")
+
+
+@pytest.fixture(scope="session")
+def verify_merge_math():
+    return load_reference("verify_merge_math")
+
+
+@pytest.fixture(scope="session")
+def compare_v10():
+    return load_reference("compare")
+
+
+@pytest.fixture(scope="session")
+def pilot():
+    """The pilot budget report in its JSON form (what the golden file holds) and its rows by id. Built once per
+    session: it constructs every row's model on the meta device and runs its forward (about 5 s)."""
+    import json
+
+    from surogate_bilingual.audit.budget import report
+
+    doc = json.loads(json.dumps(report("pilot")))
+    return doc, {row["id"]: row for row in doc["rows"]}
