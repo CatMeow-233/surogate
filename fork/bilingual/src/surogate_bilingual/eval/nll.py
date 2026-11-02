@@ -12,6 +12,10 @@
 - The unigram baseline (G1): add-one smoothed token frequencies of a training shard [建议].
 - `spike_after_switch(k)`: the mean NLL of the first k target tokens after each route switch, pooled over switches;
   a switch's tokens stop at the next switch.
+- Splits: a documents file written by `split materialize` (<out>/<split>/<source>.jsonl) is listed with its split in
+  the derived manifest <out>/manifest.json; `eval-nll` reads the split from there (and checks the file's sha256),
+  records it, refuses test files unless `--allow-test` (after the MS §9.7 lock) and refuses mixing splits. Files
+  outside such a tree have split null; `stats confirm` does not accept them.
 """
 
 from __future__ import annotations
@@ -192,6 +196,25 @@ def spike_after_switch(nll: np.ndarray, routes: Sequence, mask: Sequence[bool] |
 # --- command line ----------------------------------------------------------------------------------------------------
 
 
+def file_splits(paths: Sequence[Path]) -> dict[str, str | None]:
+    """{path: split} from the derived manifest two levels up (`split materialize`), None outside such a tree."""
+    out: dict[str, str | None] = {}
+    for path in paths:
+        resolved = Path(path).resolve()
+        manifest = resolved.parent.parent / "manifest.json"
+        split = None
+        if manifest.is_file():
+            doc = json.loads(manifest.read_text("utf-8"))
+            rel = resolved.relative_to(manifest.parent).as_posix()
+            entry = next((f for f in doc.get("files", []) if f.get("path") == rel), None)
+            if doc.get("format") == "bilingual-manifest/1" and entry is not None:
+                if entry["sha256"] != sha256_file(resolved):
+                    raise ValueError(f"{path} differs from its entry in {manifest}")
+                split = entry.get("split")
+        out[str(path)] = split
+    return out
+
+
 def _docs(paths: Sequence[Path], limit: int | None) -> tuple[list[Doc], dict[str, str]]:
     docs, files = [], {}
     for path in paths:
@@ -205,6 +228,9 @@ def main(argv: Sequence[str]) -> int:
     ap.add_argument("--model", type=Path, required=True, help="a seed pack directory or an assembly manifest")
     ap.add_argument("--forced", help="experts to run on the forced route, comma separated (default: all)")
     ap.add_argument("--docs", type=Path, nargs="+", required=True, help="dev documents (data.docs JSON lines)")
+    ap.add_argument("--arm", help="the arm label recorded with the matrix (stats confirm: T2, T0 for H_C)")
+    ap.add_argument("--replicate", type=int)
+    ap.add_argument("--allow-test", action="store_true", help="evaluate test documents (only after the MS §9.7 lock)")
     ap.add_argument("--unigram-shard", type=Path, help="a training shard for the unigram baseline (G1)")
     ap.add_argument("--stride", type=int)
     ap.add_argument("--limit-docs", type=int)
@@ -213,11 +239,17 @@ def main(argv: Sequence[str]) -> int:
     ap.add_argument("--out", type=Path)
     ap.add_argument("--dry-run", action="store_true", help="load and verify the model and the documents; run nothing")
     args = ap.parse_args(list(argv))
+    from ..devices import resolve_device
     from .models import load_model
-    from .score import _device
 
     try:
-        ev = load_model(args.model, device=_device(args.device))
+        ev = load_model(args.model, device=resolve_device(args.device))
+        splits = file_splits(args.docs)
+        known = sorted({v for v in splits.values() if v is not None})
+        if len(known) > 1:
+            raise ValueError(f"the documents mix the splits {known}; evaluate one split per run")
+        if "test" in known and not args.allow_test:
+            raise ValueError("test documents are evaluated only after the preregistration lock (MS §9.7): --allow-test")
         docs, files = _docs(args.docs, args.limit_docs)
         names = ev.names
         forced = args.forced.split(",") if args.forced else list(names)
@@ -234,6 +266,10 @@ def main(argv: Sequence[str]) -> int:
             "tokenizer_sha256": ev.tokenizer_sha256,
             "docs": files,
             "n_docs": len(docs),
+            "splits": splits,
+            "split": known[0] if known and None not in splits.values() else None,
+            "arm": args.arm,
+            "replicate": args.replicate,
             "rows": forced,
             "autocast": args.autocast,
         }

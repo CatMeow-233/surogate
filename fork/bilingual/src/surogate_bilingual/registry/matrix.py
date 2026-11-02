@@ -7,7 +7,8 @@ H_C (主（参照）) and counts as minimal-primary.
 
 `python -m surogate_bilingual matrix [--json] [--results PATH ...]` prints the table. With result files
 (`bilingual-result/1`, written by `eval-tasks`), each row shows the metrics recorded under its ID; every other row
-says 未运行. Rows are data: nothing here runs a model.
+says 未运行. The 评测协议 column says whether P0 can evaluate the row at all (`MISSING_PROTOCOL` names what is
+missing; `eval-tasks --arm` refuses those IDs). Rows are data: nothing here runs a model.
 """
 
 from __future__ import annotations
@@ -98,6 +99,31 @@ ROW_IDS = tuple(r.id for r in ROWS)
 if len(set(ROW_IDS)) != len(ROW_IDS):
     raise RuntimeError("duplicate matrix row ids")
 
+# Rows with no evaluation protocol in P0, and what is missing. Every other row has an arm preset in
+# eval.models.ARMS; `eval-tasks --arm` refuses these IDs instead of falling back to plain R_out (a test checks that the
+# two tables cover the rows exactly once).
+MISSING_PROTOCOL: dict[str, str] = {
+    "B3d": "DARE is in ops.merge but not wired into eval-tasks (P1)",
+    "B3e": "RegMean / Fisher merging is not implemented (P1)",
+    "B3-rb": "Re-Basin is in ops.merge but not wired into eval-tasks (P1)",
+    "RtS": "the recall-then-switch protocol and its output-length-matched control are not implemented",
+    "B5": "learned-router training is deferred",
+    "B10-I": "needs a half-width seed (P1)",
+    "B10-ch": "needs a half-width seed and the block router (P1)",
+    "B11a": "the zero-init adapter runs belong to the repair ladder (P1)",
+    "B11b": "representation alignment belongs to the repair ladder (P1)",
+    "B12b": "mixed-route joint training is P1",
+    "FX": "the coordinated-training recipe is P1",
+    "ST": "the two-stream stitch executor is P1",
+    "B9-II+aff": "the per-channel offset/scale fit on dev is not implemented",
+    "B8-lin": "needs its own seed with linear P_i (P1)",
+    "B10-II": "needs its own n = 395 seed (P1)",
+    "T4": "needs a dual + Bridge executor (deferred)",
+    "T5": "needs a Top-2 + Bridge executor (deferred)",
+}
+if set(MISSING_PROTOCOL) - set(ROW_IDS):
+    raise RuntimeError(f"MISSING_PROTOCOL names unknown rows {sorted(set(MISSING_PROTOCOL) - set(ROW_IDS))}")
+
 
 def rows() -> tuple[Row, ...]:
     return ROWS
@@ -123,15 +149,26 @@ def table(results: Sequence[dict] = ()) -> list[dict]:
     for r in results:
         if r.get("status") == "done" and r.get("value") is not None:
             by_row.setdefault(r["row"], []).append(f"{r['metric']} r{r['replicate']} = {r['value']:.4f}")
-    return [{**asdict(row), "result": "; ".join(by_row[row.id]) if row.id in by_row else NOT_RUN} for row in ROWS]
+    return [
+        {
+            **asdict(row),
+            "protocol": MISSING_PROTOCOL.get(row.id, "implemented"),
+            "result": "; ".join(by_row[row.id]) if row.id in by_row else NOT_RUN,
+        }
+        for row in ROWS
+    ]
 
 
 def markdown(entries: Sequence[dict]) -> str:
-    lines = ["| ID | § | 条件 | 新训练 | 状态 | 训练阶段 | 结果 |", "|---|---|---|---|---|---|---|"]
+    lines = [
+        "| ID | § | 条件 | 新训练 | 状态 | 训练阶段 | 评测协议 | 结果 |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
     for e in entries:
+        protocol = "已实现" if e["protocol"] == "implemented" else f"未实现：{e['protocol']}"
         lines.append(
             f"| {e['id']} | {e['section']} | {e['condition']} | {e['training']} | {e['status']} | "
-            f"{e['stage'] or '—'} | {e['result']} |"
+            f"{e['stage'] or '—'} | {protocol} | {e['result']} |"
         )
     return "\n".join(lines)
 

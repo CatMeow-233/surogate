@@ -48,10 +48,16 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "profile": None,  # row files only: a size profile (PROFILES) applied under the file's own model keys
     },
     "routing": {
-        "signal": "oob",  # B-O3: per-token route ids travel out of band in the shards
-        "gate_policy": None,  # per row: "one_hot" for Top-1 rows, "dual_const" for dual rows (B-O5)
-        "g": (0.5, 0.5),  # B-O5
-        "window": 32,  # B-O5, dual_window
+        # B-O3: per-token route ids travel out of band in the shards. "tags" (routes from in-band control tags,
+        # routing.tags) is deferred: a row file that asks for it is refused. Recorded in every run's config.
+        "signal": "oob",
+        # The gate policy and its parameters of the dual evaluation arms (B-O5). Training plans are one-hot from the
+        # shard routes, so these are evaluation settings: eval.items.Routing and routing.policies take their
+        # defaults from here, eval-tasks overrides them per arm (--gate, --g, --window), and a row file may not set
+        # them. None = the arm preset decides ("one_hot" for Top-1 rows, "dual_const" for dual rows).
+        "gate_policy": None,
+        "g": (0.5, 0.5),
+        "window": 32,
     },
     "fusion": {"name": None},  # per row (MS §7); None = the family's default (DEFAULT_FUSION)
     "train": {
@@ -115,6 +121,9 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "g1p": {"chance": 0.125, "margin": 0.20},  # G1': best of B0, B2, B12a >= chance + 20 pp on dev
         "power": 0.8,  # MS §9.5: target power at the SESOI
         "replicates": (3, 6),  # MS §9.5: R in {3, ..., 6}
+        # [建议] MS §9.6: one 5-point coefficient grid for every merge arm (task arithmetic and TIES lambda, chosen on
+        # dev); TIES keeps the top 20 % of each delta (the TIES paper's k). The confirmatory dual arms keep B-O5's g.
+        "merge": {"lam_grid": (0.2, 0.4, 0.6, 0.8, 1.0), "density": 0.2},
     },
     "registry": {"allow_dirty": False},
     # One run of a row file (step I5). Paths are relative to the run root (`train --root`, default the working
@@ -461,8 +470,23 @@ def run_config(data: Mapping[str, Any], *, extra_tables: tuple[str, ...] = ()) -
     fusion = _overlay("fusion", data.get("fusion", {}))["name"] or DEFAULT_FUSION[cfg.family]
     if fusion not in FUSIONS[cfg.family]:
         raise ValueError(f"fusion {fusion!r} does not belong to family {cfg.family!r}: {FUSIONS[cfg.family]}")
-    routing = _overlay("routing", data.get("routing", {}))
+    raw_routing = dict(data.get("routing", {}))
+    routing = _overlay("routing", raw_routing)
     routing["g"] = tuple(float(x) for x in routing["g"])
+    if routing["signal"] == "tags":
+        raise ValueError(
+            'routing.signal = "tags" (routes from in-band control tags) is deferred; P0 trains on out-of-band '
+            'shard routes, routing.signal = "oob" (B-O3)'
+        )
+    if routing["signal"] != "oob":
+        raise ValueError(f'routing.signal must be "oob" (B-O3; "tags" is deferred): {routing["signal"]!r}')
+    eval_only = sorted(k for k in ("gate_policy", "g", "window") if k in raw_routing)
+    if eval_only:
+        raise ValueError(
+            f"routing.{', routing.'.join(eval_only)}: evaluation settings, not row settings (training plans are"
+            " one-hot from the shard routes); eval-tasks sets them per arm (--gate, --g, --window), with the"
+            ' defaults of DEFAULTS["routing"]'
+        )
     train = TrainConfig(**_overlay("train", data.get("train", {})))
     if train.seq > cfg.max_seq:
         raise ValueError(f"train.seq = {train.seq} exceeds model.max_seq = {cfg.max_seq}")

@@ -58,6 +58,7 @@ from .items import (
 PRED_FORMAT = "bilingual-pred/1"
 NORMS = ("sum", "mean", "auto")
 LANG_SHARE = DEFAULTS["eval"]["lang_share"]
+MERGE = DEFAULTS["eval"]["merge"]
 MAX_NEW = DEFAULTS["eval"]["max_new"]
 
 
@@ -210,7 +211,7 @@ class EvalContext:
 
 
 def _record(ctx: EvalContext, item: Mapping[str, Any], **fields) -> dict[str, Any]:
-    route, gate = ctx.routing.label() if len(ctx.names) > 1 else ("single", "one_hot")
+    route, gate = ctx.routing.label(item) if len(ctx.names) > 1 else ("single", "one_hot")
     base = {
         "format": PRED_FORMAT,
         "item_id": item["id"],
@@ -424,17 +425,25 @@ def build_parser() -> argparse.ArgumentParser:
     src.add_argument("--prompts", type=Path, help="a fixed generation set: JSON lines {id, lang, text}")
     ap.add_argument("--family")
     ap.add_argument("--variant")
+    ap.add_argument("--direction", help="keep one direction, e.g. zh>en (T1': one assembly per direction)")
     ap.add_argument("--split", default="dev", help="the only split evaluated (default dev)")
     ap.add_argument("--allow-test", action="store_true", help="evaluate test items (only after the MS §9.7 lock)")
     ap.add_argument("--route", choices=["R_out", "R_src", "R_wrong", "R_random"])
     ap.add_argument("--gate", choices=["one_hot", "dual_const", "dual_window"])
     ap.add_argument("--g", type=_pair, help="dual gates, e.g. 0.5,0.5")
     ap.add_argument("--window", type=int)
-    ap.add_argument("--answer-route", help="send answer segments to this expert (T2: bridge)")
+    ap.add_argument(
+        "--answer-route", help="send the answer segments of translation items (E4) to this expert (T2: bridge)"
+    )
     ap.add_argument("--fusion", help="override the assembly's fusion (B8 pre / B9-II post on one assembly)")
     ap.add_argument("--merge", choices=["average", "task_arithmetic", "ties"])
-    ap.add_argument("--lam", type=float, default=1.0, help="task arithmetic / TIES coefficient")
-    ap.add_argument("--density", type=float, default=0.2, help="TIES density")
+    ap.add_argument(
+        "--lam",
+        type=float,
+        help=f"task arithmetic / TIES coefficient, required for them: a point of {MERGE['lam_grid']} chosen on dev",
+    )
+    ap.add_argument("--off-grid", action="store_true", help="accept a --lam outside the grid (recorded)")
+    ap.add_argument("--density", type=float, default=MERGE["density"], help="TIES density")
     ap.add_argument("--merge-experts", default="zh,en")
     ap.add_argument("--norm", choices=NORMS)
     ap.add_argument("--max-new", type=int, default=MAX_NEW)
@@ -449,13 +458,8 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def _device(name: str) -> str:
-    if name == "auto":
-        return "cuda" if torch.cuda.is_available() else "cpu"
-    return name
-
-
 def run(args) -> dict[str, Any]:
+    from ..devices import resolve_device
     from ..registry.env import code_identity
     from .models import arm_routing, load_model
     from .report import results_document, results_from_predictions
@@ -469,19 +473,34 @@ def run(args) -> dict[str, Any]:
         answer_route=args.answer_route,
         rng_seed=args.rng_seed,
     )
+    if preset.get("needs_direction") and not args.direction:
+        raise ValueError(
+            f"arm {args.arm} evaluates one assembly per direction (the T1' copy in its target slot): give --direction"
+        )
     merge_method = args.merge or preset.get("merge")
     merge = None
     if merge_method:
-        merge = {
-            "method": merge_method,
-            "lam": args.lam,
-            "density": args.density,
-            "experts": args.merge_experts.split(","),
-        }
-    ev = load_model(args.model, fusion=args.fusion or preset.get("fusion"), merge=merge, device=_device(args.device))
+        merge = {"method": merge_method, "experts": args.merge_experts.split(",")}
+        if merge_method != "average":
+            if args.lam is None:
+                raise ValueError(f"--merge {merge_method} needs --lam, a point of {MERGE['lam_grid']} chosen on dev")
+            on_grid = any(abs(args.lam - x) <= 1e-12 for x in MERGE["lam_grid"])
+            if not on_grid and not args.off_grid:
+                raise ValueError(f"--lam {args.lam} is not a point of the grid {MERGE['lam_grid']} (--off-grid)")
+            merge.update(lam=args.lam, grid=list(MERGE["lam_grid"]), on_grid=on_grid)
+            if merge_method == "ties":
+                merge["density"] = args.density
+    ev = load_model(
+        args.model, fusion=args.fusion or preset.get("fusion"), merge=merge, device=resolve_device(args.device)
+    )
     if args.items:
         items, files = load_items(
-            args.items, family=args.family, variant=args.variant, split=args.split, limit=args.limit
+            args.items,
+            family=args.family,
+            variant=args.variant,
+            direction=args.direction,
+            split=args.split,
+            limit=args.limit,
         )
         if any(i["split"] == "test" for i in items) and not args.allow_test:
             raise ValueError("test items are evaluated only after the preregistration lock (MS §9.7): --allow-test")
@@ -518,6 +537,7 @@ def run(args) -> dict[str, Any]:
         "max_new": args.max_new,
         "autocast": args.autocast,
         "split": args.split,
+        "direction": args.direction,
         "allow_test": args.allow_test,
         "code_commit": commit,
         "code_dirty": dirty,

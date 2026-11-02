@@ -31,6 +31,7 @@ from collections.abc import Mapping, Sequence
 import numpy as np
 import torch
 
+from ..config import DEFAULTS
 from .plan import PlanError, RoutePlan
 
 ROUTE_POLICIES = ("R_out", "R_src", "R_wrong", "R_random")
@@ -100,11 +101,12 @@ def plan_from_segments(
 def apply_gate_policy(
     plan: RoutePlan,
     policy: str,
-    g: tuple[float, float] = (0.5, 0.5),
-    window: int = 32,
+    g: tuple[float, float] = tuple(DEFAULTS["routing"]["g"]),
+    window: int = DEFAULTS["routing"]["window"],
     pair: tuple[str, str] = PAIR,
 ) -> RoutePlan:
-    """The gates of a dual arm over `pair`, from a one-hot plan whose every token is on one of the pair."""
+    """The gates of a dual arm over `pair`, from a one-hot plan whose every token is on one of the pair (g and
+    window default to DEFAULTS["routing"], B-O5)."""
     if policy not in GATE_POLICIES:
         raise PlanError(f"unknown gate policy {policy!r}; known: {GATE_POLICIES}")
     if policy == "one_hot":

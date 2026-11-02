@@ -14,6 +14,10 @@ Paths are stored relative to the manifest's directory. `assemble` refuses, each 
 
 Slot names are free identifiers ("t3" for an ordinary third expert is accepted). `load_assembly` re-reads and
 re-verifies every pack and loads the backbone and the experts with exact key sets.
+
+`verify` checks the forced route of every slot the two ways MS §9.4 names: against the probe logits each pack
+recorded (uniform random tokens), and, with `--docs`, against the standalone model of that expert (the seed's
+backbone plus the expert alone) on windows of real dev text at T = max_seq.
 """
 
 from __future__ import annotations
@@ -223,9 +227,11 @@ def read_assembly(manifest: Path) -> Assembly:
     return Assembly(doc, seed, tuple(packs), cfg, fusion)
 
 
-def build_model(assembly: Assembly, gqa: str = "sdpa_gqa") -> RoutedLM:
+def build_model(assembly: Assembly, gqa: str = "sdpa_gqa", *, fusion: str | None = None) -> RoutedLM:
+    """The assembled model: the seed's backbone and every slot's expert. `fusion` overrides the manifest's fusion
+    for dual rows (B8 `pre` and B9-II `post` on one assembly); one-hot rows never read it."""
     names = [name for name, _ in assembly.slots]
-    model = RoutedLM(assembly.config, names, assembly.fusion, gqa)
+    model = RoutedLM(assembly.config, names, fusion or assembly.fusion, gqa)
     model.load_backbone_state(seed_backbone_for(assembly.seed, assembly.config))
     for name, pack in assembly.slots:
         model.load_expert_state(name, pack.weights)
@@ -270,17 +276,55 @@ class FidelityReport:
     dtype: str
     autocast: str | None
     tolerances: Tolerances
-    slots: tuple[SlotFidelity, ...]
+    slots: tuple[SlotFidelity, ...]  # the recorded probe (uniform random tokens)
+    docs: tuple[SlotFidelity, ...] = ()  # real text: assembled forced route vs the standalone expert model
+    doc_source: dict[str, Any] | None = None  # files (sha256), windows, tokens
 
     @property
     def passed(self) -> bool:
-        return all(s.passed for s in self.slots)
+        return all(s.passed for s in (*self.slots, *self.docs))
 
     def to_dict(self) -> dict[str, Any]:
         out = asdict(self)
         out["slots"] = [asdict(s) for s in self.slots]
+        out["docs"] = [asdict(s) for s in self.docs]
         out.update(format=FIDELITY_FORMAT, passed=self.passed)
         return out
+
+
+def doc_windows(tok, paths: Sequence[Path], width: int, n_windows: int) -> tuple[torch.Tensor, dict[str, Any]]:
+    """[n, width] token windows of real text: every document as `<eos>` + its text segments (the training and
+    evaluation convention), concatenated in file order, cut into consecutive windows; at least one full window."""
+    from ..canonical import sha256_file
+    from ..data.docs import iter_file_docs
+    from ..data.tokenizer import encode_user_text
+
+    eos = int(tok.token_to_id("<eos>"))
+    stream: list[int] = []
+    files = {}
+    for path in paths:
+        files[str(path)] = sha256_file(path)
+        for doc in iter_file_docs(Path(path), source=None, kind=None):
+            stream.append(eos)
+            for seg in doc.segments:
+                if seg.text:
+                    stream += encode_user_text(tok, seg.text)
+            if len(stream) >= width * n_windows:
+                break
+        if len(stream) >= width * n_windows:
+            break
+    n = min(n_windows, len(stream) // width)
+    if n < 1:
+        raise FormatError(f"the documents hold {len(stream)} tokens, fewer than one window of {width}")
+    tokens = torch.tensor(stream[: n * width], dtype=torch.long).reshape(n, width)
+    return tokens, {"files": files, "windows": n, "width": width}
+
+
+def _compare(logits: torch.Tensor, reference: torch.Tensor, tol: Tolerances) -> tuple[float, float, bool]:
+    max_abs = float((logits - reference).abs().max())
+    agreement = float((logits.argmax(-1) == reference.argmax(-1)).double().mean())
+    passed = max_abs <= tol.max_abs and (tol.min_argmax_agreement is None or agreement >= tol.min_argmax_agreement)
+    return max_abs, agreement, passed
 
 
 def verify_fidelity(
@@ -291,27 +335,46 @@ def verify_fidelity(
     dtype: torch.dtype = torch.float32,
     autocast: torch.dtype | None = None,
     gqa: str = "sdpa_gqa",
+    docs: Sequence[Path] = (),
+    doc_windows_n: int = 4,
 ) -> FidelityReport:
-    """Replay every expert pack's probe under the forced route of the assembled model."""
+    """Replay every expert pack's probe under the forced route of the assembled model; with `docs`, also compare
+    the forced route with the standalone expert model on real text windows of max_seq tokens."""
     tol = tol or Tolerances()
     assembly = read_assembly(manifest)
     model = build_model(assembly, gqa).to(device=device, dtype=dtype).eval()
     names = model.expert_names
-    results = []
-    for name, pack in assembly.slots:
-        probe = pack.meta["probe"]
-        tokens = probe_batch(assembly.config, probe["seed"]).to(device)
-        plan = RoutePlan.forced(name, names, *tokens.shape)
-        device_type = torch.device(device).type
+    device_type = torch.device(device).type
+
+    def forward(m, tokens, plan):
         with (
             torch.no_grad(),
             torch.autocast(device_type, dtype=autocast or torch.bfloat16, enabled=autocast is not None),
         ):
-            logits = model(tokens, plan)[:, probe["positions"]].float().cpu()
-        max_abs = float((logits - pack.probe).abs().max())
-        agreement = float((logits.argmax(-1) == pack.probe.argmax(-1)).double().mean())
-        passed = max_abs <= tol.max_abs and (tol.min_argmax_agreement is None or agreement >= tol.min_argmax_agreement)
-        results.append(SlotFidelity(name, pack.expert_hash, max_abs, agreement, passed))
+            return m(tokens, plan).float().cpu()
+
+    results = []
+    for name, pack in assembly.slots:
+        probe = pack.meta["probe"]
+        tokens = probe_batch(assembly.config, probe["seed"]).to(device)
+        logits = forward(model, tokens, RoutePlan.forced(name, names, *tokens.shape))[:, probe["positions"]]
+        results.append(SlotFidelity(name, pack.expert_hash, *_compare(logits, pack.probe, tol)))
+    doc_results, doc_source = [], None
+    if docs:
+        from ..data.tokenizer import load_tokenizer
+
+        tok = load_tokenizer(assembly.seed.path / "tokenizer.json")
+        tokens, doc_source = doc_windows(tok, docs, assembly.config.max_seq, doc_windows_n)
+        tokens = tokens.to(device)
+        for name, pack in assembly.slots:
+            alone = RoutedLM(assembly.config, [name], assembly.fusion, gqa)
+            alone.load_backbone_state(seed_backbone_for(assembly.seed, assembly.config))
+            alone.load_expert_state(name, pack.weights)
+            alone = alone.to(device=device, dtype=dtype).eval()
+            assembled = forward(model, tokens, RoutePlan.forced(name, names, *tokens.shape))
+            doc_results.append(
+                SlotFidelity(name, pack.expert_hash, *_compare(assembled, forward(alone, tokens, None), tol))
+            )
     return FidelityReport(
         str(manifest),
         str(device),
@@ -319,6 +382,8 @@ def verify_fidelity(
         None if autocast is None else str(autocast),
         tol,
         tuple(results),
+        tuple(doc_results),
+        doc_source,
     )
 
 
@@ -366,12 +431,19 @@ def verify_main(argv: Sequence[str]) -> int:
     ap.add_argument("--autocast", choices=["none", "bf16"], default="none")
     ap.add_argument("--max-abs", type=float, help="default 1e-5, or 0.05 with --autocast bf16 (MS §9.4)")
     ap.add_argument("--min-argmax", type=float, help="default none, or 0.995 with --autocast bf16")
+    ap.add_argument(
+        "--docs", type=Path, nargs="+", default=[], help="dev documents: also compare with each standalone expert"
+    )
+    ap.add_argument("--doc-windows", type=int, default=4, help="windows of max_seq tokens taken from --docs")
     ap.add_argument("--out", type=Path)
     ap.add_argument("--dry-run", action="store_true", help="re-verify the manifest and its packs; run nothing")
     args = ap.parse_args(list(argv))
     try:
         if args.dry_run:
             read_assembly(args.manifest)
+            missing = [str(p) for p in args.docs if not Path(p).is_file()]
+            if missing:
+                raise FormatError(f"--docs files do not exist: {missing}")
             print(f"verify: {args.manifest}: manifest and packs verified (dry run, no forward)")
             return 0
         base = Tolerances.bf16_cuda() if args.autocast == "bf16" else Tolerances()
@@ -380,8 +452,16 @@ def verify_main(argv: Sequence[str]) -> int:
             base.min_argmax_agreement if args.min_argmax is None else args.min_argmax,
         )
         autocast = torch.bfloat16 if args.autocast == "bf16" else None
-        report = verify_fidelity(args.manifest, tol, device=args.device, dtype=DTYPES[args.dtype], autocast=autocast)
-    except AssemblyError as exc:
+        report = verify_fidelity(
+            args.manifest,
+            tol,
+            device=args.device,
+            dtype=DTYPES[args.dtype],
+            autocast=autocast,
+            docs=args.docs,
+            doc_windows_n=args.doc_windows,
+        )
+    except (AssemblyError, OSError) as exc:
         print(f"verify: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     doc = report.to_dict()

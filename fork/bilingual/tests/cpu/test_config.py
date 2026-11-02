@@ -95,13 +95,17 @@ def test_train_config_refuses_inconsistent_batch_arithmetic():
 
 def test_row_config_from_toml(tmp_path):
     path = tmp_path / "row.toml"
-    path.write_text('[model]\nfamily = "slot"\nn_layers = 8\ngqa = "repeat"\n[routing]\ngate_policy = "dual_const"\n')
+    path.write_text('[model]\nfamily = "slot"\nn_layers = 8\ngqa = "repeat"\n[routing]\nsignal = "oob"\n')
     run = load_toml(path)
     assert run.model == profile("mech8", "slot") and run.gqa == "repeat"
     assert run.fusion == "post" and run.fusion in FUSIONS["slot"]
-    assert run.routing["gate_policy"] == "dual_const" and run.routing["g"] == (0.5, 0.5)
+    assert run.routing["signal"] == "oob" and run.routing["g"] == (0.5, 0.5)
     assert run.train == TrainConfig()
     for bad, message in (
+        ({"model": {"family": "slot"}, "routing": {"signal": "tags"}}, "deferred"),
+        ({"model": {"family": "slot"}, "routing": {"signal": "bogus"}}, 'must be "oob"'),
+        ({"model": {"family": "slot"}, "routing": {"gate_policy": "dual_const"}}, "evaluation settings"),
+        ({"model": {"family": "slot"}, "routing": {"g": [0.7, 0.3], "window": 7}}, "evaluation settings"),
         ({"model": {"family": "slot", "colour": 1}}, "unknown keys in \\[model\\]"),
         ({"model": {"family": "slot"}, "stage": {}}, "unknown top-level"),
         ({"model": {}}, "family must be set"),

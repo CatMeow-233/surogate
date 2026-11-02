@@ -46,11 +46,13 @@ import torch
 from ..assembly.freeze import FreezeError, FreezePlan
 from ..assembly.hashing import content_hash
 from ..assembly.packs import TOKENIZER, AssemblyError, ExpertPack, SeedPack, read_pack
+from ..audit.budget import UPDATE_BUDGET
 from ..audit.params import p_update
 from ..canonical import sha256_file, sha256_json
 from ..config import RunConfig, config_hash, load_toml, stage_names
 from ..data.sampler import EpochChunkSampler
 from ..data.shards import ShardReader
+from ..devices import resolve_device
 from ..registry import env as registry_env
 from ..registry import run as registry
 from ..routing.plan import RoutePlan
@@ -59,19 +61,10 @@ from . import metrics, objectives, schedule, state
 from .recipes import Inputs, Recipe, RecipeError, SeedRecipe, expected_packs, recipe_from_spec
 
 EVAL_SPLITS = ("dev", "test")
-UPDATE_BUDGET = 100_000_000  # P_update <= 100M (MS §5.1); recorded, not enforced (B12a is over it by design)
 
 
 class TrainError(RuntimeError):
     pass
-
-
-def resolve_device(name: str) -> torch.device:
-    if name == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if name == "cuda" and not torch.cuda.is_available():
-        raise TrainError("run.device = cuda, but CUDA is not available")
-    return torch.device(name)
 
 
 def precision(train_dtype: str, device: torch.device) -> str:
@@ -277,6 +270,7 @@ def run_document(run: RunConfig, recipe: Recipe, resolved: Resolved, total: int,
         "model": recipe.model_config(run.model).to_dict(),
         "train": run.train.to_dict(),
         "gqa": run.gqa,
+        "routing": {"signal": run.routing["signal"]},
         "data": {"window": run.data["window"]},
         "recipe": {"kind": recipe.kind, **recipe.args()},
         "steps": total,

@@ -150,3 +150,57 @@ def test_eval_nll_and_switch_commands(tiny_assemblies, item_maker, tmp_path, cap
     assert set(sdoc["summary"]) == {"translate/zh>en"}
     capsys.readouterr()
     assert switch.main(["--model", str(tiny_assemblies["zh"]), "--items", str(items), "--dry-run"]) == 1
+
+
+def test_eval_nll_reads_the_split_from_the_materialized_manifest_and_guards_test(tiny_assemblies, tmp_path, capsys):
+    """eval-nll records each file's split (from `split materialize`'s derived manifest), refuses test documents before
+    the MS §9.7 lock, refuses mixing splits, and records arm and replicate for `stats confirm --nll`."""
+    from surogate_bilingual.canonical import atomic_write_json, sha256_file
+
+    out = tmp_path / "splits"
+    files = []
+    for split, lang, text in (("dev", "zh", "z1 z2 z3"), ("test", "en", "e1 e2 e3")):
+        path = out / split / "src.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"key": f"{split}0", "kind": lang, "text": text}) + "\n")
+        files.append({"path": f"{split}/src.jsonl", "source": "src", "sha256": sha256_file(path), "split": split})
+    atomic_write_json(out / "manifest.json", {"format": "bilingual-manifest/1", "files": files})
+    model = ["--model", str(tiny_assemblies["zh_en"]), "--arm", "T0", "--replicate", "1"]
+    dev_out = tmp_path / "dev.nll.json"
+    assert nll.main([*model, "--docs", str(out / "dev" / "src.jsonl"), "--out", str(dev_out)]) == 0
+    doc = json.loads(dev_out.read_text())
+    assert (doc["split"], doc["arm"], doc["replicate"]) == ("dev", "T0", 1)
+    capsys.readouterr()
+    test_docs = ["--docs", str(out / "test" / "src.jsonl")]
+    assert nll.main([*model, *test_docs, "--dry-run"]) == 1
+    assert "preregistration lock" in capsys.readouterr().err
+    assert nll.main([*model, *test_docs, "--allow-test", "--dry-run"]) == 0
+    both = ["--docs", str(out / "dev" / "src.jsonl"), str(out / "test" / "src.jsonl"), "--allow-test", "--dry-run"]
+    assert nll.main([*model, *both]) == 1 and "mix the splits" in capsys.readouterr().err
+    (out / "dev" / "src.jsonl").write_text("{}\n")  # changed after materialize: refused
+    assert nll.main([*model, "--docs", str(out / "dev" / "src.jsonl"), "--dry-run"]) == 1
+    assert "differs from its entry" in capsys.readouterr().err
+
+
+def test_verify_compares_the_forced_route_with_each_standalone_expert_on_real_text(tiny_assemblies, tmp_path):
+    """MS §9.4: forced single route, assembled vs standalone, on real dev text at T = max_seq (fp32 CPU: 0.0 expected)
+    as well as on the recorded random-token probe."""
+    from surogate_bilingual.__main__ import main as cli
+    from surogate_bilingual.assembly.assemble import verify_fidelity
+
+    docs = tmp_path / "dev.jsonl"
+    words = [f"z{i % 28}" for i in range(40)] + [f"e{i % 29}" for i in range(40)]
+    docs.write_text(
+        "".join(
+            json.dumps({"key": f"d{i}", "kind": "zh", "text": " ".join(words[i:] + words[:i])}) + "\n" for i in range(8)
+        )
+    )
+    report = verify_fidelity(tiny_assemblies["zh_en"], docs=[docs], doc_windows_n=3)
+    assert report.passed and [s.name for s in report.docs] == ["zh", "en"]
+    assert all(s.max_abs == 0.0 and s.argmax_agreement == 1.0 for s in report.docs)
+    assert report.doc_source["windows"] == 3 and report.doc_source["width"] == 16
+    out = tmp_path / "fidelity.json"
+    assert cli(["verify", str(tiny_assemblies["zh_en"]), "--docs", str(docs), "--out", str(out)]) == 0
+    doc = json.loads(out.read_text())
+    assert doc["passed"] and len(doc["docs"]) == 2 and doc["doc_source"]["files"][str(docs)]
+    assert cli(["verify", str(tiny_assemblies["zh_en"]), "--docs", str(tmp_path / "missing.jsonl"), "--dry-run"]) == 1

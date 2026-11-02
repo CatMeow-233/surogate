@@ -263,3 +263,104 @@ def test_i6_e2_eval_tasks_command_writes_predictions_and_results(tiny_assemblies
     capsys.readouterr()
     assert score.main([*argv, "--split", "test", "--overwrite"]) == 1  # the test split needs the MS §9.7 lock
     assert "preregistration lock" in capsys.readouterr().err
+
+
+# --- arm presets (review findings: T2's answer route, the silent R_out fallback, the merge grid) -----------------
+
+
+def _t0_twin(model3):
+    """The T0 model of a T2 model: the same backbone and the same ZH/EN experts, without the Bridge."""
+    model2 = RoutedLM(model3.cfg, ["zh", "en"]).eval()
+    model2.load_backbone_state(model3.backbone_state())
+    for name in ("zh", "en"):
+        model2.load_expert_state(name, model3.expert_state(name))
+    return model2
+
+
+def test_t2_routes_only_translation_answers_to_the_bridge_and_equals_t0_elsewhere(stand_in_tok, item_maker):
+    """MS §7.3, §8.4: T2 freezes ZH and EN, so with correct routing its monolingual answers are T0's exactly; only
+    the answers of translation items (E4) go to the Bridge."""
+    from surogate_bilingual.eval.models import arm_routing
+
+    model3 = RoutedLM(profile("tiny", "swiglu"), ["zh", "en", "bridge"], init_seed=3).eval()
+    model2 = _t0_twin(model3)
+    items = [
+        item_maker(
+            i,
+            "E1",
+            [(lang, "question", f"{lang[0]}{i} {lang[0]}{i + 1}")],
+            [f"{lang[0]}3", f"{lang[0]}4"],
+            0,
+            direction=f"{lang}>{lang}",
+            knowledge_source=lang,
+        )
+        for i, lang in enumerate(["zh", "en", "zh", "en"])
+    ]
+    t2, _ = arm_routing("T2")
+    t0, _ = arm_routing("T0")
+    a = score.evaluate(_ctx(model3, stand_in_tok, t2, items, arm="T2"), items)
+    b = score.evaluate(_ctx(model2, stand_in_tok, t0, items, arm="T0"), items)
+    assert [p["candidate_logprobs"] for p in a] == [p["candidate_logprobs"] for p in b]
+    assert [p["pred_index"] for p in a] == [p["pred_index"] for p in b]
+    assert {p["route_policy"] for p in a} == {"R_out"}  # no answer route on a monolingual item
+    # on a translation item the answer segments (both stages of a switchback) are the Bridge's
+    e4 = item_maker(
+        9,
+        "E4",
+        [("zh", "source", "z1 z2\n"), ("en", "instruction", "e1"), ("en", "answer", None)],
+        answer_lang="en",
+        variant="translate",
+        direction="zh>en",
+    )
+    segs = it.prompt_segments(stand_in_tok, e4)
+    plan = it.item_plan(e4, segs, 3, "en", model3.expert_names, t2)
+    names = [model3.expert_names[i] for i in plan.route_ids()[0].tolist()]
+    n_prompt = sum(len(s.ids) for s in segs)
+    assert names[n_prompt:] == ["bridge"] * 3 and "bridge" not in names[:n_prompt]
+    assert t2.label(e4) == ("R_out+answer>bridge", "one_hot") and t2.label(items[0]) == ("R_out", "one_hot")
+
+
+def test_an_arm_without_a_protocol_or_preset_is_refused_never_run_as_plain_r_out():
+    from surogate_bilingual.eval.models import ARMS, ArmError, arm_routing
+    from surogate_bilingual.registry.matrix import MISSING_PROTOCOL, ROW_IDS
+
+    assert set(ARMS) | set(MISSING_PROTOCOL) == set(ROW_IDS) and not set(ARMS) & set(MISSING_PROTOCOL)
+    for arm in ("RtS", "B9-II+aff", "B3d", "T4"):
+        with pytest.raises(ArmError, match="no evaluation protocol"):
+            arm_routing(arm)
+    for typo in ("B4-random", "t2", ""):
+        with pytest.raises(ArmError, match="needs its routing given explicitly"):
+            arm_routing(typo)
+    free, preset = arm_routing("my-probe", route="R_wrong")
+    assert free.route == "R_wrong" and preset == {}
+    for arm in ("T3'", "T3''"):
+        assert arm_routing(arm)[0].answer_route == "t3"
+    assert arm_routing("T1'")[1]["needs_direction"] and arm_routing("T1'")[0].answer_route is None
+
+
+def test_eval_tasks_needs_a_direction_for_t1p_and_a_grid_lambda_for_merges(
+    tiny_assemblies, item_maker, tmp_path, capsys
+):
+    items = [
+        item_maker(i, "E1", [("zh", "question", f"z{i} z2")], ["z3", "z4"], 0, direction="zh>zh") for i in range(2)
+    ]
+    items.append(item_maker(5, "E1", [("en", "question", "e1 e2")], ["e3", "e4"], 0, direction="en>en"))
+    path = _write_items(tmp_path / "items.jsonl", items)
+    base = ["--model", str(tiny_assemblies["zh_en"]), "--items", str(path), "--n-boot", "20"]
+    capsys.readouterr()
+    assert score.main([*base, "--arm", "T1'", "--out", str(tmp_path / "t1p"), "--dry-run"]) == 1
+    assert "--direction" in capsys.readouterr().err
+    out = tmp_path / "t1p-zh"
+    assert score.main([*base, "--arm", "T1'", "--direction", "zh>zh", "--out", str(out)]) == 0
+    preds = [json.loads(x) for x in (out / "predictions.jsonl").read_text().splitlines()]
+    assert len(preds) == 2 and {p["direction"] for p in preds} == {"zh>zh"}
+    assert json.loads((out / "results.json").read_text())["direction"] == "zh>zh"
+    assert score.main([*base, "--arm", "B3b", "--out", str(tmp_path / "b3b"), "--dry-run"]) == 1
+    assert "needs --lam" in capsys.readouterr().err
+    assert score.main([*base, "--arm", "B3b", "--lam", "0.5", "--out", str(tmp_path / "b3b"), "--dry-run"]) == 1
+    assert "not a point of the grid" in capsys.readouterr().err
+    assert score.main([*base, "--arm", "B3b", "--lam", "0.6", "--out", str(tmp_path / "b3b")]) == 0
+    doc = json.loads((tmp_path / "b3b" / "results.json").read_text())
+    assert doc["model"]["merge"]["lam"] == 0.6 and doc["model"]["merge"]["on_grid"] is True
+    assert score.main([*base, "--arm", "RtS", "--out", str(tmp_path / "rts"), "--dry-run"]) == 1
+    assert "no evaluation protocol" in capsys.readouterr().err

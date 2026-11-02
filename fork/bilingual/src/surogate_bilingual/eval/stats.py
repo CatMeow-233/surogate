@@ -13,6 +13,10 @@ is fully rejected its alpha moves to the other branch (edges H_A -> H_B, H_B -> 
 "Rejected" in the graph means p <= the hypothesis's current alpha; the three-way decision (superior / equivalent /
 inconclusive) is reported on top of it and also needs the point estimate to reach the SESOI.
 
+Splits: `confirm` uses test predictions only (and dev predictions only for the H_B precondition); `pilot` and
+`futility` use dev predictions only. Records of another split in the same files are left out and counted in the
+output's `inputs`, never pooled (MS §9.2: tune on dev, test once).
+
 Command line: `python -m surogate_bilingual stats {power,pilot,futility,confirm} ...` (see `main`).
 """
 
@@ -175,6 +179,16 @@ def paired_t_one_sided(diffs: Sequence[float], margin: float = 0.0) -> TResult:
     return TResult(n, mean, sd, se, t, n - 1, p, margin)
 
 
+def t_json(r: TResult) -> dict[str, Any]:
+    """A TResult as JSON: a zero-spread sample has an infinite t, recorded as null with `zero_spread` true (canonical
+    JSON has no infinities)."""
+    out = asdict(r)
+    out["zero_spread"] = r.se == 0.0
+    if not math.isfinite(out["t"]):
+        out["t"] = None
+    return out
+
+
 def tost(diffs: Sequence[float], margin: float, alpha: float) -> bool:
     """Two one-sided tests: True when the (1 - 2 alpha) interval of the mean lies inside (-margin, margin)."""
     if margin <= 0:
@@ -190,13 +204,14 @@ DECISIONS = ("superior", "equivalent", "inconclusive")
 def decide(diffs: Sequence[float], alpha: float, sesoi: float) -> dict[str, Any]:
     """The three-way decision of MS §9.3: superior when p <= alpha and the estimate >= SESOI; equivalent when TOST
     holds at +-SESOI with the matching alpha; inconclusive otherwise."""
+    superior, equivalent, inconclusive = DECISIONS
     r = paired_t_one_sided(diffs)
     if r.p <= alpha and r.mean >= sesoi:
-        decision = "superior"
+        decision = superior
     elif tost(diffs, sesoi, alpha):
-        decision = "equivalent"
+        decision = equivalent
     else:
-        decision = "inconclusive"
+        decision = inconclusive
     lo, hi = r.ci(alpha)
     return {
         "decision": decision,
@@ -349,7 +364,7 @@ def power_paired_t(sd: float, delta: float, alpha: float, R: int, sims: int = 0,
         return float((t > crit).mean())
     ncp = delta * math.sqrt(R) / sd
     u, w = _chi_weights(df)
-    phi = 0.5 * np.vectorize(math.erfc)(-(ncp - crit * u / math.sqrt(df)) / math.sqrt(2.0))
+    phi = np.vectorize(norm_cdf)(ncp - crit * u / math.sqrt(df))
     return float(np.clip((w * phi).sum(), 0.0, 1.0))
 
 
@@ -460,6 +475,63 @@ def read_predictions(paths: Iterable[Path]) -> list[dict[str, Any]]:
     return out
 
 
+def select_split(preds: Iterable[Mapping[str, Any]], split: str, what: str) -> tuple[list[dict[str, Any]], dict]:
+    """(the records of `split`, {"split", "kept", "ignored": {other split: count}}). Records of other splits are left
+    out, never pooled: tuning data (dev) must not enter the confirmatory test (MS §9.2, §9.7), and test data must
+    not enter a dev decision. A record without a split, or no record of `split` at all, is an error."""
+    kept, ignored = [], defaultdict(int)
+    for p in preds:
+        if p.get("split") is None:
+            raise ValueError(f"{what}: a record of {p.get('arm')!r} / {p.get('item_id')!r} has no split")
+        if p["split"] == split:
+            kept.append(dict(p))
+        else:
+            ignored[p["split"]] += 1
+    if not kept:
+        raise ValueError(f"{what}: no {split} records (found {dict(ignored) or 'none'})")
+    return kept, {"split": split, "kept": len(kept), "ignored": dict(sorted(ignored.items()))}
+
+
+NLL_FORMAT = "bilingual-nll/1"
+
+
+def read_nll(paths: Iterable[Path]) -> list[dict[str, Any]]:
+    """Every `bilingual-nll/1` document of the given files (or of *.nll.json under the given directories)."""
+    out = []
+    for path in paths:
+        path = Path(path)
+        for f in sorted(path.rglob("*.nll.json")) if path.is_dir() else [path]:
+            doc = json.loads(f.read_text("utf-8"))
+            if doc.get("format") != NLL_FORMAT:
+                raise ValueError(f"{f}: not a {NLL_FORMAT} document: {doc.get('format')!r}")
+            out.append({**doc, "_path": str(f)})
+    return out
+
+
+def column_bpb(doc: Mapping[str, Any], lang: str) -> float | None:
+    """The BPB of evaluation language `lang` on that language's own expert (the cell R_out uses on a monolingual
+    document): one column of the 2x2 matrix, compared only with the same column of another arm (MS §6.1)."""
+    matrix = doc["matrix"]
+    if lang not in matrix["rows"] or lang not in matrix["cols"]:
+        return None
+    return matrix["bpb"][matrix["rows"].index(lang)][matrix["cols"].index(lang)]
+
+
+def bpb_diffs(nll_docs: Iterable[Mapping[str, Any]], treatment: str, control: str, lang: str) -> dict[int, float]:
+    """{replicate: BPB(control) - BPB(treatment)} in column `lang`; positive means the treatment is better."""
+    by: dict[tuple[str, int], float] = {}
+    for doc in nll_docs:
+        arm, rep = doc.get("arm"), doc.get("replicate")
+        value = column_bpb(doc, lang) if arm in (treatment, control) and rep is not None else None
+        if value is not None:
+            key = (arm, int(rep))
+            if key in by:
+                raise ValueError(f"two NLL documents of arm {arm} replicate {rep} (one per arm and replicate)")
+            by[key] = float(value)
+    reps = sorted({r for a, r in by if a == treatment} & {r for a, r in by if a == control})
+    return {r: by[(control, r)] - by[(treatment, r)] for r in reps}
+
+
 def endpoint_of(pred: Mapping[str, Any]) -> str:
     return f"{pred['family']}/{pred['variant']}"
 
@@ -488,7 +560,8 @@ def replicate_diffs(preds, treatment: str, control: str, endpoint: str, value: s
     return out
 
 
-# MS §9.3: the confirmatory hypotheses. H_C is an intersection-union test: the gain AND every non-inferiority part.
+# MS §9.3: the confirmatory hypotheses. H_C is an intersection-union test: the gain AND every non-inferiority part
+# (MS §9.1: E1 accuracy, and BPB within one column of the 2x2 matrix, here each language's column).
 HYPOTHESES = {
     "H_A": {"treatment": "B9-II", "control": "B4-II", "endpoint": "E3ctx/cross", "value": "correct"},
     "H_B": {"treatment": "B8", "control": "B9-II", "endpoint": "E3ctx/cross", "value": "correct"},
@@ -499,19 +572,28 @@ HYPOTHESES = {
         "value": "slot_acc",
         "noninferior": [
             {
+                "kind": "accuracy",
                 "treatment": "T2",
                 "control": "T0",
                 "endpoint": "E1/qa",
                 "value": "correct",
                 "margin": NONINFERIORITY["E1"],
-            }
+            },
+            *(
+                {"kind": "bpb", "treatment": "T2", "control": "T0", "lang": lang, "margin": NONINFERIORITY["bpb"]}
+                for lang in ("zh", "en")
+            ),
         ],
     },
 }
 
 
-def confirmatory(preds, dev_preds=None, sesoi: Mapping[str, float] = SESOI, graph: Graph = MS_GRAPH) -> dict:
-    """Run-level tests of H_A, H_B, H_C, the H_B precondition on dev, the gatekeeper and the three-way decisions."""
+def confirmatory(preds, dev_preds=None, nll=None, sesoi: Mapping[str, float] = SESOI, graph: Graph = MS_GRAPH) -> dict:
+    """Run-level tests of H_A, H_B, H_C, the H_B precondition on dev, the gatekeeper and the three-way decisions.
+
+    `preds` are test predictions, `dev_preds` dev predictions (the H_B precondition) and `nll` the test eval-nll
+    documents of the H_C BPB parts; select them by split first (`select_split`). A part without data makes its
+    hypothesis untestable (p = 1): an intersection-union test with a missing part would be anti-conservative."""
     report: dict[str, Any] = {"hypotheses": {}}
     pvalues = {}
     for h, spec in HYPOTHESES.items():
@@ -528,7 +610,7 @@ def confirmatory(preds, dev_preds=None, sesoi: Mapping[str, float] = SESOI, grap
             continue
         r = paired_t_one_sided(list(diffs.values()))
         p = r.p
-        entry["t_test"] = asdict(r)
+        entry["t_test"] = t_json(r)
         if h == "H_B":
             pre = None
             if dev_preds is not None:
@@ -545,15 +627,24 @@ def confirmatory(preds, dev_preds=None, sesoi: Mapping[str, float] = SESOI, grap
                 entry["status"] = "untestable at this divergence level (MS §9.3)"
                 p = 1.0
         for part in spec.get("noninferior", []):
-            d = replicate_diffs(preds, part["treatment"], part["control"], part["endpoint"], part["value"])
+            if part["kind"] == "bpb":
+                d = bpb_diffs(nll or [], part["treatment"], part["control"], part["lang"])
+                missing = "test eval-nll documents (--nll) of both arms"
+            else:
+                d = replicate_diffs(preds, part["treatment"], part["control"], part["endpoint"], part["value"])
+                missing = "test predictions of both arms"
+            part = {**part, "replicates": {str(r): x for r, x in d.items()}}
             if len(d) < 2:
                 p = 1.0
-                part = {**part, "status": "not testable"}
+                part["status"] = f"not testable: {len(d)} replicate(s) with {missing}"
+                entry["status"] = "not testable: a non-inferiority part has no data (intersection-union test)"
             else:
                 nr = paired_t_one_sided(list(d.values()), margin=part["margin"])
                 p = max(p, nr.p)
-                part = {**part, "t_test": asdict(nr)}
+                part["t_test"] = t_json(nr)
             entry.setdefault("noninferior", []).append(part)
+        if "status" in entry:
+            p = 1.0
         entry["p"] = p
         pvalues[h] = p
         report["hypotheses"][h] = entry
@@ -564,11 +655,11 @@ def confirmatory(preds, dev_preds=None, sesoi: Mapping[str, float] = SESOI, grap
         if "t_test" in entry and "status" not in entry:
             diffs = list(entry["replicates"].values())
             three = decide(diffs, dec.alpha if dec.alpha > 0 else ALPHA_BRANCH, sesoi[h])
-            if three["decision"] == "superior" and not dec.rejected:
-                three["decision"] = "inconclusive"  # an H the graph never gave alpha cannot be declared superior
+            if three["decision"] == DECISIONS[0] and not dec.rejected:
+                three["decision"] = DECISIONS[2]  # an H the graph never gave alpha cannot be declared superior
             entry["decision"] = three
         else:
-            entry["decision"] = {"decision": "inconclusive", "reason": entry.get("status")}
+            entry["decision"] = {"decision": DECISIONS[2], "reason": entry.get("status")}
     report["graph"] = {"alpha": graph.alpha, "edges": graph.edges}
     return report
 
@@ -583,6 +674,26 @@ def _write(doc: Mapping[str, Any], out: Path | None, dry_run: bool) -> None:
     if out is not None and not dry_run:
         atomic_write_json(out, doc)
     print(text)
+
+
+def item_nuisance(preds, treatment: str, control: str, endpoint: str) -> dict[str, Any]:
+    """MS §9.3 pilot nuisance parameters beyond the replicate SD, per replicate then averaged: the item variance of the
+    per-item difference (the input of the McNemar-style item count of MS §9.5) and the divergence size, the mean
+    absolute difference of the two arms' continuous gold margins on the common items."""
+    t, c = correctness(preds, treatment, endpoint), correctness(preds, control, endpoint)
+    tm, cm = correctness(preds, treatment, endpoint, "margin"), correctness(preds, control, endpoint, "margin")
+    var, div = [], []
+    for r in sorted(set(t) & set(c)):
+        common = sorted(set(t[r]) & set(c[r]))
+        if len(common) >= 2:
+            var.append(float(np.var([t[r][i] - c[r][i] for i in common], ddof=1)))
+        both = sorted(set(tm.get(r, {})) & set(cm.get(r, {})))
+        if both:
+            div.append(float(np.mean([abs(tm[r][i] - cm[r][i]) for i in both])))
+    return {
+        "item_diff_variance": float(np.mean(var)) if var else None,
+        "margin_divergence": float(np.mean(div)) if div else None,
+    }
 
 
 def _arm_accuracy(preds, arms: Sequence[str], endpoint: str) -> dict[str, list[float]]:
@@ -611,8 +722,9 @@ def main(argv: Sequence[str]) -> int:
     fu.add_argument("--replicate", type=int, default=0)
     fu.add_argument("--endpoint", default="E3ctx/cross")
     co = sub.add_parser("confirm", help="H_A, H_B, H_C with the MS §9.3 gatekeeper (test predictions)")
-    co.add_argument("--pred", type=Path, nargs="+", required=True)
-    co.add_argument("--dev-pred", type=Path, nargs="+", help="dev predictions for the H_B discordance precondition")
+    co.add_argument("--pred", type=Path, nargs="+", required=True, help="predictions; only split test is used")
+    co.add_argument("--dev-pred", type=Path, nargs="+", help="predictions for the H_B precondition; split dev only")
+    co.add_argument("--nll", type=Path, nargs="+", help="eval-nll documents of T2 and T0 (H_C BPB); split test only")
     for p in (pw, pi, fu, co):
         p.add_argument("--out", type=Path)
         p.add_argument("--dry-run", action="store_true", help="read the inputs and print; write nothing")
@@ -621,12 +733,13 @@ def main(argv: Sequence[str]) -> int:
         if args.cmd == "power":
             doc = {"format": STATS_FORMAT, "kind": "power", **replicate_rule(args.sd, args.sesoi, args.alpha)}
         elif args.cmd == "pilot":
-            preds = read_predictions(args.pred)
+            preds, inputs = select_split(read_predictions(args.pred), "dev", "stats pilot")
             acc = _arm_accuracy(preds, args.arms.split(","), args.endpoint)
             doc = {
                 "format": STATS_FORMAT,
                 "kind": "pilot",
                 "endpoint": args.endpoint,
+                "inputs": inputs,
                 "gate": pilot_gate(acc) if acc else None,
                 "nuisance": {},
             }
@@ -640,21 +753,34 @@ def main(argv: Sequence[str]) -> int:
                     "per_replicate_diff": {str(k): v for k, v in diffs.items()},
                     "between_replicate_sd": sd,
                     "discordance": float(np.mean(disc)) if disc else None,
+                    **item_nuisance(preds, t, c, args.endpoint),
                     "replicate_rule": replicate_rule(sd, SESOI["H_A"]) if sd else None,
                 }
         elif args.cmd == "futility":
-            preds = read_predictions(args.pred)
+            preds, inputs = select_split(read_predictions(args.pred), "dev", "stats futility")
             d12 = replicate_diffs(preds, "B12a", "B4", args.endpoint).get(args.replicate)
             d6 = replicate_diffs(preds, "B6", "B4", args.endpoint).get(args.replicate)
             if d12 is None or d6 is None:
                 raise ValueError(
                     f"futility needs B12a, B6 and B4 predictions of replicate {args.replicate} on {args.endpoint}"
                 )
-            doc = {"format": STATS_FORMAT, "kind": "futility", "replicate": args.replicate, **futility(d12, d6)}
+            doc = {
+                "format": STATS_FORMAT,
+                "kind": "futility",
+                "replicate": args.replicate,
+                "inputs": inputs,
+                **futility(d12, d6),
+            }
         else:
-            preds = read_predictions(args.pred)
-            dev = read_predictions(args.dev_pred) if args.dev_pred else None
-            doc = {"format": STATS_FORMAT, "kind": "confirm", **confirmatory(preds, dev)}
+            preds, inputs = select_split(read_predictions(args.pred), "test", "stats confirm --pred")
+            dev = nll = None
+            if args.dev_pred:
+                dev, inputs["dev_pred"] = select_split(
+                    read_predictions(args.dev_pred), "dev", "stats confirm --dev-pred"
+                )
+            if args.nll:
+                nll, inputs["nll"] = select_split(read_nll(args.nll), "test", "stats confirm --nll")
+            doc = {"format": STATS_FORMAT, "kind": "confirm", "inputs": inputs, **confirmatory(preds, dev, nll)}
     except (OSError, ValueError, KeyError) as exc:
         print(f"stats: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1

@@ -10,7 +10,8 @@ its own and the record says so (`boundary_merge`).
 Plans (`item_plan`) come from segment metadata through `routing.policies`: the prompt segments and one answer
 segment of the longest candidate (or the generation budget) get their routes from the routing policy before the
 answer starts (route causality, MS §5.4); then the gate policy of a dual arm applies. `answer_route` sends the answer
-segment to a named expert (the Bridge arm T2 under variant (c): source on the source expert, target on the Bridge).
+segments of translation items (E4) to a named expert (the Bridge arm T2 under variant (c): source on the source
+expert, target on the Bridge); other items route as without it.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ import numpy as np
 import torch
 
 from ..canonical import canonical_json, check_format, sha256_bytes, sha256_file, sha256_json
+from ..config import DEFAULTS
 from ..data.tokenizer import encode_user_text
 from ..routing.plan import PlanError, RoutePlan
 from ..routing.policies import ROUTE_POLICIES, apply_gate_policy, plan_from_segments, segment_routes
@@ -43,6 +45,7 @@ def load_items(
     *,
     family: str | None = None,
     variant: str | None = None,
+    direction: str | None = None,
     split: str | None = None,
     limit: int | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
@@ -61,7 +64,7 @@ def load_items(
                 raise ItemError(f"{path}:{number}: {exc}") from None
             if family and item["family"] != family or variant and item["variant"] != variant:
                 continue
-            if split and item["split"] != split:
+            if split and item["split"] != split or direction and item["direction"] != direction:
                 continue
             items.append(item)
     if limit is not None:
@@ -121,18 +124,32 @@ def item_rng(seed: int, item_id: str) -> np.random.Generator:
     return np.random.default_rng([int(seed), zlib.crc32(item_id.encode("utf-8"))])
 
 
+TRANSLATION_FAMILIES = ("E4",)  # the items whose answers an answer route (the Bridge, T3', T3'') takes over
+_ROUTING = DEFAULTS["routing"]
+
+
 @dataclass(frozen=True)
 class Routing:
-    """How an arm routes: a routing policy (None for a single-expert model), a gate policy and its parameters."""
+    """How an arm routes: a routing policy (None for a single-expert model), a gate policy and its parameters (the
+    defaults of g and window are DEFAULTS["routing"], B-O5).
+
+    `answer_route` sends the answer segments of translation items (E4) to a named expert: the Bridge under variant
+    (c) (source on the source expert, instruction and target routed by R_out, the target answer on the Bridge). On
+    every other item the arm routes exactly as without it, so a T arm on E1/E2/E3 is T0 by construction (MS §7.3,
+    §8.4: the monolingual retention of T2 holds when routing is correct)."""
 
     route: str | None = "R_out"
     gate: str = "one_hot"
-    g: tuple[float, float] = (0.5, 0.5)
-    window: int = 32
+    g: tuple[float, float] = tuple(_ROUTING["g"])
+    window: int = _ROUTING["window"]
     answer_route: str | None = None
     rng_seed: int = 0
 
-    def label(self) -> tuple[str, str]:
+    def routes_answers(self, item: Mapping[str, Any] | None) -> bool:
+        """True when the answer route applies to `item` (None: the arm's label, whatever the item)."""
+        return bool(self.answer_route) and (item is None or item.get("family") in TRANSLATION_FAMILIES)
+
+    def label(self, item: Mapping[str, Any] | None = None) -> tuple[str, str]:
         gate = (
             self.gate
             if self.gate == "one_hot"
@@ -140,8 +157,8 @@ class Routing:
             + (f",w={self.window})" if self.gate == "dual_window" else ")")
         )
         route = self.route or "single"
-        if self.answer_route:
-            route += f"+answer>{self.answer_route}"
+        if self.routes_answers(item):
+            route += f"+answer>{self.answer_route}" + ("" if item is not None else "(E4)")
         return route, gate
 
 
@@ -176,13 +193,14 @@ def item_plan(
         return item_rng(routing.rng_seed, item["id"]) if routing.route == "R_random" else None
 
     wanted = set(segment_routes(meta, routing.route, knowledge_source=source, rng=rng()))
-    if routing.answer_route:
+    answers = routing.routes_answers(item)
+    if answers:
         wanted.add(routing.answer_route)
     missing = sorted(wanted - set(names))
     if missing:
         raise SkipItem(f"missing expert {missing} (the model has {tuple(names)})")
     plan = plan_from_segments(meta, names, routing.route, knowledge_source=source, rng=rng())
-    if routing.answer_route:  # every answer segment (earlier stages included) and the new answer
+    if answers:  # every answer segment of a translation item (earlier stages included) and the new answer
         gates = plan.gates.clone()
         target = list(names).index(routing.answer_route)
         start = 0

@@ -159,7 +159,7 @@ def test_bench_command_refuses_without_cuda_and_runs_on_an_explicit_cpu(tmp_path
     assert bench.main([*grid, "--seq", "64"]) == 1  # beyond the tiny max_seq
 
 
-def _preds(arm, rep, correct, endpoint=("E3ctx", "cross"), value="correct"):
+def _preds(arm, rep, correct, endpoint=("E3ctx", "cross"), value="correct", split="dev"):
     fam, var = endpoint
     return [
         {
@@ -169,10 +169,12 @@ def _preds(arm, rep, correct, endpoint=("E3ctx", "cross"), value="correct"):
             "family": fam,
             "variant": var,
             "direction": "zh>en>zh",
+            "split": split,
             "item_id": f"i{k}",
             "skip_reason": None,
-            value: bool(c),
+            value: float(c) if value != "correct" else bool(c),
             "correct": bool(c),
+            "margin": float(c) - 0.5,
         }
         for k, c in enumerate(correct)
     ]
@@ -194,7 +196,11 @@ def test_stats_command_pilot_futility_power_and_confirm(tmp_path, capsys):
     assert stats.main(["pilot", "--pred", str(path), "--out", str(out)]) == 0
     pilot = json.loads(out.read_text())
     assert pilot["gate"]["best"] == "B12a" and pilot["gate"]["passed"]
-    assert pilot["nuisance"]["B12a:B4"]["between_replicate_sd"] > 0
+    nuisance = pilot["nuisance"]["B12a:B4"]
+    assert nuisance["between_replicate_sd"] > 0 and 0 < nuisance["discordance"] < 1
+    assert nuisance["item_diff_variance"] > 0 and nuisance["margin_divergence"] == pytest.approx(
+        nuisance["discordance"]
+    )
     fut = tmp_path / "futility_r0.json"
     assert stats.main(["futility", "--pred", str(path), "--out", str(fut)]) == 0
     assert json.loads(fut.read_text())["decision"] in ("continue", "futility stop: branch 1 not tested")
@@ -204,14 +210,100 @@ def test_stats_command_pilot_futility_power_and_confirm(tmp_path, capsys):
     for r in range(4):
         base = rng.random(400) < 0.4
         better = base | (rng.random(400) < 0.2)
-        test_preds += _preds("B4-II", r, list(base)) + _preds("B9-II", r, list(better)) + _preds("B8", r, list(better))
+        for arm, c in (("B4-II", base), ("B9-II", better), ("B8", better)):
+            test_preds += _preds(arm, r, list(c), split="test")
     tp = _write(tmp_path / "test.jsonl", test_preds)
+    dp = _write(tmp_path / "dev_b.jsonl", [dict(p, split="dev") for p in test_preds])
     conf = tmp_path / "confirm.json"
-    assert stats.main(["confirm", "--pred", str(tp), "--dev-pred", str(tp), "--out", str(conf)]) == 0
-    doc = json.loads(conf.read_text())["hypotheses"]
+    assert stats.main(["confirm", "--pred", str(tp), "--dev-pred", str(dp), "--out", str(conf)]) == 0
+    full = json.loads(conf.read_text())
+    doc = full["hypotheses"]
+    assert full["inputs"]["kept"] == len(test_preds) and full["inputs"]["dev_pred"]["kept"] == len(test_preds)
     assert doc["H_A"]["gatekeeper"]["rejected"] and doc["H_A"]["decision"]["decision"] == "superior"
     assert doc["H_B"]["precondition"]["met"] is False  # identical predictions: no discordance
     assert doc["H_B"]["decision"]["decision"] == "inconclusive" and "untestable" in doc["H_B"]["status"]
     assert "not testable" in doc["H_C"]["status"]
     capsys.readouterr()
-    assert stats.main(["futility", "--pred", str(tp)]) == 1  # no B12a / B6 predictions
+    assert stats.main(["futility", "--pred", str(dp)]) == 1  # no B12a / B6 predictions
+    assert stats.main(["futility", "--pred", str(tp)]) == 1  # test predictions never decide on dev
+    assert "no dev records" in capsys.readouterr().err
+    assert stats.main(["confirm", "--pred", str(dp)]) == 1  # dev predictions never enter the confirmatory test
+
+
+def test_confirm_never_pools_dev_into_the_test_and_the_dev_precondition_never_reads_test(tmp_path):
+    """The review's probe: one tree holds dev and test predictions of the same arms (runbook: data/runs/_eval/main).
+    Test differences are 0 in every replicate, dev differences 1; confirm must see 0, never 0.5."""
+    preds = []
+    for r in range(3):
+        preds += _preds("B4-II", r, [False] * 50, split="test") + _preds("B9-II", r, [False] * 50, split="test")
+        preds += _preds("B4-II", r, [False] * 50, split="dev") + _preds("B9-II", r, [True] * 50, split="dev")
+    tree = tmp_path / "main" / "r0"
+    tree.mkdir(parents=True)
+    _write(tree / "predictions.jsonl", preds)
+    out = tmp_path / "confirm.json"
+    assert (
+        stats.main(
+            ["confirm", "--pred", str(tmp_path / "main"), "--dev-pred", str(tmp_path / "main"), "--out", str(out)]
+        )
+        == 0
+    )
+    doc = json.loads(out.read_text())
+    assert doc["hypotheses"]["H_A"]["replicates"] == {"0": 0.0, "1": 0.0, "2": 0.0}
+    assert doc["hypotheses"]["H_A"]["p"] == 1.0
+    assert doc["inputs"]["ignored"] == {"dev": len(preds) // 2} and doc["inputs"]["dev_pred"]["ignored"] == {
+        "test": len(preds) // 2
+    }
+    with pytest.raises(ValueError, match="has no split"):
+        stats.select_split([{"arm": "B4", "item_id": "x"}], "test", "probe")
+
+
+def _nll_doc(arm, rep, zh, en, split="test"):
+    return {
+        "format": "bilingual-nll/1",
+        "arm": arm,
+        "replicate": rep,
+        "split": split,
+        "matrix": {"rows": ["zh", "en", "bridge"], "cols": ["zh", "en"], "bpb": [[zh, 9.0], [9.0, en], [9.0, 9.0]]},
+    }
+
+
+def test_h_c_is_an_intersection_union_test_with_its_bpb_parts(tmp_path):
+    """H_C (MS §9.1, §9.3): the E4 gain AND E1 non-inferiority AND BPB non-inferiority in each language column.
+    Without the eval-nll documents the BPB parts have no data and H_C is untestable (p = 1), never tested on a
+    subset of its parts."""
+    rng = np.random.default_rng(5)
+    preds = []
+    for r in range(4):
+        gain = rng.random(300) < 0.6
+        preds += _preds("T1'", r, list(gain & (rng.random(300) < 0.5)), ("E4", "translate"), "slot_acc", "test")
+        preds += _preds("T2", r, list(gain), ("E4", "translate"), "slot_acc", "test")
+        e1 = rng.random(300) < 0.5
+        preds += _preds("T0", r, list(e1), ("E1", "qa"), split="test") + _preds(
+            "T2", r, list(e1), ("E1", "qa"), split="test"
+        )
+    tp = _write(tmp_path / "test.jsonl", preds)
+    without = stats.confirmatory(stats.select_split(stats.read_predictions([tp]), "test", "t")[0])["hypotheses"]["H_C"]
+    assert without["p"] == 1.0 and "not testable" in without["status"]
+    parts = {p.get("lang", p["kind"]): p for p in without["noninferior"]}
+    assert set(parts) == {"accuracy", "zh", "en"} and "t_test" in parts["accuracy"] and "status" in parts["zh"]
+    # the BPB parts: T2 equals T0 in both columns (frozen ZH/EN, correct routing), one document per arm and replicate
+    nll_dir = tmp_path / "nll"
+    nll_dir.mkdir()
+    for r in range(4):
+        for arm in ("T0", "T2"):
+            (nll_dir / f"{arm}-r{r}.nll.json").write_text(json.dumps(_nll_doc(arm, r, 1.20 + r / 100, 1.05)))
+    (nll_dir / "dev.nll.json").write_text(json.dumps(_nll_doc("T2", 0, 5.0, 5.0, split="dev")))  # ignored: dev
+    out = tmp_path / "confirm.json"
+    assert stats.main(["confirm", "--pred", str(tp), "--nll", str(nll_dir), "--out", str(out)]) == 0
+    doc = json.loads(out.read_text())
+    h_c = doc["hypotheses"]["H_C"]
+    assert doc["inputs"]["nll"] == {"split": "test", "kept": 8, "ignored": {"dev": 1}}
+    assert "status" not in h_c and h_c["p"] < 1.0
+    bpb = [p for p in h_c["noninferior"] if p["kind"] == "bpb"]
+    assert [p["lang"] for p in bpb] == ["zh", "en"] and all(p["t_test"]["p"] == 0.0 for p in bpb)
+    assert all(v == 0.0 for p in bpb for v in p["replicates"].values())
+    # a BPB increase beyond the margin in one column makes H_C fail its intersection-union test
+    for r in range(4):
+        (nll_dir / f"T2-r{r}.nll.json").write_text(json.dumps(_nll_doc("T2", r, 1.30 + r / 100, 1.05)))
+    assert stats.main(["confirm", "--pred", str(tp), "--nll", str(nll_dir), "--out", str(out)]) == 0
+    assert json.loads(out.read_text())["hypotheses"]["H_C"]["p"] == 1.0

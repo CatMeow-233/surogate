@@ -136,12 +136,12 @@ def main(argv: Sequence[str]) -> int:
     ap.add_argument("--out", type=Path)
     ap.add_argument("--dry-run", action="store_true", help="load and verify the model and the items; run nothing")
     args = ap.parse_args(list(argv))
+    from ..devices import resolve_device
     from .items import items_sha256
     from .models import load_model
-    from .score import _device
 
     try:
-        ev = load_model(args.model, device=_device(args.device))
+        ev = load_model(args.model, device=resolve_device(args.device))
         items, files = load_items(args.items, family="E4", split=args.split, limit=args.limit)
         if any(i["split"] == "test" for i in items) and not args.allow_test:
             raise ValueError("test items are evaluated only after the preregistration lock (MS §9.7): --allow-test")
