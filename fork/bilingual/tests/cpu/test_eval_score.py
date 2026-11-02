@@ -364,3 +364,5 @@ def test_eval_tasks_needs_a_direction_for_t1p_and_a_grid_lambda_for_merges(
     assert doc["model"]["merge"]["lam"] == 0.6 and doc["model"]["merge"]["on_grid"] is True
     assert score.main([*base, "--arm", "RtS", "--out", str(tmp_path / "rts"), "--dry-run"]) == 1
     assert "no evaluation protocol" in capsys.readouterr().err
+    assert score.main([*base, "--arm", "B4", "--row", "RtS", "--out", str(tmp_path / "rts"), "--dry-run"]) == 1
+    assert "--row RtS: no evaluation protocol" in capsys.readouterr().err

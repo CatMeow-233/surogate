@@ -488,6 +488,10 @@ def run(args) -> dict[str, Any]:
         answer_route=args.answer_route,
         rng_seed=args.rng_seed,
     )
+    from ..registry.matrix import MISSING_PROTOCOL
+
+    if args.row in MISSING_PROTOCOL:  # results filed under a row that P0 cannot evaluate would read as that row's
+        raise ValueError(f"--row {args.row}: no evaluation protocol in P0: {MISSING_PROTOCOL[args.row]}")
     if preset.get("needs_direction") and not args.direction:
         raise ValueError(
             f"arm {args.arm} evaluates one assembly per direction (the T1' copy in its target slot): give --direction"
