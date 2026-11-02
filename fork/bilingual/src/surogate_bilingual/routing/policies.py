@@ -14,6 +14,11 @@ Routing policies (one-hot plans):
 - `R_wrong`: the R_out route with zh and en swapped, on every segment.
 - `R_random`: each segment draws zh or en uniformly from `rng` (one draw per segment, in segment order).
 
+Training plans (`plan_from_route_ids`): a training window carries the per-token route ids its shard stores
+(indices into the shard's `route_names`, 255 = unset); a recipe maps shard route names to the model's experts
+(Bridge (c): zh -> zh, en -> en, bridge -> bridge; T1' zh>en: zh -> zh, bridge -> en). A route id the mapping does
+not name, or an unset one, is refused rather than guessed.
+
 Gate policies (`apply_gate_policy`) turn a one-hot plan over a language pair into the plan a dual arm uses:
 `one_hot` keeps it, `dual_const` gives every token the gates g on the pair, and `dual_window` gives g only to the
 `window` tokens that start at each route switch.
@@ -21,7 +26,7 @@ Gate policies (`apply_gate_policy`) turn a one-hot plan over a language pair int
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import numpy as np
 import torch
@@ -131,3 +136,39 @@ def apply_gate_policy(
     out = RoutePlan(plan.names, gates, label)
     out.validate()
     return out
+
+
+UNSET_ROUTE = 255  # the shard's "no route" id (data.shards.UNSET_ROUTE)
+
+
+def route_lut(route_names: Sequence[str], mapping: Mapping[str, str], names: Sequence[str]) -> np.ndarray:
+    """A 256-entry table from shard route id to expert index in `names`; -1 where the mapping says nothing."""
+    names = list(names)
+    unknown = sorted(set(mapping) - set(route_names))
+    if unknown:
+        raise PlanError(f"the route mapping names shard routes {unknown} the shard does not have: {list(route_names)}")
+    targets = sorted(set(mapping.values()) - set(names))
+    if targets:
+        raise PlanError(f"the route mapping sends tokens to {targets}, which are not experts of {tuple(names)}")
+    lut = np.full(UNSET_ROUTE + 1, -1, dtype=np.int64)
+    for i, route in enumerate(route_names):
+        if route in mapping:
+            lut[i] = names.index(mapping[route])
+    return lut
+
+
+def plan_from_route_ids(
+    route_ids, route_names: Sequence[str], names: Sequence[str], mapping: Mapping[str, str], policy: str
+) -> RoutePlan:
+    """A one-hot [B, T, E] plan from shard route ids [B, T] through `mapping` (shard route name -> expert)."""
+    ids = np.asarray(route_ids, dtype=np.int64)
+    if ids.ndim != 2 or (ids.size and (ids.min() < 0 or ids.max() > UNSET_ROUTE)):
+        raise PlanError(f"route ids must be a [B, T] array of shard route ids, got shape {list(ids.shape)}")
+    experts = route_lut(route_names, mapping, names)[ids]
+    if (experts < 0).any():
+        bad = sorted({int(i) for i in ids[experts < 0]})
+        labels = [route_names[i] if i < len(route_names) else "unset" for i in bad]
+        raise PlanError(f"the window holds shard routes {labels} that policy {policy} does not map to an expert")
+    plan = RoutePlan.one_hot(torch.from_numpy(experts), names, policy)
+    plan.validate()
+    return plan

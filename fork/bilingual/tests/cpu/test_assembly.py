@@ -123,8 +123,16 @@ def test_an_expert_pack_refuses_a_changed_backbone(packs, tmp_path):
         model.backbone.layers[0].attn.q.weight[0, 0] += 1e-3
     with pytest.raises(BackboneMismatchError):
         write_expert_pack(tmp_path / "zh", model, "zh", packs["seed"], {})
+    seed = read_pack(packs["seed"])
     with pytest.raises(ConfigMismatchError):
-        check_extends(read_pack(packs["seed"]), profile("tiny", "swiglu", ffn_width=40))
+        check_extends(seed, profile("tiny", "swiglu", rope_theta=5000.0))
+    # only a family-I expert on every layer may be wider than the seed FFN (B12a, step I5); LP-k keeps the seed FFN
+    # inside the backbone, and family II's readout width k is shared, so neither may change ffn_width
+    check_extends(seed, profile("tiny", "swiglu", ffn_width=96))
+    with pytest.raises(ConfigMismatchError):
+        check_extends(seed, profile("tiny", "swiglu", ffn_width=96, expert_layers=(0,)))
+    with pytest.raises(ConfigMismatchError):
+        check_extends(read_pack(packs["root"] / "seed-slot-1"), profile("tiny", "slot", ffn_width=96))
 
 
 # --- assembly ----------------------------------------------------------------------------------------------------

@@ -263,8 +263,8 @@ def test_command_line_lists_refuses_and_names_the_step(capsys):
     assert all(re.search(rf"^  {re.escape(name)} ", listing, re.MULTILINE) for name in PLANNED_COMMANDS), listing
     assert main(["no-such-command"]) == 2
     assert "unknown command 'no-such-command'" in capsys.readouterr().err
-    assert main(["train", "--dry-run"]) == 2  # lands in I5
-    assert "'train' is not implemented yet; it lands in step I5" in capsys.readouterr().err
+    assert main(["eval-nll", "--dry-run"]) == 2  # lands in I6
+    assert "'eval-nll' is not implemented yet; it lands in step I6" in capsys.readouterr().err
 
 
 # --- repository wiring ---------------------------------------------------------------------------------------------

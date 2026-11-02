@@ -260,7 +260,8 @@ def main(argv: Sequence[str]) -> int:
 
     ap = argparse.ArgumentParser(prog="python -m surogate_bilingual shard", description="write a shard")
     ap.add_argument("--manifest", required=True, type=Path, help="a derived manifest whose files carry their split")
-    ap.add_argument("--split", required=True)
+    ap.add_argument("--split", required=True, help="a split, or several joined by commas (zh_train,en_train for "
+                                                    "the D_zh u D_en shard of B2 and B12a)")  # fmt: skip
     ap.add_argument("--tokenizer", required=True, type=Path)
     ap.add_argument("--route-names", default="zh,en,bridge,seed")
     ap.add_argument("--route", help="default route of every token (e.g. seed for D_seed, zh for D_zh)")
@@ -268,12 +269,21 @@ def main(argv: Sequence[str]) -> int:
     ap.add_argument("--exclude", type=Path, help="bilingual-overlap/1 report; its flagged documents are skipped")
     ap.add_argument("--seed-mix", action="store_true", help="build the D_seed mixture (data.mixture) first")
     ap.add_argument("--mix-seed", type=int, default=0)
+    ap.add_argument("--bridge", action="store_true",
+                    help="parallel documents in the Bridge layout (data.parallel): source on its language's route "
+                         "with loss 0, target on the bridge route; for T2, T3' and T1'")  # fmt: skip
+    ap.add_argument("--direction", choices=["zh>en", "en>zh"], help="with --bridge: keep one direction (T1')")
+    ap.add_argument("--unpair-seed", type=int, help="with --bridge: break every pair with this seed (T3')")
     ap.add_argument("--seq", type=int, default=DEFAULTS["train"]["seq"])
     ap.add_argument("--out", type=Path)
     ap.add_argument("--dry-run", action="store_true", help="read and encode everything; write into a temp dir")
     args = ap.parse_args(list(argv))
     if not args.dry_run and args.out is None:
         ap.error("--out is required unless --dry-run")
+    if (args.direction or args.unpair_seed is not None) and not args.bridge:
+        ap.error("--direction and --unpair-seed apply to --bridge shards")
+    if args.bridge and (args.seed_mix or args.route):
+        ap.error("--bridge sets every route itself; it takes neither --seed-mix nor --route")
     try:
         return _run(
             args, load_manifest(args.manifest), load_tokenizer(args.tokenizer), tokenizer_sha256(args.tokenizer)
@@ -286,8 +296,11 @@ def main(argv: Sequence[str]) -> int:
 def _run(args, manifest, tok, tok_sha: str) -> int:
     from .docs import iter_file_docs
 
-    docs = list(manifest.iter_docs(split=args.split))
-    inputs = [{"path": e["path"], "sha256": e["sha256"]} for e in manifest.files(split=args.split)]
+    splits = [part for part in args.split.split(",") if part]
+    if not splits or len(set(splits)) != len(splits):
+        raise ShardError(f"--split names one split or several distinct ones: {args.split!r}")
+    docs = [doc for split in splits for doc in manifest.iter_docs(split=split)]
+    inputs = [{"path": e["path"], "sha256": e["sha256"]} for split in splits for e in manifest.files(split=split)]
     for path in args.add:
         docs.extend(iter_file_docs(path, source=None, kind=None))
         inputs.append({"path": str(path), "sha256": sha256_file(path)})
@@ -298,6 +311,15 @@ def _run(args, manifest, tok, tok_sha: str) -> int:
         docs = [d for d in docs if d.key not in flagged]
     kwargs: dict[str, Any] = {}
     extra: dict[str, Any] = {}
+    if args.bridge:
+        from .parallel import bridge_layout, select_direction, unpair
+
+        if args.direction:
+            docs = select_direction(docs, args.direction)
+        if args.unpair_seed is not None:
+            docs = unpair(docs, args.unpair_seed)
+        docs = [bridge_layout(d) for d in docs]
+        extra["bridge_layout"] = {"direction": args.direction, "unpair_seed": args.unpair_seed}
     if args.seed_mix:
         from .mixture import build_seed_mixture, pools_from_docs
 
@@ -310,7 +332,7 @@ def _run(args, manifest, tok, tok_sha: str) -> int:
 
     with tempfile.TemporaryDirectory() as tmp:
         target = Path(tmp) / "shard" if args.dry_run else args.out
-        write_shard(target, docs, tok, args.route_names.split(","), args.split, manifest.sha256,
+        write_shard(target, docs, tok, args.route_names.split(","), "+".join(splits), manifest.sha256,
                     tokenizer_sha256=tok_sha, split_sha256=derived.get("split_sha256"), default_route=args.route,
                     seq=args.seq, inputs=inputs, extra=extra, **kwargs)  # fmt: skip
         header = json.loads((target / "shard.json").read_text(encoding="utf-8"))

@@ -2,9 +2,9 @@
 
 命令都在 GPU 主机的仓库根目录、环境 `fork/.venv-bilingual` 中运行。门槛按顺序进行：某一步以非零退出码结束、或判据不成立，就停止，保存输出，不进入下一个门槛；判据不成立时记录实测值，不要放宽阈值。每个结果都按主机、提交和日期记入 [实测记录](measurements.md)。本手册中的时长、吞吐和显存数字在实测之前都是 [估计]。
 
-**当前状态（截至步骤 I4）：本手册中的门槛全部未运行。** 现在能运行的是 G0 的第 1 步（建环境、跑 CPU 测试）和 G1′ 之前的数据准备（`synth` 与数据管线的各命令，I4）。`assemble`、`verify`、`audit` 三个命令已在 I2 落地，但前两个需要的种子与专家 pack 要等 I5 的训练才有；其余命令（`env`、`bench`、`train` 与各评测命令）在步骤 I5–I6 落地，在此之前 `python -m surogate_bilingual 命令` 以退出码 2 结束并说明命令在哪个步骤实现。步骤 I6 补全本手册，届时可运行的命令块会由测试以 `--dry-run` 逐条检查。
+**当前状态（截至步骤 I5）：本手册中的门槛全部未运行。** 现在能运行的是 G0 的第 1、2 步（建环境、跑 CPU 测试、环境指纹），G1′ 之前的数据准备（`synth` 与数据管线的各命令，I4），以及各训练阶段与组装（`train`、`registry`、`assemble`、`verify`，I2 与 I5）。`bench` 与各评测命令在步骤 I6 落地，在此之前 `python -m surogate_bilingual 命令` 以退出码 2 结束并说明命令在哪个步骤实现；所以 G0 的第 3 步、G0.5 和各门槛的 dev 评测判据现在还不能检查。步骤 I6 补全本手册，届时可运行的命令块会由测试以 `--dry-run` 逐条检查。
 
-运行输出的位置还没有定：英文规格把运行目录放在仓库根目录的 runs 下，而根目录的 `.gitignore` 只忽略 data 目录、不忽略 runs，未跟踪的运行输出会让工作区变 dirty（`code_dirty`）。I5 落地运行登记时一并决定（例如放在 `fork/bilingual` 下并由 `fork/.gitignore` 忽略，或经环境变量放到仓库之外）。
+运行输出都在 data/runs 下（I5 决定，见 [spec 的 I5 落地记录](spec.md#i5-落地记录)第 1 条）：根目录的 `.gitignore` 已忽略 data，所以运行输出不出现在 `git status` 中，不会挡住 `fork/dev sync`；`code_dirty` 只看 `fork/bilingual/src` 下的改动。每个运行的 `run_id` 包含代码提交，换了提交的运行不能恢复，要另起运行名；所以一个阶段开始之前先提交，运行期间不要在 GPU 主机上改动 `fork/bilingual/src`。
 
 ## G0 环境与 GPU 不变量
 
@@ -25,7 +25,13 @@
 
    判据：倒数第二条输出的计算能力为 `(12, 0)`；CPU 测试全部通过，并且没有跳过的用例：在 GPU 主机上 scipy 已装，CPU lane 上跳过的 `test_i3_c10_numpy_hungarian_equals_scipy`（numpy Hungarian 对 scipy 的对拍）在这里必须运行并通过；pilot 的 Re-Basin（n = 1728）也只能在这里用 scipy 求解。把 torch 的确切版本（含 `+cu` 后缀）、CUDA 版本、驱动版本（`nvidia-smi`）和 `requirements.lock` 的 sha256 记入实测记录。`fork/.venv-bilingual` 被 `fork/.gitignore` 忽略，所以其中的锁文件不会让工作区变 dirty。
 
-2. **环境指纹（I5 落地后）。** 计划中的命令为 `fork/.venv-bilingual/bin/python -m surogate_bilingual env --out <运行目录>/_env/environment.json`，写出 Python、torch、CUDA/cuDNN、驱动、GPU、CPU、线程数、git 提交与是否 dirty。
+2. **环境指纹（现在可运行）。** 写出 Python、torch、CUDA/cuDNN、驱动（`nvidia-smi`）、GPU、CPU、线程数、库版本、git 提交与是否 dirty；读不到的字段为 null，不猜。每个训练运行开始和每次恢复时也各记一份。
+
+   ```bash
+   fork/.venv-bilingual/bin/python -m surogate_bilingual env --out data/runs/_env/environment.json
+   ```
+
+   判据：`cuda`、`cudnn`、`driver`、`gpu` 都不为 null，`gpu` 的计算能力为 12.0。
 
 3. **GPU 不变量（I6 加入 GPU 测试后）。** 判据：
 
@@ -41,7 +47,7 @@
 | 项目 | 结果 | 主机 | 提交 | 日期 |
 |---|---|---|---|---|
 | 第 1 步：环境与 CPU 测试 | 未运行 | | | |
-| 第 2 步：环境指纹 | 未运行（I5） | | | |
+| 第 2 步：环境指纹 | 未运行 | | | |
 | (g1)–(g6) | 未运行（I6） | | | |
 
 ## G0.5 吞吐与显存
@@ -83,9 +89,10 @@ $PY -m surogate_bilingual decontam --manifest data/splits/manifest.json --rules 
 $PY -m surogate_bilingual shard --manifest data/splits/manifest.json --split seed_train --tokenizer data/tokenizer/tokenizer.json --route seed --seed-mix --exclude data/overlap_token.json --out data/shards/seed
 $PY -m surogate_bilingual shard --manifest data/splits/manifest.json --split zh_train --tokenizer data/tokenizer/tokenizer.json --route zh --add data/corpus/track_s/zh/track_s.jsonl --exclude data/overlap_token.json --out data/shards/zh
 $PY -m surogate_bilingual shard --manifest data/splits/manifest.json --split en_train --tokenizer data/tokenizer/tokenizer.json --route en --add data/corpus/track_s/en/track_s.jsonl --exclude data/overlap_token.json --out data/shards/en
+$PY -m surogate_bilingual shard --manifest data/splits/manifest.json --split zh_train,en_train --tokenizer data/tokenizer/tokenizer.json --add data/corpus/track_s/zh/track_s.jsonl data/corpus/track_s/en/track_s.jsonl --exclude data/overlap_token.json --out data/shards/zh_en
 ```
 
-判据：`synth` 以退出码 0 结束并写出 `datacard.json`（任何一项检查失败时它报错、不写数据卡）；数据卡的 `status` 全部为 true；`tokenizer check` 报告 0 个 `<unk>` 与 0 个往返失败；D_seed shard 的头中 `extra.seed_mix.max_share_error` ≤ 0.005，`mixed_window_fraction.value` 高于下限 0.01。D_parallel shard（Bridge 用）的路由与损失掩码由 I5 的 Bridge recipe 决定，在 I5 补上。把 `datacard.json`、`data/split.json`、tokenizer 与各 shard 头的 sha256 记入实测记录；test 文件的 sha256 在任何 test 评测之前写入签名的预注册锁定提交（手稿 §9.7）。完整规模的 `synth` 在本机 C1 上约 5.5 分钟、1.1 GB [CPU 实测，见实测记录]；自然语料各步在完整规模上的耗时没有测过。
+判据：`synth` 以退出码 0 结束并写出 `datacard.json`（任何一项检查失败时它报错、不写数据卡）；数据卡的 `status` 全部为 true；`tokenizer check` 报告 0 个 `<unk>` 与 0 个往返失败；D_seed shard 的头中 `extra.seed_mix.max_share_error` ≤ 0.005，`mixed_window_fraction.value` 高于下限 0.01。zh_en shard 是 D_zh ∪ D_en，供 B2、B12a（和 T3″）用。Bridge 各臂的平行 shard 用 `shard --bridge` 写（源语言段走其语言的路由、loss 0，目标段走 bridge 路由、loss 1）：T2 用两个方向都有的 parallel，T1′ 用 `--direction zh>en` 与 `--direction en>zh` 的 parallel_zh_en、parallel_en_zh，T3′ 用 `--unpair-seed` 的 parallel_unpaired（路径见 pilot_rows.toml）；Bridge 的运行属于 P1，不在 G0–G3 之内。把 `datacard.json`、`data/split.json`、tokenizer 与各 shard 头的 sha256 记入实测记录；test 文件的 sha256 在任何 test 评测之前写入签名的预注册锁定提交（手稿 §9.7）。完整规模的 `synth` 在本机 C1 上约 5.5 分钟、1.1 GB [CPU 实测，见实测记录]；自然语料各步在完整规模上的耗时没有测过。
 
 | 项目 | 结果 | 主机 | 提交 | 日期 |
 |---|---|---|---|---|
@@ -93,7 +100,23 @@ $PY -m surogate_bilingual shard --manifest data/splits/manifest.json --split en_
 | 自然语料的来源与许可核实（B-O12） | 未开始 | | | |
 | tokenizer、各 shard 与它们的 sha256 | 未运行 | | | |
 
-**pilot 运行（I5 落地后）：**
+**pilot 运行（命令已落地）。** 行配置在 [pilot_rows.toml](../examples/pilot_rows.toml) 中，每个阶段一个运行，`-r0`…`-r2` 是重复。先把 G0.5 选定的（microbatch, accum, checkpointing）写进该文件的 `[train]` 节并提交（它们进入运行身份，所以不要用 `--set` 临时改）；每个阶段先 `--dry-run`（读入并校验全部输入，不写文件），再运行。中断后用同一条命令恢复。r1、r2 把下面的 `-r0` 换掉即可。
+
+```bash
+PY=fork/.venv-bilingual/bin/python
+$PY -m surogate_bilingual train fork/bilingual/examples/pilot_rows.toml --list
+$PY -m surogate_bilingual train fork/bilingual/examples/pilot_rows.toml --stage g1p-seed-r0 --dry-run
+$PY -m surogate_bilingual train fork/bilingual/examples/pilot_rows.toml --stage g1p-seed-r0
+$PY -m surogate_bilingual train fork/bilingual/examples/pilot_rows.toml --stage g1p-zh-r0
+$PY -m surogate_bilingual train fork/bilingual/examples/pilot_rows.toml --stage g1p-en-r0
+$PY -m surogate_bilingual train fork/bilingual/examples/pilot_rows.toml --stage g1p-b2-r0
+$PY -m surogate_bilingual train fork/bilingual/examples/pilot_rows.toml --stage g1p-b12a-r0
+$PY -m surogate_bilingual registry list
+```
+
+调参台账（手稿 §9.6）：每个训练臂另起两个 lr 试验，例如 `--stage g1p-seed-r0 --set train.lr=3e-4 --name g1p-seed-r0-lr3e-4`，只在 dev 上选。每个运行的 `run.json` 记录 config、`run_id`、P_update 与状态，`metrics.jsonl` 每步一行（tokens/s、step 时间、`max_memory_allocated` 与 `max_memory_reserved` 的峰值）。
+
+**pilot 判据（评测在 I6 落地）：**
 
 - **通过：** 在 **dev** 上，B0、B2、B12a 中最好的一个在 E3-ctx-cross 上的正确率 ≥ 随机水平（12.5%）+ 20 个百分点。
 - **输出：** 讨厌参数（不一致率、题目方差、重复间 SD、发散情况）；按手稿 §9.5 的规则定出的重复数 R；在签名的预注册锁定提交中锁定 SESOI 与界值（手稿 §9.7）。
@@ -109,7 +132,11 @@ $PY -m surogate_bilingual shard --manifest data/splits/manifest.json --split en_
 0.8B token，约 2.2–7.4 小时 [估计]。
 
 - **通过：** 两种语言的 dev BPB 都低于 unigram 基线；E3-ctx-mono 的 dev 正确率 ≥ 随机水平 + 20 个百分点；目标语言的短自然语言生成不是完全随机的。
-- **记录：** 学习曲线与一组固定的生成样例。
+- **记录：** 学习曲线（`metrics.jsonl`）与一组固定的生成样例（I6）。
+
+```bash
+fork/.venv-bilingual/bin/python -m surogate_bilingual train fork/bilingual/examples/pilot_rows.toml --stage seed-I-r0
+```
 
 | 项目 | 结果 | 主机 | 提交 | 日期 |
 |---|---|---|---|---|
@@ -120,7 +147,12 @@ $PY -m surogate_bilingual shard --manifest data/splits/manifest.json --split en_
 
 各 0.2B token，约 1.1–3.7 小时 [估计]。
 
-- **通过：** 骨干哈希不变；E1 的 dev 保持；2×2 BPB 矩阵中每个专家在自己语言上的 BPB ≤ B0；每个 pack 都记录了探针。
+- **通过：** 骨干哈希不变（写 pack 时与种子 pack 比较，不同则拒绝写出）；E1 的 dev 保持；2×2 BPB 矩阵中每个专家在自己语言上的 BPB ≤ B0；每个 pack 都记录了探针。
+
+```bash
+fork/.venv-bilingual/bin/python -m surogate_bilingual train fork/bilingual/examples/pilot_rows.toml --stage zh-I-r0
+fork/.venv-bilingual/bin/python -m surogate_bilingual train fork/bilingual/examples/pilot_rows.toml --stage en-I-r0
+```
 
 | 项目 | 结果 | 主机 | 提交 | 日期 |
 |---|---|---|---|---|
@@ -131,8 +163,15 @@ $PY -m surogate_bilingual shard --manifest data/splits/manifest.json --split en_
 不超过 1 小时 [估计]。
 
 - **组装与验证：** 组装 ZH+EN 并运行 `verify`；通过条件为 CUDA 上的 G0 容差。
+
+  ```bash
+  PY=fork/.venv-bilingual/bin/python
+  $PY -m surogate_bilingual assemble --seed data/runs/seed-I-r0/packs/seed --slot zh=data/runs/zh-I-r0/packs/zh --slot en=data/runs/en-I-r0/packs/en --out data/runs/_assembly/zh-en-I-r0.json
+  $PY -m surogate_bilingual verify data/runs/_assembly/zh-en-I-r0.json --device cuda --autocast bf16 --out data/runs/_assembly/zh-en-I-r0.fidelity.json
+  ```
+
 - **dev 评测：** 在 dev 的 E3-ctx-cross 上评测 B0、B4、B4-wrong、B4-random、B4-src 与 B6；B2 与 B12a 训练完成后加入。在 E4 的 dev 子集上做切换代价分解。
-- **无效性规则（手稿 §9.6）：** 决定记录在运行目录的 `_decisions/futility_r0.json` 中。
+- **无效性规则（手稿 §9.6）：** 决定记录在 data/runs/_decisions/futility_r0.json 中。
 - **test 集：** 在手稿 §9.7 的预注册锁定之前不碰 test 集。
 
 | 项目 | 结果 | 主机 | 提交 | 日期 |

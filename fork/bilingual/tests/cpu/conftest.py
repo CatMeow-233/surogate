@@ -202,3 +202,106 @@ def seed_mixture(data_pipeline, track_s_ci):
         pools, data_pipeline["tok"], seed=7, sources=data_pipeline["manifest"].doc["sources"]
     )
     return pools, docs, card
+
+
+# --- training fixtures (step I5) ------------------------------------------------------------------------------------
+
+TINY_CONFIG = EXAMPLES / "tiny.toml"
+ROUTE_NAMES = ["zh", "en", "bridge", "seed"]
+
+
+def build_tiny_root(root: Path, seed: int = 0) -> Path:
+    """The run root examples/tiny.toml expects: tok/tokenizer.json, a word-level stand-in tokenizer with exactly the
+    tiny profile's 64 ids (the five specials, z0..z28 as "Chinese", e0..e29 as "English"; a byte-level BPE needs
+    at least 261), and the shards under shards/. Documents are counting runs (w_k w_k+1 ...), which a tiny model
+    can learn; a parallel pair is the same run in both vocabularies, its source span on the source-language route
+    with loss 0 and its target span on the "bridge" route."""
+    import numpy as np
+    from tokenizers import Tokenizer, models, pre_tokenizers
+
+    from surogate_bilingual.config import SPECIAL_TOKENS
+    from surogate_bilingual.data.docs import Doc, Segment
+    from surogate_bilingual.data.shards import write_shard
+    from surogate_bilingual.data.tokenizer import tokenizer_sha256
+
+    zh = [f"z{i}" for i in range(29)]
+    en = [f"e{i}" for i in range(30)]
+    vocab = {t: i for i, t in enumerate([*SPECIAL_TOKENS, *zh, *en])}
+    tok = Tokenizer(models.WordLevel(vocab, unk_token="<unk>"))
+    tok.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+    tok.add_special_tokens(list(SPECIAL_TOKENS))
+    (root / "tok").mkdir(parents=True)
+    tok.save(str(root / "tok" / "tokenizer.json"))
+    tok = Tokenizer.from_file(str(root / "tok" / "tokenizer.json"))
+    sha = tokenizer_sha256(root / "tok" / "tokenizer.json")
+    rng = np.random.default_rng(seed)
+
+    def counting(words, k, n):
+        return " ".join(words[(k + i) % len(words)] for i in range(n))
+
+    def mono(lang, key, route=None):
+        words = zh if lang == "zh" else en
+        text = counting(words, int(rng.integers(len(words))), int(rng.integers(6, 14)))
+        return Doc(f"{lang}/{key}", lang, (Segment(text=text, lang=lang),), route=route)
+
+    def pair(key, src):
+        tgt = "en" if src == "zh" else "zh"
+        k, n = int(rng.integers(29)), int(rng.integers(5, 10))
+        words = {"zh": zh, "en": en}
+        return Doc(f"par/{src}{key}", "parallel", (
+            Segment(text=counting(words[src], k, n), lang=src, route=src, loss=False),
+            Segment(text=counting(words[tgt], k, n), lang=tgt, route="bridge")), pair_id=f"p-{src}{key}")  # fmt: skip
+
+    shards = root / "shards"
+
+    def shard(name, docs, split, route=None):
+        write_shard(shards / name, docs, tok, ROUTE_NAMES, split, None, tokenizer_sha256=sha, default_route=route,
+                    seq=16)  # fmt: skip
+
+    shard("d_seed", [mono("zh" if i % 2 else "en", i) for i in range(80)], "seed_train", "seed")
+    shard("d_zh", [mono("zh", i) for i in range(60)], "zh_train", "zh")
+    shard("d_en", [mono("en", i) for i in range(60)], "en_train", "en")
+    shard("d_zh_en", [mono("zh" if i % 2 else "en", i, "zh" if i % 2 else "en") for i in range(60)], "zh_en_train")
+    shard("d_parallel", [pair(i, "zh" if i % 2 else "en") for i in range(60)], "parallel_train")
+    shard("d_parallel_zh_en", [pair(i, "zh") for i in range(40)], "parallel_train")
+    # exactly seq + 1 tokens: the sampler has one window, so every batch is the same (I5-T5)
+    shard("fixed", [Doc("fixed/0", "en", (Segment(text=" ".join(en[:16]), lang="en"),))], "seed_train", "seed")
+    shard("dev", [mono("en", i) for i in range(10)], "dev", "en")
+    return root
+
+
+def tiny_run(stage: str, *overrides: str):
+    """A stage of examples/tiny.toml; runs record allow_dirty because tests run on uncommitted checkouts too."""
+    from surogate_bilingual.config import load_toml
+
+    return load_toml(TINY_CONFIG, stage=stage, overrides=("registry.allow_dirty=true", *overrides))
+
+
+@pytest.fixture(scope="session")
+def tiny_root(tmp_path_factory):
+    return build_tiny_root(tmp_path_factory.mktemp("tiny_root"))
+
+
+@pytest.fixture(scope="session")
+def tiny_trained(tiny_root):
+    """tiny-seed, tiny-zh and tiny-en trained once into tiny_root/data/runs (the paths tiny.toml names), ~1 s.
+    Tests that train further stages read these packs and write their own runs under tmp_path."""
+    import torch
+
+    from surogate_bilingual.train.loop import train
+
+    previous = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        results = {stage: train(tiny_run(stage), root=tiny_root) for stage in ("tiny-seed", "tiny-zh", "tiny-en")}
+    finally:
+        torch.set_num_threads(previous)
+    return {"root": tiny_root, "runs": tiny_root / "data" / "runs", "results": results,
+            "seed": results["tiny-seed"].packs["seed"], "zh": results["tiny-zh"].packs["zh"],
+            "en": results["tiny-en"].packs["en"]}  # fmt: skip
+
+
+@pytest.fixture(scope="session")
+def tiny_stage():
+    """tiny_run(stage, *overrides) -> RunConfig (test modules cannot import conftest)."""
+    return tiny_run

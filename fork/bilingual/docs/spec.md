@@ -1,6 +1,6 @@
 # 决定记录与数据契约（P0）
 
-- **状态：** 规格。截至步骤 I4，脚手架（I1），模型核心、路由、组装、冻结、哈希与参数审计（I2），融合算子、合并与 router 门控（I3），以及数据管线与 Track S 生成器（I4）已落地，并通过 CPU 测试（见“实现步骤”中的 I2–I4 落地记录）；训练与评测部分还没有实现，所以还没有任何实验结果。没有任何代码在 GPU 上运行过。凡是 RTX 5090 的数字都是 [估计] 或 TBD，以 G0.5 的实测为准。
+- **状态：** 规格。截至步骤 I5，脚手架（I1），模型核心、路由、组装、冻结、哈希与参数审计（I2），融合算子、合并与 router 门控（I3），数据管线与 Track S 生成器（I4），以及训练循环、各 recipe 与运行登记（I5）已落地，并通过 CPU 测试（见“实现步骤”中的 I2–I5 落地记录）；评测部分还没有实现，也没有训练过任何实验模型，所以还没有任何实验结果。没有任何代码在 GPU 上运行过。凡是 RTX 5090 的数字都是 [估计] 或 TBD，以 G0.5 的实测为准。
 - **来源：** 三份文档，都写于 2026-11-02，都不在本仓库中，由 owner 保存：
   - owner 的预注册稿 v1.1（下称“手稿”；本文的“手稿 §N”指它的章节）；
   - 对 v1.0 研究包的对抗式评审 v1.0（下称“评审”；文中的 NOV-、MA-、SCI-、IMPL- 编号和 NEW-01 指它的问题）；
@@ -109,8 +109,10 @@
 | `bilingual-sampler/1` | 采样器的 `state_dict`，I5 写进训练状态的 `extra.json`（I4 新增） | I4 |
 | `bilingual-shard/1` | shard 的头 `shard.json` | I4 |
 | `bilingual-item/1`、`bilingual-datacard/1` | Track S 的题目（每行一项）与数据卡；数据卡分两种 `kind`：`track_s`（生成器）与 `d_seed`（D_seed 混合） | I4 |
-| `bilingual-state/1` | 训练状态的 `extra.json` | I5 |
-| `bilingual-run/1`、`bilingual-metrics/1` | 运行记录 `run.json`、每步指标 `metrics.jsonl` | I5 |
+| `bilingual-state/1` | 训练状态的 `extra.json`；另记可训练张量的名字与三个文件的 sha256（I5 新增） | I5 |
+| `bilingual-schedule/1` | 状态中的调度器记录：步数、warmup 步数、总步数与学习率参数（I5 新增，英文规格中没有） | I5 |
+| `bilingual-env/1` | `environment.json`：环境指纹（I5 新增，英文规格只列了字段） | I5 |
+| `bilingual-run/1`、`bilingual-metrics/1` | 运行记录 `run.json`、每步指标 `metrics.jsonl`；指标另有 `targets` 与 `kl` 两个字段（I5 新增） | I5 |
 | `bilingual-pred/1`、`bilingual-result/1` | 每项 × 每臂的预测、结果列表（`status` 默认为“未运行”） | I6 |
 
 **内容哈希与种子指纹（修正 IMPL-14）。** `content_hash(state)` 对 `sorted(state)` 中的每个名字，依次把下面的字节送入 sha256：
@@ -135,7 +137,7 @@ name.encode("utf-8") + b"\0" + str(dtype).encode() + b"\0" + json(list(shape)).e
 
 **训练状态（修正 IMPL-02）。** 每个状态目录含 `trainable.safetensors`（只有可训练张量）、`optimizer.pt`（以 `weights_only=True` 加载）、`rng_torch.pt`（torch CPU 与 CUDA 的 RNG）和 `extra.json`（`run_id`、step、token 数、`frozen_hashes`、调度器、采样器游标、Python 与 numpy 的 RNG）。保留最近两个状态，另加每 `keep_every` 步一个。恢复时拒绝 `run_id` 不同的状态，并检查 `frozen_hashes` 与现有冻结张量一致；采样器游标与 RNG 在取第一个批次**之前**恢复。
 
-**运行登记（修正 IMPL-21）。** `runs/index.json` 把运行名映射到唯一的 `run_id`；每个运行目录有 `run.json`、`environment.json`（Python、torch、CUDA/cuDNN、驱动、GPU、CPU、线程数、git 提交与是否 dirty）、`metrics.jsonl`，以及状态、pack 和评测子目录。`run_id` 是规范 JSON `{config_hash, data_manifest_sha256, tokenizer_sha256, seed_fingerprint, code_commit, recipe, init_seed, data_seed}` 的 sha256 的前 16 个十六进制字符。运行名已绑定到另一个 `run_id` 时拒绝创建；同名同 id 则恢复。`code_dirty: true` 时拒绝运行，除非设置了 `registry.allow_dirty`，此时记录该标志。
+**运行登记（修正 IMPL-21）。** 运行目录默认是运行根目录下的 data/runs（I5 落地记录第 1 条），其中的 `index.json` 把运行名映射到唯一的 `run_id`；每个运行目录有 `run.json`、`environment.json`（Python、torch、CUDA/cuDNN、驱动、GPU、CPU、线程数、git 提交与是否 dirty）、`metrics.jsonl`，以及状态、pack 和评测子目录。`run_id` 是规范 JSON `{config_hash, data_manifest_sha256, tokenizer_sha256, seed_fingerprint, code_commit, recipe, init_seed, data_seed}` 的 sha256 的前 16 个十六进制字符。运行名已绑定到另一个 `run_id` 时拒绝创建；同名同 id 则恢复。`code_dirty: true` 时拒绝运行，除非设置了 `registry.allow_dirty`，此时记录该标志。
 
 **指标与预算。** `metrics.jsonl` 每个记录步一行：step、token 数、loss、lr、grad_norm、tokens_per_s、step_s、`peak_alloc_gib`、`peak_reserved_gib`、`dev` 与时间；CPU 上 CUDA 字段为 `null`。预算报告的每行：`id`、`P_total`、`P_active`、`P_update`、`weight_macs`、`macs_T1024`、`within_active_budget`、`within_update_budget`、`declared_in_budget`；I2 另加 `label`、`family`、`method`、`standalone_P_total`、`P_active_dual` 与 `note`（见 I2 落地记录）。
 
@@ -171,6 +173,9 @@ name.encode("utf-8") + b"\0" + str(dtype).encode() + b"\0" + json(list(shape)).e
 | `data.min_mixed_window_fraction` | 浮点 | 0.01 | [建议]（I4 新增） | D_seed shard 在 `train.seq` 下的混语窗口比例下限，低于它时 shard 写入方拒绝 |
 | `data.split_fractions` | 按文档种类的比例 | 见 `config.DEFAULTS` | [建议]（I4 新增） | 七个集合的文档级划分比例 |
 | `data.decontam_rules` | 规则列表 | `en_word13`、`zh_han25`、`token13` | 手稿 §6.1（I4 新增） | |
+| `model.profile` | profile 名或不设 | 不设 | （I5 新增） | 只用于行配置：先套 profile，再套文件自己的 model 键；不是 `ModelConfig` 的字段 |
+| `train.adam_betas` / `train.adam_eps` | 两个浮点 / 浮点 | (0.9, 0.999) / 1e-8 | [建议]（I5 新增） | torch 与 v1.0 的默认值；手稿没有规定 |
+| `run.*` | 见 `config.DEFAULTS["run"]` | 见左 | （I5 新增） | 运行名、recipe 及其参数、matrix 行、重复号、两个种子、steps 或 tokens、shard、tokenizer、种子 pack、其他 pack 与路由映射、device、保存/保留/记录的间隔；后三者与 device 不进入运行身份 |
 
 ## 实现步骤
 
@@ -425,6 +430,58 @@ I4-D7 的各项：
 - **I5-T14：** `run_id` 确定；运行名重用但 `run_id` 不同时拒绝；工作区 dirty 时拒绝，除非设置 `allow_dirty`（并记录）；`environment.json` 含每个必需的键。
 - **I5-T15：** `RouterRecipe` 抛 `NotImplementedError` 并指明是推迟项。
 - **I5-T16：** `microbatch × seq × accum ≠ global_batch_tokens` 的 config 在训练开始前被拒绝。
+
+#### I5 落地记录
+
+**状态：** 已完成（CPU）。I5-T1 至 I5-T16 都是 `fork/bilingual/tests/cpu` 中有名字的用例，全部通过；没有在 GPU 上运行，CI 也还没有运行这些用例（见 [实测记录](measurements.md)）。`train`、`env`、`registry` 三个命令随本步骤落地。测试中的训练用 `tiny` profile 和一个恰好 64 个 id 的替身 tokenizer（byte-level BPE 至少要 261 个 id，比 tiny 的词表大），只检查实现是否符合设计；其中的 loss 数值不是实验结果。
+
+| 验收 | 检查方式（`fork/bilingual/tests/cpu` 下的用例） |
+|---|---|
+| I5-T1 | `test_train_loop.py` 的 `test_i5_t1_two_processes_give_the_same_init_and_loss_trace`：两个单线程子进程经命令行各跑 20 步，`run_id`、初始内容哈希与 20 个 loss 逐位相同；本进程按同一 config 建的初始化与之相同，`init_seed` 改为 99 时不同 |
+| I5-T2 | `test_i5_t2_killed_and_resumed_equals_uninterrupted`（种子与专家两个 recipe）：子进程在第 5 步的状态写完后以 `os._exit` 退出（相当于 kill -9），本进程恢复再跑 5 步；可训练权重、优化器状态（每个张量与参数组）、调度器状态、采样器游标与 10 步 loss 轨迹都与不中断的 10 步逐位相同，`metrics.jsonl` 中每步恰好一行 |
+| I5-T3 | `test_i5_t3_a_crash_before_replace_leaves_the_previous_state_loadable`：子进程在第 10 步的保存中、临时目录写完之后、`os.replace` 之前退出，留下 `step_00000010.tmp-*`；第 5 步的状态照常加载，下次启动删除临时目录并跑完；`test_i5_t3_retention_keeps_the_last_two_and_every_keep_every` 检查保留策略 |
+| I5-T4 | `test_i5_t4_resume_refuses_another_run_id_and_changed_frozen_tensors`：`run_id` 不同时 `StateError`；状态中记录的冻结哈希与现有模型不同时 `FreezeError`，`run.json` 记为 failed；另有 `test_i5_t4_a_tampered_state_file_is_refused`（文件 sha256），运行名绑定另一个 id 时由运行登记拒绝（I5-T14） |
+| I5-T5 | `test_i5_t5_the_seed_recipe_fits_a_fixed_batch`：恰好 seq + 1 个 token 的 shard 只有一个窗口，每个批次都相同；300 步内最低 loss 低于初始值的 0.1 倍（C1 上第 60 步首次低于，初始 4.19） |
+| I5-T6 | `test_train_recipes.py` 的 `test_i5_t6_an_expert_run_changes_only_its_expert`：EN 在混合 shard 上训练、冻结的 ZH pack 处理 zh token；20 步后骨干内容哈希等于种子 pack 记录的值，ZH 的哈希等于其 pack 的值，优化器持有的 storage 恰好是 EN 的参数，pack 的 `depends_on` 记录 ZH；`test_i5_t6_anchor_kl_zero_is_bitwise_ce_only_training`：与测试中另写的只用 CE 的训练循环逐位相同（loss 轨迹与最终权重）；`anchor_kl = 0.5` 时第 1 步的 KL 恰为 0.0（专家起点就是种子 FFN），之后为正，轨迹改变 |
+| I5-T7 | `test_train_schedule.py`：fp64 下梯度为零、按调度的 lr 走 6 步，`to_seed` 每步把 w − w_seed 乘以 (1 − lr·λ)（≤ 1e-12），AdamW 自身的衰减为 0；`none` 不改变权重，`to_zero` 等于 AdamW 的解耦衰减；两个族的种子 recipe 中 norm、嵌入（兼 tied head）与族 II 的 b 都在不衰减组，族 II 的 Q 在衰减组 |
+| I5-T8 | `test_i5_t8_lr_at_the_four_points_equals_the_closed_form`：N = 1001、W = 20，第 0、19、20、510、1000 步与测试中另写的闭式相差 ≤ 1e-12 |
+| I5-T9 | `test_i5_t9_the_width_2f_expert_built_from_the_seed_reproduces_the_seed`：max-abs ≤ 1e-6；pilot（meta device）上 B12a 更新两条路径，127,401,984 个参数；`test_i5_t9_b12a_trains_and_packs_a_wide_expert`：训练、写 pack、组装、`verify` 通过 |
+| I5-T10 | `test_i5_t10_only_loss_mask_positions_contribute`：改动被掩掉位置的标签后 loss 与梯度逐位不变；`test_i5_t10_variant_c_routes_the_prefix_to_the_frozen_source_expert`：在 plan 上检查前缀走 zh/en、目标段走 bridge、损失目标都不在前缀中，并检查 (a)、(b) 的映射；`test_i5_t10_variant_c_records_the_zh_en_hashes`：`depends_on` 记录 ZH/EN 的哈希与相对路径，ZH+EN+Bridge 组装后 `verify` 通过；`test_i5_t10_target_copy_trains_a_copy_and_leaves_the_original`：原 pack 逐字节不变，副本的哈希不同，`depends_on` 有 source 与 origin，`p_update` 恰为一条路径，pilot 上为 63,700,992；含另一方向前缀的窗口被拒绝 |
+| I5-T11 | `test_i5_t11_checkpointing_leaves_the_loop_gradients_unchanged`（种子与 Bridge (c)）：≤ 1e-7，冻结参数没有梯度 |
+| I5-T12 | `test_i5_t12_three_bf16_autocast_steps_on_the_cpu_have_finite_loss`（种子、专家、Bridge）：精度记为 bf16，参数仍为 fp32 |
+| I5-T13 | `test_i5_t13_every_metrics_line_validates_and_cuda_fields_are_null_on_cpu`：每行通过 `check_line`，CPU 上 CUDA 字段为 null，并有多字段、缺字段、布尔当整数、NaN、未知版本五个反例；`test_metrics_truncate_drops_later_steps_and_a_torn_line` |
+| I5-T14 | `test_registry.py` 的五个 `test_i5_t14_*`：`run_id` 确定且覆盖每个身份字段；同名不同 id（含换了提交）被拒绝；dirty 时拒绝，设置 `allow_dirty` 后 `run.json` 记录 `code_dirty` 与 `allow_dirty`；训练循环同样拒绝；`environment.json` 含全部必需键 |
+| I5-T15 | `test_train_recipes.py` 的 `test_i5_t15_the_router_recipe_is_deferred`：构造即抛 `NotImplementedError`，信息指明 Section 8；命令行以退出码 1 结束，不写任何文件 |
+| I5-T16 | `test_train_loop.py` 的 `test_i5_t16_inconsistent_batch_arithmetic_is_refused_before_training`：读 config 时报错；命令行以退出码 1 结束，不建运行目录 |
+| 其他 | `pilot_rows.toml` 的一致性（60 个运行、种子互不相同、每个专家行的种子 pack 是同一重复的种子行、每个重复的 token 预算等于手稿 §13）与各行在 pilot 几何上的 P_update；Bridge 布局与 `shard --bridge`；`--dry-run` 不写文件；跑完的运行再次调用时幂等；LP-k；dev/test shard、缺 pack、seq 超过 max_seq 都被拒绝 |
+
+**实现中的决定与对英文规格的偏离（owner 可以推翻）：**
+
+1. **运行目录在 data/runs 下。** 英文规格把运行放在仓库根目录的 runs 中。根目录的 `.gitignore`（上游文件）不忽略 runs，而 `fork/dev sync` 的干净检查（`git status --porcelain`）把未跟踪文件也算进去，所以根目录的 runs 会挡住同步。默认的运行目录因此是运行根目录（`train --root`，默认工作目录）下的 data/runs，由已有的 `data/**` 规则忽略；`--runs` 可以放到别处。`code_dirty` 只看 `fork/bilingual/src` 下的改动，与运行输出无关。这解决了 I4 时运行手册记下的待定问题。
+2. **行配置的格式。** `[stage.NAME]` 表中放各节的子表（`run`、`model`、`train`…），逐键覆盖文件顶层的同名节；`replicates = [0, 1, 2]` 把阶段展开成 `NAME-r0`…，字符串中的 `{r}` 换成重复号，`init_seed`/`data_seed` 的列表按位置取；命令行的 `--set 节.键=值`（TOML 语法）与 `--name` 用于调参台账的单次试验。新增的 `[run]` 节与 `model.profile` 见上文“开关”。
+3. **运行身份。** 进入 config 哈希的是：实际构建的模型几何（B12a 为 2f 宽）、train 节、`gqa`、`data.window`、recipe 及其参数、总步数、解析后的精度、shard 头的 sha256 与所读 pack 的哈希。device、保存/保留/记录间隔不进入。融合方式与门控策略也不进入：训练的 plan 都是 one-hot，它们只在组装与评测时作用于双路行，所以 B8 与 B9-II 评测的是同一组检查点。按规格 `code_commit` 在 `run_id` 中，所以一个运行不能跨提交恢复，换了提交要另起运行名。
+4. **调度的细节**（规格只给了闭式的形状）：W = round(warmup_frac·N)（warmup_frac > 0 时至少 1）；第 0 步的 lr 为 P/W，不是 0；最后一步为下限。
+5. **参数组。** 种子：除嵌入以外的矩阵衰减（含族 II 的 Q），norm、嵌入与 b 不衰减。专家类 recipe 不看 `train.weight_decay`，只按 `train.expert_decay`：`to_zero` 是 AdamW 自身的解耦衰减（系数 `expert_decay_lambda`），`to_seed` 在 AdamW 步之前用同一步的 lr 施加。T1′ 的 `to_seed` 锚点是种子 FFN（字面读法），owner 也可能更想要原 pack。
+6. **AdamW 的 betas 与 eps**（新增 `train.adam_betas`、`train.adam_eps`）：取 torch 与 v1.0 的默认值 (0.9, 0.999)、1e-8 [建议]；手稿没有规定。
+7. **损失的归一化。** 一个优化器步内所有 micro batch 的损失目标求和，再除以目标总数，所以每个目标的权重相同；没有任何目标的步报错。`metrics.jsonl` 的 `loss` 是每个目标的目标函数值（开锚点时含 anchor_kl·KL），另加 `targets` 与 `kl` 两个字段。
+8. **KL 锚点**：参照是同一几何的种子模型（θ_S 加种子 FFN，LP-k 亦然），在同一批 token 上以 no_grad 前向；`anchor_kl = 0` 时根本不建参照，所以“只用 CE”按构造成立，并另用独立的 CE 循环核对。recipe 自带的 `anchor_kl` 必须与 `train.anchor_kl` 相同，否则拒绝。
+9. **Bridge (c) 的第一个目标 token** 由源语言前缀的最后一个位置预测，该位置走源语言专家，所以这一项计入 loss，但没有可训练参数能降低它；这与推理时 R_out 的因果路由一致。
+10. **Bridge 的 shard 布局**（新模块 `data.parallel`，`shard --bridge`）：源语言段的路由是其语言、loss 0，目标段的路由是 bridge、loss 1，`<eos>` 随目标段。T1′ 把 bridge 路由映射到目标语言专家的副本，需要单一方向的 shard（`--direction zh>en`）；窗口中出现另一方向的前缀时拒绝，不猜。T3′ 是专家名为 t3 的 Bridge recipe，训练数据由 `--unpair-seed` 在每个方向内按种子打乱配对、没有一对保持原样；T3″ 是专家名为 t3 的普通专家 recipe，用 D_zh ∪ D_en 的 shard（`shard --split zh_train,en_train`），token 数由运行的 `tokens` 对齐。T3′、T3″ 的数据定义是本实现的读法，需要 owner 确认。
+11. **B12a**：`check_extends` 放宽为“族 I、每层都有专家时 `ffn_width` 可以与种子不同”，pack 记录宽几何，与普通专家组装时因 config 哈希不同而被拒绝。手稿只为族 I 列了 B12a，族 II 的版本没有实现。
+12. **带上下文专家的专家 recipe**：`ExpertRecipe(expert, anchor_kl, context, routes)` 训练一个专家，同时让冻结的上下文 pack 处理按 `run.routes` 路由给它们的 token，`depends_on` 记为 context。Bridge (c) 与 T1′ 用的是同一套机制。
+13. **pack 的 `depends_on`** 每项另记 `role`（source、origin、context），路径改为相对新 pack 目录的相对路径，便于整体搬移。
+14. **`code_identity` 移到 `registry.env`**，pack 与组装 manifest 从那里取。
+15. **状态的补充**：`extra.json` 另记可训练张量的名字和三个文件的 sha256，加载时核对；`trainable.safetensors` 按参数名存；优化器参数组带 `names` 与 `group`。
+16. **恢复的补充**：`metrics.jsonl` 在恢复时原子地截到所恢复的步，崩溃留下的半行被丢弃；每次启动记一份环境指纹（首次为 `environment.json`，恢复时为 `environment.step_N.json`）；被拒绝的恢复把 `run.json` 记为 failed；`train --stop-after N` 跑到第 N 步、写状态后返回（状态仍为 running），`--no-resume` 拒绝继续已有状态的运行。
+17. **P_update** 记入 `run.json`，并标出是否在 100M 的更新预算内；不强制，B12a 按设计超出，如实记录。
+18. **一个运行只允许一个进程。** 没有加锁；同一运行目录上同时启动两个进程的结果未定义。
+
+**仍未验证与未实现：**
+
+- 没有 GPU：CUDA 上的 bf16 路径、峰值显存字段、CUDA 上恢复的容差（G0 的 g4、g5）与吞吐都没有运行。逐位确定只在单线程 CPU 上成立。
+- 没有用自然语料建过 tokenizer 与 shard，`pilot_rows.toml` 的路径、token 预算与 lr 都是 [建议]，没有运行过；对 pilot 行的 `train --dry-run` 要等数据准备好才能运行。
+- pilot 规模下每次写状态要对约 1 GB 的文件做 sha256 与 fsync，耗时没有测。
+- CI 尚未运行这些用例；GPU 测试目录要到 I6 才有。
 
 ### I6：评测、统计与 RTX 5090 运行手册
 

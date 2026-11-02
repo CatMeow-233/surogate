@@ -11,6 +11,7 @@ from surogate_bilingual.config import (
     DEFAULTS,
     FUSIONS,
     PROFILES,
+    ROW_ONLY_MODEL_KEYS,
     ModelConfig,
     TrainConfig,
     config_hash,
@@ -28,7 +29,7 @@ def test_dataclass_defaults_come_from_defaults():
                 continue
             default = f.default if f.default is not dataclasses.MISSING else f.default_factory()
             assert default == DEFAULTS[section][f.name], (section, f.name)
-    assert set(f.name for f in dataclasses.fields(ModelConfig)) == set(DEFAULTS["model"]) - {"gqa"}
+    assert set(f.name for f in dataclasses.fields(ModelConfig)) == set(DEFAULTS["model"]) - set(ROW_ONLY_MODEL_KEYS)
     assert set(f.name for f in dataclasses.fields(TrainConfig)) == set(DEFAULTS["train"])
 
 

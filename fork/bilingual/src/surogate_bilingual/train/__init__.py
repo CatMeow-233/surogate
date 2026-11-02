@@ -1,2 +1,2 @@
-"""Training recipes and objectives. Step I2 holds only what one optimizer step in the tests needs (the trainable
-sets of the seed and expert recipes, the masked cross entropy); the loop, schedules and state land in step I5."""
+"""Training (step I5): the single loop (`loop`), the recipes (`recipes`), objectives, schedule and parameter
+groups (`schedule`), resumable state (`state`) and the metrics log (`metrics`). docs/spec.md, I5 落地记录."""

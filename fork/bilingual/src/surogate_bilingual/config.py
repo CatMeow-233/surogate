@@ -45,6 +45,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "norm_eps": 1e-6,
         "tie_embeddings": True,  # P0 requires True
         "gqa": "sdpa_gqa",  # execution only (not part of ModelConfig or its hash); "repeat" is the fallback
+        "profile": None,  # row files only: a size profile (PROFILES) applied under the file's own model keys
     },
     "routing": {
         "signal": "oob",  # B-O3: per-token route ids travel out of band in the shards
@@ -69,6 +70,9 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "dtype": "auto",  # bf16 autocast on CUDA, fp32 on CPU; parameters stay fp32
         "activation_checkpointing": False,
         "bridge_variant": "c",  # B-O13
+        # [建议] AdamW moments: torch's defaults, which v1.0 used too (MS §8 names no betas)
+        "adam_betas": (0.9, 0.999),
+        "adam_eps": 1e-8,
     },
     "data": {
         "window": "packed",  # documents separated by <eos>; "doc_aligned" is deferred
@@ -99,11 +103,40 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     },
     "eval": {"length_norm": "auto"},  # sum when every candidate has the same token length, else mean
     "registry": {"allow_dirty": False},
+    # One run of a row file (step I5). Paths are relative to the run root (`train --root`, default the working
+    # directory). Only the fields that enter the run identity (recipe and its arguments, seeds, steps, inputs by
+    # hash) change a run's id; device, save/keep/log cadence do not.
+    "run": {
+        "name": None,  # the run name; a stage's name by default (registry: one name, one run_id)
+        "recipe": None,  # seed | expert | joint_wide | bridge | target_copy | router
+        "matrix_row": None,  # the MS §7 row id, e.g. "B1"
+        "replicate": 0,
+        "init_seed": None,  # torch.Generator seed of the model initialisation (IMPL-01)
+        "data_seed": None,  # EpochChunkSampler seed
+        "steps": None,  # exactly one of steps and tokens; steps = ceil(tokens / train.global_batch_tokens)
+        "tokens": None,
+        "shard": None,  # the training shard directory (bilingual-shard/1)
+        "tokenizer": None,  # seed recipe: the tokenizer.json the shard was built with; others use the seed pack's
+        "seed_pack": None,  # every recipe but seed
+        "packs": {},  # name -> expert pack: frozen experts the recipe runs (Bridge (c), T1', expert context)
+        "routes": {},  # shard route name -> expert name, for an expert recipe that runs frozen context experts
+        "expert": None,  # expert / joint_wide: the name of the trained expert
+        "target": None,  # target_copy (T1'): the expert whose copy is trained
+        "source": None,  # target_copy (T1'): the frozen source-language expert
+        "device": "auto",  # auto = cuda when available, else cpu
+        "save_every": 200,  # [建议] state every N steps; the last step always saves
+        "keep_every": 0,  # retention: the last two states, plus every state whose step is a multiple of this
+        "log_every": 1,
+    },
 }
 
 EXPERT_DECAYS = ("none", "to_zero", "to_seed")
 TRAIN_DTYPES = ("auto", "bf16", "fp32")
 BRIDGE_VARIANTS = ("a", "b", "c")
+RECIPES = ("seed", "expert", "joint_wide", "bridge", "target_copy", "router")
+ROW_ONLY_MODEL_KEYS = ("gqa", "profile")  # model keys of a row file that are not ModelConfig fields
+DEVICES = ("auto", "cpu", "cuda")
+RUN_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 
 def _default(section: str, key: str):
@@ -215,8 +248,11 @@ class TrainConfig:
     dtype: str = _default("train", "dtype")
     activation_checkpointing: bool = _default("train", "activation_checkpointing")
     bridge_variant: str = _default("train", "bridge_variant")
+    adam_betas: tuple[float, float] = _default("train", "adam_betas")
+    adam_eps: float = _default("train", "adam_eps")
 
     def __post_init__(self):
+        object.__setattr__(self, "adam_betas", tuple(float(b) for b in self.adam_betas))
         if self.microbatch * self.seq * self.accum != self.global_batch_tokens:
             raise ValueError(
                 f"microbatch x seq x accum = {self.microbatch} x {self.seq} x {self.accum} = "
@@ -230,9 +266,18 @@ class TrainConfig:
             raise ValueError(f"bridge_variant must be one of {BRIDGE_VARIANTS}: {self.bridge_variant!r}")
         if not 0.0 <= self.warmup_frac < 1.0 or not 0.0 <= self.min_lr_frac <= 1.0:
             raise ValueError("warmup_frac must lie in [0, 1) and min_lr_frac in [0, 1]")
+        if self.lr is not None and not self.lr > 0:
+            raise ValueError(f"lr must be positive: {self.lr!r}")
+        for name in ("weight_decay", "expert_decay_lambda", "anchor_kl", "grad_clip"):
+            if not getattr(self, name) >= 0:
+                raise ValueError(f"{name} must be >= 0: {getattr(self, name)!r}")
+        if len(self.adam_betas) != 2 or not all(0.0 <= b < 1.0 for b in self.adam_betas) or not self.adam_eps > 0:
+            raise ValueError(f"adam_betas must be two values in [0, 1) and adam_eps positive: {self.adam_betas}")
 
     def to_dict(self) -> dict[str, Any]:
-        return dataclasses.asdict(self)
+        out = dataclasses.asdict(self)
+        out["adam_betas"] = list(self.adam_betas)
+        return out
 
 
 # Size profiles: overrides of DEFAULTS["model"]. slot_width follows one rule everywhere, the largest n whose family-II
@@ -258,7 +303,7 @@ def matched_slot_width(d_model: int, ffn_width: int) -> int:
 def profile(name: str, family: str, **overrides) -> ModelConfig:
     if name not in PROFILES:
         raise ValueError(f"unknown profile {name!r}; known: {sorted(PROFILES)}")
-    values = {k: v for k, v in DEFAULTS["model"].items() if k not in ("family", "gqa")}
+    values = {k: v for k, v in DEFAULTS["model"].items() if k != "family" and k not in ROW_ONLY_MODEL_KEYS}
     values.update(PROFILES[name])
     values.update(overrides)
     return ModelConfig(family=family, **values)
@@ -273,10 +318,88 @@ def config_hash(cfg: ModelConfig | TrainConfig | Mapping) -> str:
     raise TypeError(f"cannot hash {type(cfg).__name__}")
 
 
+def _optional_int(name: str, value) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"run.{name} must be an integer: {value!r}")
+    return value
+
+
+@dataclass(frozen=True)
+class RunSpec:
+    """The [run] table of a row config: what one training run is, where its inputs are, how often it saves.
+
+    Paths stay strings relative to the run root; `train.loop` resolves them. `steps` and `tokens` are exclusive."""
+
+    name: str
+    recipe: str
+    init_seed: int
+    data_seed: int
+    shard: str
+    matrix_row: str | None = None
+    replicate: int = 0
+    steps: int | None = None
+    tokens: int | None = None
+    tokenizer: str | None = None
+    seed_pack: str | None = None
+    packs: dict[str, str] = field(default_factory=dict)
+    routes: dict[str, str] = field(default_factory=dict)
+    expert: str | None = None
+    target: str | None = None
+    source: str | None = None
+    device: str = "auto"
+    save_every: int = 200
+    keep_every: int = 0
+    log_every: int = 1
+
+    def __post_init__(self):
+        if not isinstance(self.name, str) or not RUN_NAME_PATTERN.fullmatch(self.name) or ".." in self.name:
+            raise ValueError(f"run.name must match {RUN_NAME_PATTERN.pattern} (no '..'): {self.name!r}")
+        if self.recipe not in RECIPES:
+            raise ValueError(f"run.recipe must be one of {RECIPES}: {self.recipe!r}")
+        for name in ("init_seed", "data_seed"):
+            if _optional_int(name, getattr(self, name)) is None:
+                raise ValueError(f"run.{name} must be set (IMPL-01: every run records both seeds)")
+        if not self.shard:
+            raise ValueError("run.shard must name the training shard")
+        steps, tokens = _optional_int("steps", self.steps), _optional_int("tokens", self.tokens)
+        if (steps is None) == (tokens is None):
+            raise ValueError("set exactly one of run.steps and run.tokens")
+        if (steps is not None and steps <= 0) or (tokens is not None and tokens <= 0):
+            raise ValueError("run.steps / run.tokens must be positive")
+        for name in ("replicate", "save_every", "keep_every", "log_every"):
+            value = _optional_int(name, getattr(self, name))
+            if value is None or value < 0 or (name == "log_every" and value == 0):
+                raise ValueError(f"run.{name} must be a non-negative integer (log_every positive): {value!r}")
+        if self.device not in DEVICES:
+            raise ValueError(f"run.device must be one of {DEVICES}: {self.device!r}")
+        for name in ("expert", "target", "source"):
+            value = getattr(self, name)
+            if value is not None and not NAME_PATTERN.fullmatch(str(value)):
+                raise ValueError(f"run.{name} must match {NAME_PATTERN.pattern}: {value!r}")
+        for table in ("packs", "routes"):
+            value = getattr(self, table)
+            if not isinstance(value, Mapping) or not all(isinstance(k, str) and isinstance(v, str)
+                                                         for k, v in value.items()):  # fmt: skip
+                raise ValueError(f"run.{table} must be a table of strings: {value!r}")
+            object.__setattr__(self, table, dict(value))
+        bad = [n for n in [*self.packs, *self.routes.values()] if not NAME_PATTERN.fullmatch(n)]
+        if bad:
+            raise ValueError(f"expert names in run.packs / run.routes must match {NAME_PATTERN.pattern}: {bad}")
+
+    def total_steps(self, train: TrainConfig) -> int:
+        if self.steps is not None:
+            return self.steps
+        return -(-self.tokens // train.global_batch_tokens)
+
+    def to_dict(self) -> dict[str, Any]:
+        return dataclasses.asdict(self)
+
+
 @dataclass(frozen=True)
 class RunConfig:
-    """One row config read from TOML: DEFAULTS overlaid with the file. The stage tables of row files and the run
-    identity fields (seeds, matrix row) land with the training loop in step I5."""
+    """One row config: DEFAULTS overlaid with the file (and, for a row file with stages, with one stage)."""
 
     model: ModelConfig
     train: TrainConfig
@@ -287,10 +410,13 @@ class RunConfig:
     tokenizer: dict[str, Any]
     eval: dict[str, Any]
     registry: dict[str, Any]
-    extra: dict[str, Any] = field(default_factory=dict)  # top-level tables DEFAULTS does not own (I5 stages)
+    run: RunSpec | None = None  # the [run] table; None for a config that describes no training run
+    extra: dict[str, Any] = field(default_factory=dict)  # top-level tables DEFAULTS does not own
 
 
 def _overlay(section: str, values: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(values, Mapping):
+        raise ValueError(f"[{section}] must be a table")
     unknown = set(values) - set(DEFAULTS[section])
     if unknown:
         raise ValueError(f"unknown keys in [{section}]: {sorted(unknown)}")
@@ -303,7 +429,14 @@ def run_config(data: Mapping[str, Any], *, extra_tables: tuple[str, ...] = ()) -
     unknown = set(data) - set(DEFAULTS) - set(extra_tables)
     if unknown:
         raise ValueError(f"unknown top-level tables: {sorted(unknown)}")
-    model = _overlay("model", data.get("model", {}))
+    raw_model = dict(data.get("model", {}))
+    model = _overlay("model", raw_model)
+    if model["profile"] is not None:  # DEFAULTS, then the profile, then the file's own keys
+        if model["profile"] not in PROFILES:
+            raise ValueError(f"unknown profile {model['profile']!r}; known: {sorted(PROFILES)}")
+        model.update(PROFILES[model["profile"]])
+        model.update(raw_model)
+    model.pop("profile")
     gqa = model.pop("gqa")
     if gqa not in GQA_MODES:
         raise ValueError(f"model.gqa must be one of {GQA_MODES}: {gqa!r}")
@@ -315,9 +448,13 @@ def run_config(data: Mapping[str, Any], *, extra_tables: tuple[str, ...] = ()) -
         raise ValueError(f"fusion {fusion!r} does not belong to family {cfg.family!r}: {FUSIONS[cfg.family]}")
     routing = _overlay("routing", data.get("routing", {}))
     routing["g"] = tuple(float(x) for x in routing["g"])
+    train = TrainConfig(**_overlay("train", data.get("train", {})))
+    if train.seq > cfg.max_seq:
+        raise ValueError(f"train.seq = {train.seq} exceeds model.max_seq = {cfg.max_seq}")
+    spec = RunSpec(**_overlay("run", data["run"])) if "run" in data else None
     return RunConfig(
         model=cfg,
-        train=TrainConfig(**_overlay("train", data.get("train", {}))),
+        train=train,
         routing=routing,
         fusion=fusion,
         gqa=gqa,
@@ -325,10 +462,116 @@ def run_config(data: Mapping[str, Any], *, extra_tables: tuple[str, ...] = ()) -
         tokenizer=_overlay("tokenizer", data.get("tokenizer", {})),
         eval=_overlay("eval", data.get("eval", {})),
         registry=_overlay("registry", data.get("registry", {})),
+        run=spec,
         extra={k: data[k] for k in extra_tables if k in data},
     )
 
 
-def load_toml(path: Path, *, extra_tables: tuple[str, ...] = ()) -> RunConfig:
+# --- row files with stages ------------------------------------------------------------------------------------------
+#
+# A row file may hold top-level tables (shared by every stage) and [stage.NAME] tables. A stage table holds section
+# tables ([stage.NAME.run], [stage.NAME.model], ...) that update the file's sections key by key, and optionally
+# `replicates = [0, 1, 2]`: the stage then expands into NAME-r0, NAME-r1, ..., with "{r}" replaced by the replicate
+# in every string, run.replicate set, and run.init_seed / run.data_seed taken from same-length lists by position.
+
+STAGE_KEYS = ("replicates",)
+PER_REPLICATE = ("init_seed", "data_seed")
+
+
+def _substitute(value, r: int):
+    if isinstance(value, str):
+        return value.replace("{r}", str(r))
+    if isinstance(value, dict):
+        return {k: _substitute(v, r) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_substitute(v, r) for v in value]
+    return value
+
+
+def expand_stages(stages: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """{stage name: its section tables}, replicates expanded, in file order."""
+    out: dict[str, dict[str, Any]] = {}
+    for name, table in stages.items():
+        if not isinstance(table, Mapping):
+            raise ValueError(f"[stage.{name}] must be a table")
+        sections = {k: dict(v) for k, v in table.items() if k not in STAGE_KEYS}
+        bad = sorted(k for k in sections if k not in DEFAULTS)
+        if bad:
+            raise ValueError(f"[stage.{name}] holds unknown tables {bad}")
+        replicates = table.get("replicates")
+        if replicates is None:
+            sections.setdefault("run", {}).setdefault("name", name)
+            expanded = {name: sections}
+        else:
+            if not isinstance(replicates, list) or not replicates or len(set(replicates)) != len(replicates):
+                raise ValueError(f"[stage.{name}] replicates must be a non-empty list of distinct integers")
+            expanded = {}
+            for i, r in enumerate(replicates):
+                one = _substitute(sections, r)
+                run = one.setdefault("run", {})
+                for key in PER_REPLICATE:
+                    if isinstance(run.get(key), list):
+                        if len(run[key]) != len(replicates):
+                            raise ValueError(f"[stage.{name}] run.{key} needs one value per replicate")
+                        run[key] = run[key][i]
+                run["replicate"] = r
+                run.setdefault("name", f"{name}-r{r}")
+                expanded[f"{name}-r{r}"] = one
+        for key in expanded:
+            if key in out:
+                raise ValueError(f"stage {key!r} is defined twice")
+        out.update(expanded)
+    return out
+
+
+def parse_override(text: str) -> tuple[tuple[str, ...], Any]:
+    """`section.key=VALUE` (VALUE in TOML syntax, else a bare string) -> (path, value)."""
+    key, sep, raw = text.partition("=")
+    path = tuple(part for part in key.strip().split("."))
+    if not sep or len(path) < 2 or not all(path):
+        raise ValueError(f"an override is SECTION.KEY=VALUE, got {text!r}")
+    try:
+        value = tomllib.loads(f"v = {raw.strip()}")["v"]
+    except tomllib.TOMLDecodeError:
+        value = raw.strip()
+    return path, value
+
+
+def _apply_override(data: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
+    node = data
+    for part in path[:-1]:
+        node = node.setdefault(part, {})
+        if not isinstance(node, dict):
+            raise ValueError(f"override {'.'.join(path)}: {part} is not a table")
+    node[path[-1]] = value
+
+
+def read_row_file(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    """(the file's shared tables, its expanded stages)."""
     with open(path, "rb") as f:
-        return run_config(tomllib.load(f), extra_tables=extra_tables)
+        data = tomllib.load(f)
+    return data, expand_stages(data.pop("stage", {}))
+
+
+def stage_names(path: Path) -> list[str]:
+    return list(read_row_file(path)[1])
+
+
+def load_toml(
+    path: Path,
+    *,
+    stage: str | None = None,
+    overrides: tuple[str, ...] = (),
+    extra_tables: tuple[str, ...] = (),
+) -> RunConfig:
+    data, stages = read_row_file(path)
+    if stages and stage is None:
+        raise ValueError(f"{path} defines stages {list(stages)}; choose one (train --stage NAME)")
+    if stage is not None:
+        if stage not in stages:
+            raise ValueError(f"{path} has no stage {stage!r}; stages: {list(stages)}")
+        for section, values in stages[stage].items():
+            data[section] = {**data.get(section, {}), **values}
+    for text in overrides:
+        _apply_override(data, *parse_override(text))
+    return run_config(data, extra_tables=extra_tables)

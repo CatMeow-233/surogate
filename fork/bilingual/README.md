@@ -4,7 +4,7 @@
 
 研究的问题 [待实验]：从同一个双语种子分叉、在冻结的共享骨干（嵌入兼 tied head、attention、norm）上**各自独立训练**的中文 FFN 专家与英文 FFN 专家，组装后在没有任何联合训练的条件下能否完成跨语言组合；在同一组冻结的专家检查点上，“先混合、再经共享冻结的非线性读出”（pre）与“先读出、再混合”（post）是否不同；独立专家相对单一双语专家要付出多少切换代价与模块化代价。通道拼接等于 Top-2 输出求和是已知恒等式 [已知数学事实]，只作零假设与数值检查，不算贡献。
 
-**当前状态：实现步骤 I1–I4 已完成（只在 CPU 上验证）。** 包里有模型核心、路由、组装、冻结审计与参数预算（见下文“模型、路由与组装”），融合算子、同初始化合并与 router 门控（见下文“融合、合并与 router 门控”），以及数据管线与 Track S 生成器（见下文“数据与 Track S”）；还没有训练循环与评测代码，所以没有任何实验结果。凡涉及 RTX 5090 的吞吐、显存和时长，都是 [估计] 或 TBD，在 [运行手册](docs/runbook.md) 的 G0、G0.5 实测并记入 [实测记录](docs/measurements.md) 之前，不得写成结果。证据层级沿用手稿：[假设]、[建议]、[待实验]、[已知数学事实]、[已有论文结果]、[估计]。
+**当前状态：实现步骤 I1–I5 已完成（只在 CPU 上验证）。** 包里有模型核心、路由、组装、冻结审计与参数预算（见下文“模型、路由与组装”），融合算子、同初始化合并与 router 门控（见下文“融合、合并与 router 门控”），数据管线与 Track S 生成器（见下文“数据与 Track S”），以及训练循环、各 recipe 与运行登记（见下文“训练与运行登记”）；还没有评测代码，也没有在 GPU 上训练过任何模型，所以没有任何实验结果。凡涉及 RTX 5090 的吞吐、显存和时长，都是 [估计] 或 TBD，在 [运行手册](docs/runbook.md) 的 G0、G0.5 实测并记入 [实测记录](docs/measurements.md) 之前，不得写成结果。证据层级沿用手稿：[假设]、[建议]、[待实验]、[已知数学事实]、[已有论文结果]、[估计]。
 
 ## 决定 B-D1（已采用，owner 可以推翻）
 
@@ -26,11 +26,11 @@
 | [requirements-gpu.txt](requirements-gpu.txt) | GPU 主机环境 `fork/.venv-bilingual` 的依赖；torch 按 [运行手册的 G0](docs/runbook.md#g0-环境与-gpu-不变量) 另装 |
 | [src/surogate_bilingual/](src/surogate_bilingual/) | 包代码。`import surogate_bilingual` 不导入 torch，也不导入任何 `surogate` 模块；子模块按需导入 torch |
 | [docs/](docs/) | 决定与数据契约、运行手册和实测记录，见下文“文档” |
-| [examples/](examples/) | Track S 的生成规格 [track_s.toml](examples/track_s.toml)：人物与属性的规模、曝光次数、题量和全部模板（I4）；I5 在这里加入运行配置 |
+| [examples/](examples/) | Track S 的生成规格 [track_s.toml](examples/track_s.toml)：人物与属性的规模、曝光次数、题量和全部模板（I4）；最小决定性集合与 G1′ 的行配置 [pilot_rows.toml](examples/pilot_rows.toml)，以及 CPU 测试与运行手册 `--dry-run` 用的 [tiny.toml](examples/tiny.toml)（I5） |
 | [tests/cpu/](tests/cpu/) | CPU 测试，用 `fork/dev test bilingual` 运行；`golden/` 中是 pilot 几何的预算报告；`-m identity_check` 只运行恒等式检查 |
 | [reference/](reference/) | owner 的 v1.0 代码与数据，逐字节原样保存，sha256 固定在 `MANIFEST.json` 中；不打包，包代码不导入，只供测试按路径加载，见 [reference/README.md](reference/README.md) |
 
-后续步骤还会在 examples 中加入运行配置（I5），并加入 GPU 测试目录（I6）。
+步骤 I6 还会加入 GPU 测试目录。
 
 本包不进任何 wheel：根目录 `pyproject.toml` 的原生 wheel 只打包 `surogate/`，实验 wheel 只打包 `fork/experimental/src` 中的 `surogate.experimental*`。`tests/cpu/test_scaffold.py` 从这两个 pyproject 读出打包目录并检查本包不在其中，还检查：
 
@@ -115,6 +115,25 @@ PYTHONPATH=fork/bilingual/src "${FORK_PY:-.venv/bin/python}" -m surogate_bilingu
 PYTHONPATH=fork/bilingual/src "${FORK_PY:-.venv/bin/python}" -m surogate_bilingual synth --spec fork/bilingual/examples/track_s.toml --seed 20261102 --dry-run
 ```
 
+## 训练与运行登记（I5）
+
+以下都只在 CPU 上、用 `tiny` profile 与 64 个 id 的替身 tokenizer 验证过；验收、决定与偏离见 [docs/spec.md 的 I5 落地记录](docs/spec.md#i5-落地记录)。CPU 测试中的训练只检查实现是否符合设计（确定性、恢复、冻结、掩码、预算），loss 的数值不是实验结果。
+
+- **训练循环**（`train.loop`）：唯一的训练循环。按行配置的一个阶段运行：读入并校验 shard、种子 pack 与专家 pack 的全部哈希，由 recipe 建模型，`FreezePlan` 决定可训练的集合，优化器按 storage 审计；每步按 warmup + cosine 的学习率，从采样器取 `accum` 个 micro batch，由 shard 中的逐 token 路由经 recipe 的映射得到 plan，CUDA 上用 bf16 autocast（参数保持 fp32），损失只算 loss mask 为 1 的目标并按整步的目标数归一，梯度裁剪，向种子的解耦衰减，AdamW；每 `save_every` 步和最后一步原子地写状态，结束时重新核对冻结张量的哈希并写 pack。dev 与 test 划分的 shard 被拒绝。
+- **recipe**（`train.recipes`）：种子；专家（B1、B2、LP-k，可带冻结的上下文专家与可选的 KL-to-seed 锚点）；joint-wide B12a（由种子堆叠出 2f 宽的 FFN，down 乘 ½，初始时与种子函数相同）；Bridge 的 (a)、(b)、(c) 三种变体（默认 (c)，B-O13：源语言前缀走冻结的 ZH/EN pack，损失只在目标段上，pack 的 `depends_on` 记录 ZH/EN 的哈希）；T1′（训练目标语言专家的**副本**，原 pack 只读）；学习式 router 的 recipe 只抛 `NotImplementedError`（推迟项）。
+- **状态与恢复**（`train.state`）：每个状态有可训练张量、优化器状态、torch/numpy/Python 的 RNG、调度位置、采样器游标、冻结哈希和文件哈希；保留最近两个加每 `keep_every` 步一个。恢复时先清掉崩溃留下的临时目录，拒绝 `run_id` 不同、文件哈希或冻结哈希不符的状态，并在取第一个批次之前恢复采样器与 RNG。CPU 单线程下，中断后恢复的运行与不中断的运行逐位相同（I5-T2）。
+- **运行登记**（`registry`）：`run_id` 由 config 哈希、数据 manifest、tokenizer、种子指纹、代码提交、recipe 与两个种子决定；运行名绑定唯一的 `run_id`，同名不同 id 时拒绝；工作区 dirty 时拒绝，除非设置 `registry.allow_dirty`（并记录）。运行目录默认在 `--root` 下的 data/runs 中（根目录的 `.gitignore` 已忽略 data），所以运行输出不会让工作区变 dirty，也不会挡住 `fork/dev sync`。每个运行有 `run.json`、`environment.json`（环境指纹）与 `metrics.jsonl`。
+- **行配置**（`examples/`）：`pilot_rows.toml` 中每个训练行一个阶段，`replicates = [0, 1, 2]` 展开成 `-r0`…`-r2`，token 预算与手稿 §13 一致（G1′ 每个重复 0.9B，族 I 2.4B、族 II 1.2B、Bridge 0.4B）；lr 取手稿 §8 网格的中间值，调参台账的其他 lr 用 `--set train.lr=… --name …` 另起运行。全部是 [建议] 默认值，没有运行过。
+
+在仓库根目录用 CPU 测试的解释器即可列出阶段、检查配置（不写任何文件）：
+
+```bash
+PYTHONPATH=fork/bilingual/src "${FORK_PY:-.venv/bin/python}" -m surogate_bilingual train fork/bilingual/examples/pilot_rows.toml --list
+PYTHONPATH=fork/bilingual/src "${FORK_PY:-.venv/bin/python}" -m surogate_bilingual env --out environment.json --dry-run
+```
+
+`train … --stage S --dry-run` 还要读入并校验该阶段的全部输入（shard、tokenizer、pack），所以只有数据准备好之后才能对 pilot 行运行。
+
 ## 实现步骤
 
 每个步骤由一个或多个签名提交落地；提交前 `fork/dev map`、`fork/dev check` 和 `fork/dev test bilingual` 都要通过。各步骤的交付物和验收条件见 [docs/spec.md 的“实现步骤”](docs/spec.md#实现步骤)。
@@ -125,7 +144,7 @@ PYTHONPATH=fork/bilingual/src "${FORK_PY:-.venv/bin/python}" -m surogate_bilingu
 | I2 | 模型核心、路由、组装、冻结、哈希、参数审计 | 已完成（CPU）；CI 尚未运行，GPU 上未运行 |
 | I3 | 融合算子与合并，fp64 参照测试（复用 v1.0 的 `verify_merge_math.py`） | 已完成（CPU）；CI 尚未运行，GPU 上未运行 |
 | I4 | 数据：tokenizer、manifest、划分、去污染、shard、采样器、Track S、D_seed 混合 | 已完成（CPU）；CI 尚未运行，没有处理任何自然语料 |
-| I5 | 训练：单一训练循环、各 recipe、状态与恢复、运行登记 | 未开始 |
+| I5 | 训练：单一训练循环、各 recipe、状态与恢复、运行登记 | 已完成（CPU）；CI 尚未运行，GPU 上未运行，没有训练过任何实验模型 |
 | I6 | 评测、统计与 RTX 5090 运行手册 | 未开始 |
 
 ## 文档

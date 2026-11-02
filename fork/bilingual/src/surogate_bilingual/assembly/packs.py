@@ -20,8 +20,8 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import shutil
-import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +34,7 @@ from ..canonical import FORMAT_PATTERN, atomic_directory, check_format, sha256_f
 from ..config import N_SPECIAL, NAME_PATTERN, ModelConfig, config_hash
 from ..model.backbone import backbone_keys, ffn_param_names
 from ..model.bank import expert_keys
+from ..registry.env import code_identity
 from .hashing import content_hash, seed_fingerprint
 
 SIDECAR = "pack.json"
@@ -42,7 +43,6 @@ PROBE = "probe.safetensors"
 TOKENIZER = "tokenizer.json"
 PROBE_SEED = 0
 PROBE_BATCH = 2
-SRC_DIR = Path(__file__).resolve().parents[2]  # fork/bilingual/src
 
 
 class AssemblyError(ValueError):
@@ -160,25 +160,6 @@ def _probe_meta(cfg: ModelConfig, plan: str) -> dict[str, Any]:
 # --- writing -------------------------------------------------------------------------------------------------------
 
 
-def code_identity() -> tuple[str | None, bool | None]:
-    """(commit, dirty) of the checkout this package runs from; dirty = uncommitted or untracked changes under
-    fork/bilingual/src. (None, None) outside a git checkout."""
-    try:
-        commit = subprocess.run(
-            ["git", "-C", str(SRC_DIR), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=30, check=True
-        ).stdout.strip()
-        status = subprocess.run(
-            ["git", "-C", str(SRC_DIR), "status", "--porcelain", "--", "."],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=True,
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return None, None
-    return commit, bool(status.strip())
-
-
 def _created() -> str:
     return datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -254,10 +235,14 @@ def seed_expert_init(seed: SeedPack, cfg: ModelConfig) -> dict[str, torch.Tensor
 
 
 def check_extends(seed: SeedPack, cfg: ModelConfig) -> None:
-    if cfg.replace(expert_layers=None) != seed.config:
+    """A config forked from a seed may differ from it in expert_layers (LP-k), and a family-I config with experts
+    on every layer also in ffn_width (B12a's width-2f expert): neither changes theta_S."""
+    base = cfg.replace(expert_layers=None, ffn_width=seed.config.ffn_width)
+    wider = cfg.ffn_width != seed.config.ffn_width
+    if base != seed.config or (wider and (cfg.family != "swiglu" or cfg.expert_layers is not None)):
         raise ConfigMismatchError(
             f"config {config_hash(cfg)[:12]} is not the seed's config ({seed.meta['config_hash'][:12]}) with expert"
-            " layers chosen; only expert_layers may differ"
+            " layers chosen; only expert_layers (and, for a family-I expert on every layer, ffn_width) may differ"
         )
 
 
@@ -267,8 +252,11 @@ def write_expert_pack(
     name: str,
     seed_pack: Path,
     train_meta: Mapping[str, Any],
-    depends_on: Sequence[Path] = (),
+    depends_on: Sequence[Path | tuple[str, Path]] = (),
 ) -> Path:
+    """`depends_on` entries are pack paths or (role, path) pairs; each is recorded as {name, expert_hash, path}
+    (and its role), so a Bridge (c) or T1' pack names the exact frozen experts it was trained against (IMPL-13);
+    the path is relative to the new pack's directory."""
     seed = read_pack(Path(seed_pack))
     if not isinstance(seed, SeedPack):
         raise FormatError(f"{seed_pack} is not a seed pack")
@@ -279,11 +267,14 @@ def write_expert_pack(
         raise BackboneMismatchError(f"the model's backbone differs from the seed pack {seed_pack}")
     expert = _cpu(model.expert_state(name))
     dependencies = []
-    for path in depends_on:
+    for entry in depends_on:
+        role, path = entry if isinstance(entry, tuple) else (None, entry)
         dep = read_pack(Path(path))
         if not isinstance(dep, ExpertPack):
             raise FormatError(f"depends_on entry {path} is not an expert pack")
-        dependencies.append({"name": dep.name, "expert_hash": dep.expert_hash, "path": str(path)})
+        rel = os.path.relpath(Path(path).resolve(), Path(out).resolve())  # relative to this pack: relocatable
+        record = {"name": dep.name, "expert_hash": dep.expert_hash, "path": rel}
+        dependencies.append(record if role is None else {**record, "role": role})
     meta = _common_meta(model, train_meta)
     meta.update(
         format="bilingual-expert/1",

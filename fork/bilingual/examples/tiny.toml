@@ -1,0 +1,101 @@
+# CPU smoke configs (docs/spec.md, I5): the `tiny` profile, used by tests/cpu and by the runbook's --dry-run checks.
+#
+# Paths are relative to the run root (`train --root DIR`): the CPU tests build a 64-id word-level stand-in
+# tokenizer at tok/tokenizer.json and the shards under shards/ in a temporary root, then run these stages in order:
+# seed -> zh, en -> bridge, t1p-en, b12a, lp-zh. Nothing here is an experiment; the numbers only have to be small.
+#
+#   python -m surogate_bilingual train fork/bilingual/examples/tiny.toml --list
+#   python -m surogate_bilingual train fork/bilingual/examples/tiny.toml --stage tiny-seed --root ROOT --dry-run
+
+[model]
+profile = "tiny"
+family = "swiglu"
+
+[train]
+microbatch = 2
+seq = 16
+accum = 2
+global_batch_tokens = 64
+lr = 3e-3
+warmup_frac = 0.1
+
+[stage.tiny-seed.run]
+recipe = "seed"
+matrix_row = "B0"
+init_seed = 11
+data_seed = 12
+steps = 20
+shard = "shards/d_seed"
+tokenizer = "tok/tokenizer.json"
+save_every = 5
+
+[stage.tiny-zh.run]
+recipe = "expert"
+expert = "zh"
+matrix_row = "B1"
+init_seed = 21
+data_seed = 22
+steps = 20
+shard = "shards/d_zh"
+seed_pack = "data/runs/tiny-seed/packs/seed"
+save_every = 5
+
+[stage.tiny-en.run]
+recipe = "expert"
+expert = "en"
+matrix_row = "B1"
+init_seed = 31
+data_seed = 32
+steps = 20
+shard = "shards/d_en"
+seed_pack = "data/runs/tiny-seed/packs/seed"
+save_every = 5
+
+[stage.tiny-bridge.run]
+recipe = "bridge"                 # variant from train.bridge_variant (default "c", B-O13)
+matrix_row = "T2"
+init_seed = 41
+data_seed = 42
+steps = 10
+shard = "shards/d_parallel"
+seed_pack = "data/runs/tiny-seed/packs/seed"
+packs = { zh = "data/runs/tiny-zh/packs/zh", en = "data/runs/tiny-en/packs/en" }
+save_every = 5
+
+[stage.tiny-t1p-en.run]
+recipe = "target_copy"            # T1', direction zh>en: trains a copy of EN; the prefix runs the frozen ZH
+target = "en"
+source = "zh"
+matrix_row = "T1'"
+init_seed = 51
+data_seed = 52
+steps = 10
+shard = "shards/d_parallel_zh_en"
+seed_pack = "data/runs/tiny-seed/packs/seed"
+packs = { zh = "data/runs/tiny-zh/packs/zh", en = "data/runs/tiny-en/packs/en" }
+save_every = 5
+
+[stage.tiny-b12a.run]
+recipe = "joint_wide"             # B12a: one width-2f expert from the stacked seed FFN on D_zh u D_en
+expert = "joint"
+matrix_row = "B12a"
+init_seed = 61
+data_seed = 62
+steps = 10
+shard = "shards/d_zh_en"
+seed_pack = "data/runs/tiny-seed/packs/seed"
+save_every = 5
+
+[stage.tiny-lp-zh.model]
+expert_layers = [1]               # the LP-k mechanics in the 2-layer tiny model: layer 0 keeps the frozen seed FFN
+
+[stage.tiny-lp-zh.run]
+recipe = "expert"
+expert = "zh"
+matrix_row = "LP-4"
+init_seed = 71
+data_seed = 72
+steps = 5
+shard = "shards/d_zh"
+seed_pack = "data/runs/tiny-seed/packs/seed"
+save_every = 5

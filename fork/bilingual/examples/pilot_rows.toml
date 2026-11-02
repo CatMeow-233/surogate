@@ -1,0 +1,404 @@
+# Run configs of the minimal decisive set (MS §13) and the G1' pilot, one stage per training row.
+#
+#   python -m surogate_bilingual train fork/bilingual/examples/pilot_rows.toml --list
+#   python -m surogate_bilingual train fork/bilingual/examples/pilot_rows.toml --stage seed-I-r0 [--dry-run]
+#
+# Status: every value is a [建议] default of the preregistration draft v1.1 (B-O7, B-O10) until the owner locks it
+# (MS §9.7); G1' and G0.5 may change the token budgets and the replicate count. Nothing here has run.
+#
+# - `replicates = [0, 1, 2]` expands a stage into NAME-r0, NAME-r1, NAME-r2; "{r}" in strings is the replicate, and
+#   init_seed / data_seed lists give one seed per replicate. A replicate is a new seed S plus new experts (B-O6).
+# - Seeds follow one scheme, so that no two runs share one: init_seed = 1000 k + 10 r + 1 and
+#   data_seed = 1000 k + 10 r + 2, with k the stage's number below. Expert runs start from their seed pack, so their
+#   init_seed is recorded but draws nothing.
+# - lr is the middle of the MS §8 grid (seed {3e-4, 6e-4, 1e-3}, experts {1e-4, 2e-4, 3e-4}); the tuning ledger
+#   (MS §9.6) runs each arm's three dev trials as separate runs: --set train.lr=3e-4 --name seed-I-r0-lr3e-4.
+# - Paths are relative to the repository root (the runbook's working directory); everything under data/ is
+#   git-ignored. The data pipeline (`shard`, step I4) writes the shards: seed, zh, en as in the runbook's G1' data
+#   preparation; zh_en with `--split zh_train,en_train` (B2, B12a, and the T3'' replay); parallel with `--bridge`,
+#   parallel_zh_en / parallel_en_zh with `--bridge --direction`, parallel_unpaired with `--bridge --unpair-seed`.
+#   Packs land in data/runs/<run name>/packs/.
+# - Tokens per replicate: G1' 0.9B (mech8); family I 2.4B, family II 1.2B, Bridge 0.4B, together 4.0B (MS §13).
+
+[model]
+profile = "pilot"
+family = "swiglu"
+
+[train]                       # B-O10: 65,536 tokens/step = 16 x 1024 x accum 4; warmup 2 %, cosine to 10 %
+global_batch_tokens = 65536
+microbatch = 16
+seq = 1024
+accum = 4
+
+# ---------------------------------------------------------------------------------------------------------------
+# G1': the measurability pilot (mech8 = 8 layers), 3 replicates. Pass rule: runbook G1'.
+# ---------------------------------------------------------------------------------------------------------------
+
+[stage.g1p-seed]  # k = 1
+replicates = [0, 1, 2]
+
+[stage.g1p-seed.model]
+profile = "mech8"
+
+[stage.g1p-seed.train]
+lr = 6e-4
+
+[stage.g1p-seed.run]
+recipe = "seed"
+matrix_row = "B0"
+init_seed = [1001, 1011, 1021]
+data_seed = [1002, 1012, 1022]
+tokens = 300_000_000
+shard = "data/shards/seed"
+tokenizer = "data/tokenizer/tokenizer.json"
+
+[stage.g1p-zh]  # k = 2
+replicates = [0, 1, 2]
+
+[stage.g1p-zh.model]
+profile = "mech8"
+
+[stage.g1p-zh.train]
+lr = 2e-4
+
+[stage.g1p-zh.run]
+recipe = "expert"
+expert = "zh"
+matrix_row = "B1"
+init_seed = [2001, 2011, 2021]
+data_seed = [2002, 2012, 2022]
+tokens = 100_000_000
+shard = "data/shards/zh"
+seed_pack = "data/runs/g1p-seed-r{r}/packs/seed"
+
+[stage.g1p-en]  # k = 3
+replicates = [0, 1, 2]
+
+[stage.g1p-en.model]
+profile = "mech8"
+
+[stage.g1p-en.train]
+lr = 2e-4
+
+[stage.g1p-en.run]
+recipe = "expert"
+expert = "en"
+matrix_row = "B1"
+init_seed = [3001, 3011, 3021]
+data_seed = [3002, 3012, 3022]
+tokens = 100_000_000
+shard = "data/shards/en"
+seed_pack = "data/runs/g1p-seed-r{r}/packs/seed"
+
+[stage.g1p-b2]  # k = 4
+replicates = [0, 1, 2]
+
+[stage.g1p-b2.model]
+profile = "mech8"
+
+[stage.g1p-b2.train]
+lr = 2e-4
+
+[stage.g1p-b2.run]
+recipe = "expert"
+expert = "bi"
+matrix_row = "B2"
+init_seed = [4001, 4011, 4021]
+data_seed = [4002, 4012, 4022]
+tokens = 200_000_000
+shard = "data/shards/zh_en"
+seed_pack = "data/runs/g1p-seed-r{r}/packs/seed"
+
+[stage.g1p-b12a]  # k = 5
+replicates = [0, 1, 2]
+
+[stage.g1p-b12a.model]
+profile = "mech8"
+
+[stage.g1p-b12a.train]
+lr = 2e-4
+
+[stage.g1p-b12a.run]
+recipe = "joint_wide"
+expert = "joint"
+matrix_row = "B12a"
+init_seed = [5001, 5011, 5021]
+data_seed = [5002, 5012, 5022]
+tokens = 200_000_000
+shard = "data/shards/zh_en"
+seed_pack = "data/runs/g1p-seed-r{r}/packs/seed"
+
+# ---------------------------------------------------------------------------------------------------------------
+# Family I (SwiGLU, f = 1728; MS §7.1): S_I, ZH-I, EN-I, B2, B12a, LP-4.
+# ---------------------------------------------------------------------------------------------------------------
+
+[stage.seed-I]  # k = 6
+replicates = [0, 1, 2]
+
+[stage.seed-I.train]
+lr = 6e-4
+
+[stage.seed-I.run]
+recipe = "seed"
+matrix_row = "B0"
+init_seed = [6001, 6011, 6021]
+data_seed = [6002, 6012, 6022]
+tokens = 800_000_000
+shard = "data/shards/seed"
+tokenizer = "data/tokenizer/tokenizer.json"
+
+[stage.zh-I]  # k = 7
+replicates = [0, 1, 2]
+
+[stage.zh-I.train]
+lr = 2e-4
+
+[stage.zh-I.run]
+recipe = "expert"
+expert = "zh"
+matrix_row = "B1"
+init_seed = [7001, 7011, 7021]
+data_seed = [7002, 7012, 7022]
+tokens = 200_000_000
+shard = "data/shards/zh"
+seed_pack = "data/runs/seed-I-r{r}/packs/seed"
+
+[stage.en-I]  # k = 8
+replicates = [0, 1, 2]
+
+[stage.en-I.train]
+lr = 2e-4
+
+[stage.en-I.run]
+recipe = "expert"
+expert = "en"
+matrix_row = "B1"
+init_seed = [8001, 8011, 8021]
+data_seed = [8002, 8012, 8022]
+tokens = 200_000_000
+shard = "data/shards/en"
+seed_pack = "data/runs/seed-I-r{r}/packs/seed"
+
+[stage.b2-I]  # k = 9: one bilingual expert on the ZH + EN tokens (RQ3b)
+replicates = [0, 1, 2]
+
+[stage.b2-I.train]
+lr = 2e-4
+
+[stage.b2-I.run]
+recipe = "expert"
+expert = "bi"
+matrix_row = "B2"
+init_seed = [9001, 9011, 9021]
+data_seed = [9002, 9012, 9022]
+tokens = 400_000_000
+shard = "data/shards/zh_en"
+seed_pack = "data/runs/seed-I-r{r}/packs/seed"
+
+[stage.b12a-I]  # k = 10: the width-2f ceiling; over the update budget by design
+replicates = [0, 1, 2]
+
+[stage.b12a-I.train]
+lr = 2e-4
+
+[stage.b12a-I.run]
+recipe = "joint_wide"
+expert = "joint"
+matrix_row = "B12a"
+init_seed = [10_001, 10_011, 10_021]
+data_seed = [10_002, 10_012, 10_022]
+tokens = 400_000_000
+shard = "data/shards/zh_en"
+seed_pack = "data/runs/seed-I-r{r}/packs/seed"
+
+[stage.lp4-zh-I]  # k = 11: LP-4 = layers 0..3 and 20..23 (MS §8.2)
+replicates = [0, 1, 2]
+
+[stage.lp4-zh-I.model]
+expert_layers = [0, 1, 2, 3, 20, 21, 22, 23]
+
+[stage.lp4-zh-I.train]
+lr = 2e-4
+
+[stage.lp4-zh-I.run]
+recipe = "expert"
+expert = "zh"
+matrix_row = "LP-4"
+init_seed = [11_001, 11_011, 11_021]
+data_seed = [11_002, 11_012, 11_022]
+tokens = 200_000_000
+shard = "data/shards/zh"
+seed_pack = "data/runs/seed-I-r{r}/packs/seed"
+
+[stage.lp4-en-I]  # k = 12
+replicates = [0, 1, 2]
+
+[stage.lp4-en-I.model]
+expert_layers = [0, 1, 2, 3, 20, 21, 22, 23]
+
+[stage.lp4-en-I.train]
+lr = 2e-4
+
+[stage.lp4-en-I.run]
+recipe = "expert"
+expert = "en"
+matrix_row = "LP-4"
+init_seed = [12_001, 12_011, 12_021]
+data_seed = [12_002, 12_012, 12_022]
+tokens = 200_000_000
+shard = "data/shards/en"
+seed_pack = "data/runs/seed-I-r{r}/packs/seed"
+
+# ---------------------------------------------------------------------------------------------------------------
+# Family II (the canonical slot operator, B-O4; MS §7.2): S_II, ZH-II, EN-II. B4-II, B8 and B9-II only assemble.
+# ---------------------------------------------------------------------------------------------------------------
+
+[stage.seed-II]  # k = 13
+replicates = [0, 1, 2]
+
+[stage.seed-II.model]
+family = "slot"
+
+[stage.seed-II.train]
+lr = 6e-4
+
+[stage.seed-II.run]
+recipe = "seed"
+matrix_row = "B0'"
+init_seed = [13_001, 13_011, 13_021]
+data_seed = [13_002, 13_012, 13_022]
+tokens = 800_000_000
+shard = "data/shards/seed"
+tokenizer = "data/tokenizer/tokenizer.json"
+
+[stage.zh-II]  # k = 14
+replicates = [0, 1, 2]
+
+[stage.zh-II.model]
+family = "slot"
+
+[stage.zh-II.train]
+lr = 2e-4
+
+[stage.zh-II.run]
+recipe = "expert"
+expert = "zh"
+matrix_row = "B1'"
+init_seed = [14_001, 14_011, 14_021]
+data_seed = [14_002, 14_012, 14_022]
+tokens = 200_000_000
+shard = "data/shards/zh"
+seed_pack = "data/runs/seed-II-r{r}/packs/seed"
+
+[stage.en-II]  # k = 15
+replicates = [0, 1, 2]
+
+[stage.en-II.model]
+family = "slot"
+
+[stage.en-II.train]
+lr = 2e-4
+
+[stage.en-II.run]
+recipe = "expert"
+expert = "en"
+matrix_row = "B1'"
+init_seed = [15_001, 15_011, 15_021]
+data_seed = [15_002, 15_012, 15_022]
+tokens = 200_000_000
+shard = "data/shards/en"
+seed_pack = "data/runs/seed-II-r{r}/packs/seed"
+
+# ---------------------------------------------------------------------------------------------------------------
+# Bridge (family I, ZH-I and EN-I frozen; MS §7.3, §8.4): T1' (both directions), T2, T3', T3''. Every T arm has
+# the same parallel-token budget, steps and lr grid. The parallel shards put the source span on its language's
+# route with loss 0 and the target span on the "bridge" route; T1' needs one shard per direction.
+# ---------------------------------------------------------------------------------------------------------------
+
+[stage.t1p-en-I]  # k = 16: zh>en: trains a copy of EN-I
+replicates = [0, 1, 2]
+
+[stage.t1p-en-I.train]
+lr = 2e-4
+
+[stage.t1p-en-I.run]
+recipe = "target_copy"
+target = "en"
+source = "zh"
+matrix_row = "T1'"
+init_seed = [16_001, 16_011, 16_021]
+data_seed = [16_002, 16_012, 16_022]
+tokens = 50_000_000
+shard = "data/shards/parallel_zh_en"
+seed_pack = "data/runs/seed-I-r{r}/packs/seed"
+packs = { zh = "data/runs/zh-I-r{r}/packs/zh", en = "data/runs/en-I-r{r}/packs/en" }
+
+[stage.t1p-zh-I]  # k = 17: en>zh: trains a copy of ZH-I
+replicates = [0, 1, 2]
+
+[stage.t1p-zh-I.train]
+lr = 2e-4
+
+[stage.t1p-zh-I.run]
+recipe = "target_copy"
+target = "zh"
+source = "en"
+matrix_row = "T1'"
+init_seed = [17_001, 17_011, 17_021]
+data_seed = [17_002, 17_012, 17_022]
+tokens = 50_000_000
+shard = "data/shards/parallel_en_zh"
+seed_pack = "data/runs/seed-I-r{r}/packs/seed"
+packs = { zh = "data/runs/zh-I-r{r}/packs/zh", en = "data/runs/en-I-r{r}/packs/en" }
+
+[stage.t2-I]  # k = 18: the Bridge, variant (c) (B-O13)
+replicates = [0, 1, 2]
+
+[stage.t2-I.train]
+lr = 2e-4
+bridge_variant = "c"
+
+[stage.t2-I.run]
+recipe = "bridge"
+expert = "bridge"
+matrix_row = "T2"
+init_seed = [18_001, 18_011, 18_021]
+data_seed = [18_002, 18_012, 18_022]
+tokens = 100_000_000
+shard = "data/shards/parallel"
+seed_pack = "data/runs/seed-I-r{r}/packs/seed"
+packs = { zh = "data/runs/zh-I-r{r}/packs/zh", en = "data/runs/en-I-r{r}/packs/en" }
+
+[stage.t3p-I]  # k = 19: a third expert on parallel data whose pairs are shuffled
+replicates = [0, 1, 2]
+
+[stage.t3p-I.train]
+lr = 2e-4
+bridge_variant = "c"
+
+[stage.t3p-I.run]
+recipe = "bridge"
+expert = "t3"
+matrix_row = "T3'"
+init_seed = [19_001, 19_011, 19_021]
+data_seed = [19_002, 19_012, 19_022]
+tokens = 100_000_000
+shard = "data/shards/parallel_unpaired"
+seed_pack = "data/runs/seed-I-r{r}/packs/seed"
+packs = { zh = "data/runs/zh-I-r{r}/packs/zh", en = "data/runs/en-I-r{r}/packs/en" }
+
+[stage.t3pp-I]  # k = 20: a third expert on as many monolingual replay tokens
+replicates = [0, 1, 2]
+
+[stage.t3pp-I.train]
+lr = 2e-4
+
+[stage.t3pp-I.run]
+recipe = "expert"
+expert = "t3"
+matrix_row = "T3''"
+init_seed = [20_001, 20_011, 20_021]
+data_seed = [20_002, 20_012, 20_022]
+tokens = 100_000_000
+shard = "data/shards/zh_en"
+seed_pack = "data/runs/seed-I-r{r}/packs/seed"
