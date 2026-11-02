@@ -4,7 +4,7 @@
 
 研究的问题 [待实验]：从同一个双语种子分叉、在冻结的共享骨干（嵌入兼 tied head、attention、norm）上**各自独立训练**的中文 FFN 专家与英文 FFN 专家，组装后在没有任何联合训练的条件下能否完成跨语言组合；在同一组冻结的专家检查点上，“先混合、再经共享冻结的非线性读出”（pre）与“先读出、再混合”（post）是否不同；独立专家相对单一双语专家要付出多少切换代价与模块化代价。通道拼接等于 Top-2 输出求和是已知恒等式 [已知数学事实]，只作零假设与数值检查，不算贡献。
 
-**当前状态：实现步骤 I1–I5 已完成（只在 CPU 上验证）。** 包里有模型核心、路由、组装、冻结审计与参数预算（见下文“模型、路由与组装”），融合算子、同初始化合并与 router 门控（见下文“融合、合并与 router 门控”），数据管线与 Track S 生成器（见下文“数据与 Track S”），以及训练循环、各 recipe 与运行登记（见下文“训练与运行登记”）；还没有评测代码，也没有在 GPU 上训练过任何模型，所以没有任何实验结果。凡涉及 RTX 5090 的吞吐、显存和时长，都是 [估计] 或 TBD，在 [运行手册](docs/runbook.md) 的 G0、G0.5 实测并记入 [实测记录](docs/measurements.md) 之前，不得写成结果。证据层级沿用手稿：[假设]、[建议]、[待实验]、[已知数学事实]、[已有论文结果]、[估计]。
+**当前状态：P0 的实现步骤 I1–I6 已完成（只在 CPU 上验证）。** 包里有模型核心、路由、组装、冻结审计与参数预算（见下文“模型、路由与组装”），融合算子、同初始化合并与 router 门控（见下文“融合、合并与 router 门控”），数据管线与 Track S 生成器（见下文“数据与 Track S”），训练循环、各 recipe 与运行登记（见下文“训练与运行登记”），以及评测、统计、资源审计与 RTX 5090 运行手册（见下文“评测、统计与运行手册”）。没有在 GPU 上训练或评测过任何模型，所以没有任何实验结果。凡涉及 RTX 5090 的吞吐、显存和时长，都是 [估计] 或 TBD，在 [运行手册](docs/runbook.md) 的 G0、G0.5 实测并记入 [实测记录](docs/measurements.md) 之前，不得写成结果。证据层级沿用手稿：[假设]、[建议]、[待实验]、[已知数学事实]、[已有论文结果]、[估计]。
 
 ## 决定 B-D1（已采用，owner 可以推翻）
 
@@ -28,9 +28,8 @@
 | [docs/](docs/) | 决定与数据契约、运行手册和实测记录，见下文“文档” |
 | [examples/](examples/) | Track S 的生成规格 [track_s.toml](examples/track_s.toml)：人物与属性的规模、曝光次数、题量和全部模板（I4）；最小决定性集合与 G1′ 的行配置 [pilot_rows.toml](examples/pilot_rows.toml)，以及 CPU 测试与运行手册 `--dry-run` 用的 [tiny.toml](examples/tiny.toml)（I5） |
 | [tests/cpu/](tests/cpu/) | CPU 测试，用 `fork/dev test bilingual` 运行；`golden/` 中是 pilot 几何的预算报告；`-m identity_check` 只运行恒等式检查 |
+| [tests/gpu/](tests/gpu/) | GPU 测试（运行手册 G0 第 3 步），在 GPU 主机的 `fork/.venv-bilingual` 中运行；没有 CUDA 时全部跳过 |
 | [reference/](reference/) | owner 的 v1.0 代码与数据，逐字节原样保存，sha256 固定在 `MANIFEST.json` 中；不打包，包代码不导入，只供测试按路径加载，见 [reference/README.md](reference/README.md) |
-
-步骤 I6 还会加入 GPU 测试目录。
 
 本包不进任何 wheel：根目录 `pyproject.toml` 的原生 wheel 只打包 `surogate/`，实验 wheel 只打包 `fork/experimental/src` 中的 `surogate.experimental*`。`tests/cpu/test_scaffold.py` 从这两个 pyproject 读出打包目录并检查本包不在其中，还检查：
 
@@ -46,7 +45,7 @@
 
 ## 命令行
 
-在 GPU 主机上用 `fork/.venv-bilingual/bin/python -m surogate_bilingual 命令 ...` 运行，不带参数时列出命令。命令由 `surogate_bilingual.__main__.COMMANDS` 一张表定义：每个命令对应一个子模块及其入口函数，并且都接受 `--dry-run`（只解析参数、检查输入，不在临时目录之外写任何东西）。模块还没落地的命令以退出码 2 结束，并说明它在哪个步骤实现。
+在 GPU 主机上用 `fork/.venv-bilingual/bin/python -m surogate_bilingual 命令 ...` 运行，不带参数时列出命令。命令由 `surogate_bilingual.__main__.COMMANDS` 一张表定义：每个命令对应一个子模块及其入口函数，并且都接受 `--dry-run`（只解析参数、检查输入，不在临时目录之外写任何东西）。I6 之后表中的命令都已落地；以后若再加入模块还没落地的命令，它以退出码 2 结束并说明在哪个步骤实现。
 
 | 命令 | 作用 | 实现步骤 |
 |---|---|---|
@@ -134,6 +133,24 @@ PYTHONPATH=fork/bilingual/src "${FORK_PY:-.venv/bin/python}" -m surogate_bilingu
 
 `train … --stage S --dry-run` 还要读入并校验该阶段的全部输入（shard、tokenizer、pack），所以只有数据准备好之后才能对 pilot 行运行。
 
+## 评测、统计与运行手册（I6）
+
+以下都只在 CPU 上验证过；验收、决定与偏离见 [docs/spec.md 的 I6 落地记录](docs/spec.md#i6-落地记录)。CPU 测试中的评测在 tiny 模型和构造的题目上运行，检查的是实现是否符合设计（排序规则、评分规则、解码与路由、分解、统计检验的校准），其中的数值不是实验结果。
+
+- **评分**（`eval.score`、`eval.items`、`eval.models`，命令 `eval-tasks`）：E1、E2、E3-par、E3-ctx 按候选对数似然排序（手稿 §9.1：候选等长时求和，否则逐 token 平均），prompt 是共享前缀，只给候选 token 打分；E4 先批量 greedy 生成，再逐阶段精确评分槽位（名字按整词，属性按全部属性词表的联合最左最长匹配，数字用 `(?<!\d)43(?!\d)` 式的边界），并检查输出语言。没有子串锚点；锚点为空时记为“不适用”，不记为通过；评不了的题目（缺少路由需要的专家、R_src 遇到没有单一知识来源的题目）记为跳过并写明原因；每条预测都记录题目清单的哈希。臂的路由默认值按手稿 §7 的行 ID 预设（B4 为 R_out，B6/B9-II/B8 为常数门控双路，B3a–c 为合并……），每个参数都可以显式覆盖并记入结果。默认只评测 dev，test 题目要在预注册锁定之后显式加 `--allow-test`。
+- **生成**（`eval.generate`）：批量 greedy，路由在完整历史上计算后再切片（MA-09），路由轨迹是解码状态的一部分；没有 KV cache（推迟项）。
+- **NLL 与切换**（`eval.nll`、`eval.switch`，命令 `eval-nll`、`switch`）：BPB = nats / (ln 2 · UTF-8 字节)，2×2 矩阵带标签，只在同一列内比较；unigram 基线；切换代价分解 M、R_new、R_old（有翻译后的历史时另有 L_ref），以及切换后前 16 个目标 token 的 NLL 峰值。
+- **统计**（`eval.stats`，命令 `stats`）：Student t 分布（不依赖 scipy）、重复级单侧配对 t 检验、按模板聚类的 bootstrap、TOST、手稿 §9.3 的图形化守门（含 α 转移）与三类判定、功效、MDE 与重复数规则、G1′ 门槛与族 I 先行的无效性规则。
+- **报告与对照矩阵**（`eval.report`，`registry.matrix`，命令 `matrix`）：由预测得出带聚类 CI 的结果行（`bilingual-result/1`）；资源报告（`audit --resources`）把代码计数的预算与实测资源放在一起，实测之前 GPU 字段都是 null、状态 TBD；`matrix` 打印手稿 §7 的全部行，结果默认“未运行”。
+- **G0.5 与显存**（`audit.bench`、`audit.memory`，命令 `bench`）：吞吐与显存扫描（只在 CUDA 上运行，CPU 运行只供测试）、SDPA 后端探测，以及一次前向中 autograd 保存的张量字节数。
+- **运行手册**（[docs/runbook.md](docs/runbook.md)）：G0–G3 的全部命令；`tests/cpu/test_runbook.py` 对每条命令先做 `--dry-run`，再以 tiny 规模把整本手册按顺序真正走一遍（只有 CUDA 才能跑的命令除外）。
+
+列出对照矩阵（不读任何数据）：
+
+```bash
+PYTHONPATH=fork/bilingual/src "${FORK_PY:-.venv/bin/python}" -m surogate_bilingual matrix
+```
+
 ## 实现步骤
 
 每个步骤由一个或多个签名提交落地；提交前 `fork/dev map`、`fork/dev check` 和 `fork/dev test bilingual` 都要通过。各步骤的交付物和验收条件见 [docs/spec.md 的“实现步骤”](docs/spec.md#实现步骤)。
@@ -145,7 +162,7 @@ PYTHONPATH=fork/bilingual/src "${FORK_PY:-.venv/bin/python}" -m surogate_bilingu
 | I3 | 融合算子与合并，fp64 参照测试（复用 v1.0 的 `verify_merge_math.py`） | 已完成（CPU）；CI 尚未运行，GPU 上未运行 |
 | I4 | 数据：tokenizer、manifest、划分、去污染、shard、采样器、Track S、D_seed 混合 | 已完成（CPU）；CI 尚未运行，没有处理任何自然语料 |
 | I5 | 训练：单一训练循环、各 recipe、状态与恢复、运行登记 | 已完成（CPU）；CI 尚未运行，GPU 上未运行，没有训练过任何实验模型 |
-| I6 | 评测、统计与 RTX 5090 运行手册 | 未开始 |
+| I6 | 评测、统计、资源审计与 RTX 5090 运行手册 | 已完成（CPU）；CI 尚未运行，GPU 测试与运行手册在 GPU 主机上都未运行 |
 
 ## 文档
 

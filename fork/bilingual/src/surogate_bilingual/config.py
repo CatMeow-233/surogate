@@ -101,7 +101,21 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "normalization": "none",  # B-O11
         "special_tokens": list(SPECIAL_TOKENS),
     },
-    "eval": {"length_norm": "auto"},  # sum when every candidate has the same token length, else mean
+    "eval": {
+        "length_norm": "auto",  # MS §9.1: sum when every candidate has the same token length, else mean
+        "autocast": "none",  # [建议] evaluation in fp32 (bf16 on request); training uses bf16 autocast on CUDA
+        "max_new": 160,  # [建议] greedy tokens per E4 stage (the longest test reference is about 100 BPE tokens)
+        "lang_share": 0.9,  # [建议] lang_ok: the answer language's share of Han + Latin letters, names removed
+        "n_boot": 10_000,  # MS §9.2: clustered bootstrap resamples, fixed seed
+        "switch_k": 16,  # MS §9.1: the after-switch NLL spike covers the first 16 target tokens
+        # B-O8 / MS §9.3 [建议], locked before the pilot is unblinded (MS §9.7)
+        "alpha_branch": 0.0125,
+        "sesoi": {"H_A": 0.05, "H_B": 0.03, "H_C": 0.05},
+        "noninferiority": {"E1": 0.02, "bpb": 0.02},  # E1: absolute accuracy drop; BPB: bit/byte increase
+        "g1p": {"chance": 0.125, "margin": 0.20},  # G1': best of B0, B2, B12a >= chance + 20 pp on dev
+        "power": 0.8,  # MS §9.5: target power at the SESOI
+        "replicates": (3, 6),  # MS §9.5: R in {3, ..., 6}
+    },
     "registry": {"allow_dirty": False},
     # One run of a row file (step I5). Paths are relative to the run root (`train --root`, default the working
     # directory). Only the fields that enter the run identity (recipe and its arguments, seeds, steps, inputs by

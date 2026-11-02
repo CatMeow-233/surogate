@@ -305,3 +305,57 @@ def tiny_trained(tiny_root):
 def tiny_stage():
     """tiny_run(stage, *overrides) -> RunConfig (test modules cannot import conftest)."""
     return tiny_run
+
+
+# --- evaluation fixtures (step I6) ----------------------------------------------------------------------------------
+
+
+def tiny_item(
+    index: int,
+    family: str,
+    segments,
+    candidates=(),
+    gold=None,
+    *,
+    distractor=None,
+    answer_lang=None,
+    variant="qa",
+    direction="zh>zh",
+    split="dev",
+    knowledge_source=None,
+    question_template="q0",
+    **extra,
+):
+    """A bilingual-item/1 record in the tiny stand-in vocabulary (z0..z28, e0..e29)."""
+    segs = [{"lang": lang, "role": role, "text": text} for lang, role, text in segments]
+    answer_lang = answer_lang or next(s["lang"] for s in reversed(segs) if s["role"] in ("question", "answer"))
+    item = {"format": "bilingual-item/1", "id": f"{family}-{variant}-{index:04d}", "family": family,
+            "variant": variant, "direction": direction, "split": split,
+            "template_ids": {"question": question_template}, "segments": segs, "answer_lang": answer_lang,
+            "answer_sep": " ", "candidates": list(candidates), "gold_index": gold, "distractor_index": distractor,
+            "chance": 1 / len(candidates) if candidates else None, "knowledge_source": knowledge_source,
+            "structured": {}, "difficulty": {}, "generator": {"version": "test", "seed": 0}}  # fmt: skip
+    item.update(extra)
+    return item
+
+
+@pytest.fixture(scope="session")
+def item_maker():
+    """tiny_item(index, family, segments, candidates, gold, ...) -> a bilingual-item/1 dict."""
+    return tiny_item
+
+
+@pytest.fixture(scope="session")
+def tiny_assemblies(tiny_trained, tmp_path_factory):
+    """Assembly manifests over the tiny packs: zh+en (fusion output), zh+en with concat, and zh alone."""
+    from surogate_bilingual.assembly.assemble import assemble
+
+    out = tmp_path_factory.mktemp("assemblies")
+    zh, en = tiny_trained["zh"], tiny_trained["en"]
+    return {
+        "zh_en": assemble(tiny_trained["seed"], {"zh": zh, "en": en}, "output", out / "zh_en.json"),
+        "zh_en_concat": assemble(tiny_trained["seed"], {"zh": zh, "en": en}, "concat", out / "zh_en_concat.json"),
+        "zh": assemble(tiny_trained["seed"], {"zh": zh}, None, out / "zh.json"),
+        "seed": tiny_trained["seed"],
+        "dir": out,
+    }

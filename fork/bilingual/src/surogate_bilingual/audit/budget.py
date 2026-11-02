@@ -278,9 +278,24 @@ def main(argv: Sequence[str]) -> int:
     ap.add_argument("--profile", choices=sorted(PROFILES), default="pilot")
     ap.add_argument("--out", help="write the bilingual-budget/1 JSON here")
     ap.add_argument("--json", action="store_true", help="print JSON instead of the markdown table")
+    ap.add_argument(
+        "--resources",
+        action="store_true",
+        help="write the bilingual-resource/1 report: this budget plus the measured resources (TBD)",
+    )
+    ap.add_argument("--measured", help="with --resources: a bench point (JSON) whose measurements fill the report")
     ap.add_argument("--dry-run", action="store_true", help="compute and print; write nothing")
     args = ap.parse_args(list(argv))
     doc = report(args.profile)
+    if args.resources:
+        from ..eval.report import resource_report  # the report layer; the budget itself stays in audit
+
+        measured = json.loads(open(args.measured, encoding="utf-8").read()) if args.measured else None
+        doc = resource_report(args.profile, measured, budget=doc)
+        if args.out and not args.dry_run:
+            atomic_write_json(args.out, doc)
+        print(json.dumps(doc["measured"], indent=1, sort_keys=True))
+        return 0
     if args.out and not args.dry_run:
         atomic_write_json(args.out, doc)
     print(json.dumps(doc, indent=1, sort_keys=True) if args.json else markdown(doc))

@@ -255,16 +255,19 @@ def test_implemented_commands_resolve_to_a_function():
         assert callable(getattr(importlib.import_module(module_name(name)), COMMANDS[name].function)), name
 
 
-def test_command_line_lists_refuses_and_names_the_step(capsys):
-    from surogate_bilingual.__main__ import main
+def test_command_line_lists_refuses_and_names_the_step(capsys, monkeypatch):
+    from surogate_bilingual.__main__ import COMMANDS, Command, is_implemented, main
 
     assert main([]) == 0 and main(["--help"]) == 0
     listing = capsys.readouterr().out
     assert all(re.search(rf"^  {re.escape(name)} ", listing, re.MULTILINE) for name in PLANNED_COMMANDS), listing
+    assert "not implemented yet" not in listing and all(is_implemented(name) for name in COMMANDS)  # since I6
     assert main(["no-such-command"]) == 2
     assert "unknown command 'no-such-command'" in capsys.readouterr().err
-    assert main(["eval-nll", "--dry-run"]) == 2  # lands in I6
-    assert "'eval-nll' is not implemented yet; it lands in step I6" in capsys.readouterr().err
+    # a planned command whose module has not landed still exits 2 and names its step
+    monkeypatch.setitem(COMMANDS, "future", Command("eval.no_such_module", "a later command", "I7"))
+    assert main(["future", "--dry-run"]) == 2
+    assert "'future' is not implemented yet; it lands in step I7" in capsys.readouterr().err
 
 
 # --- repository wiring ---------------------------------------------------------------------------------------------
