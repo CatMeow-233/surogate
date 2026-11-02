@@ -36,6 +36,7 @@ from ..config import DEFAULTS
 from .docs import Doc, doc_line
 from .manifest import FORMAT as MANIFEST_FORMAT
 from .manifest import Manifest, file_entry, finish, load_manifest
+from .overlap import flagged_keys, load_report
 
 FORMAT = "bilingual-split/1"
 SPLITS = ("seed_train", "zh_train", "en_train", "parallel_train", "calib", "dev", "test")
@@ -261,9 +262,7 @@ def main(argv: Sequence[str]) -> int:
     split = load_split(args.split)
     exclude = []
     if args.exclude is not None:
-        report = json.loads(args.exclude.read_text(encoding="utf-8"))
-        check_format(report, "overlap")
-        exclude = list(report["flagged"])
+        exclude = sorted(flagged_keys(load_report(args.exclude)))
     if args.dry_run:
         import tempfile
 

@@ -316,10 +316,9 @@ def _run(args, manifest, tok, tok_sha: str) -> int:
         docs.extend(iter_file_docs(path, source=None, kind=None))
         inputs.append({"path": str(path), "sha256": sha256_file(path)})
     if args.exclude is not None:
-        from .decontam import load_report
+        from .overlap import filter_docs, load_report
 
-        flagged = load_report(args.exclude)["flagged"]
-        docs = [d for d in docs if d.key not in flagged]
+        docs = filter_docs(docs, load_report(args.exclude))
     kwargs: dict[str, Any] = {}
     extra: dict[str, Any] = {}
     if args.bridge:

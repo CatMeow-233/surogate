@@ -378,9 +378,11 @@ def test_i4_d7_exposures_per_fact_equal_the_declared_number(track_s_ci):
     by_name = {p.name: p for p in people}
     for component in B.COMPONENTS:
         for doc in _load(out, f"{component}/track_s.jsonl"):
-            if doc["meta"]["family"] not in ("bio", "parallel"):
+            if doc["meta"]["family"] not in ("bio", "parallel", "e4"):
                 continue
             for seg in doc["segments"]:
+                if seg["role"] == "instruction":
+                    continue
                 person = next(p for name, p in by_name.items() if name in seg["text"])
                 stated = find_attributes(seg["text"], seg["lang"], lex)
                 for a in ATTRIBUTES:
@@ -417,3 +419,50 @@ def test_i4_d7_dry_run_plans_without_writing(tmp_path, capsys):
     assert "test templates per family" in capsys.readouterr().out
     plan = B.plan(TRACK_S_SPEC, "full")
     assert plan["test_templates"]["E3ctx"] >= 100 and plan["items"]["E3ctx/cross"]["test"] == 4000
+
+
+def test_every_e4_prompt_format_is_trained_with_train_templates_only(track_s_ci):
+    """CR1 review: no training document held an E4 instruction, so every arm met the E4 prompt format zero-shot.
+    Now every train template of e4_instr / e4_back (both languages) occurs in some training document, no dev or test
+    template does, and an E4 item's prompt has the layout of the training documents up to their target."""
+    out, card = track_s_ci
+    spec = tomllib.loads(TRACK_S_SPEC.read_text("utf-8"))
+    pools = {
+        (lang, role, split): set(spec["templates"][lang][role][split])
+        for lang in ("zh", "en")
+        for role in ("e4_instr", "e4_back")
+        for split in ("train", "dev", "test")
+    }
+    used: Counter = Counter()
+    layouts: Counter = Counter()
+    docs = {c: _load(out, f"{c}/track_s.jsonl") for c in B.COMPONENTS}
+    for component, rows in docs.items():
+        for doc in rows:
+            instructions = [s for s in doc["segments"] if s["role"] == "instruction"]
+            for seg in instructions:
+                (key,) = [k for k, v in pools.items() if seg["text"] in v]
+                assert key[0] == seg["lang"], (doc["key"], seg)
+                used[(*key, seg["text"])] += 1
+            if instructions:
+                layouts[(component, tuple(s["role"] for s in doc["segments"]))] += 1
+    for (lang, role, split), templates in pools.items():
+        for text in templates:
+            if split == "train":
+                assert used[(lang, role, split, text)] > 0, (lang, role, text)
+            else:
+                assert used[(lang, role, split, text)] == 0, (lang, role, split, text)
+    assert set(layouts) == {
+        ("parallel", ("source", "instruction", "target")),
+        ("seed", ("source", "instruction", "target")),
+        ("seed", ("source", "instruction", "target", "instruction", "back")),
+    }
+    # the item prompt is (source + "\n", instruction) and generation starts right after the instruction; a
+    # switchback document continues with target + "\n", the back instruction and the back target
+    item = next(it for it in _items(out) if it["family"] == "E4" and it["variant"] == "switchback")
+    src, instr = [s for s in item["segments"] if s["text"] is not None][:2]
+    doc = next(d for d in docs["seed"] if d["meta"]["family"] == "e4" and len(d["segments"]) == 5)
+    assert src["text"].endswith("\n") and not instr["text"].endswith("\n")
+    texts = [s["text"] for s in doc["segments"]]
+    assert texts[0].endswith("\n") and not texts[1].endswith("\n") and texts[2].endswith("\n")
+    assert not texts[3].endswith("\n") and "\n" not in texts[4]
+    assert card["generator"]["version"] == "1.1.0" and all(card["status"].values())

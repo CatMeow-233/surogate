@@ -83,9 +83,11 @@ class Checker:
         """Count exposures from biography text: one name per biography, each attribute stated once and correctly."""
         for doc in docs:
             meta = doc.get("meta", {})
-            if meta.get("family") not in ("bio", "parallel"):
+            if meta.get("family") not in ("bio", "parallel", "e4"):
                 continue
             for seg in doc["segments"]:
+                if seg.get("role") == "instruction":  # E4 format: an instruction names no one
+                    continue
                 text, lang = seg.get("text"), seg.get("lang")
                 names = self.names_in(text)
                 if len(names) != 1:

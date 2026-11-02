@@ -13,7 +13,7 @@ rows) or gate lists (dual rows); it is part of the decoding state, not recompute
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 
 import torch
@@ -26,8 +26,8 @@ PlanFn = Callable[[int, list[int]], RoutePlan | None]
 @dataclass
 class Generation:
     prompt: list[int]
-    tokens: list[int]  # generated ids, the stopping <eos> left out
-    stop: str  # "eos" | "max_new"
+    tokens: list[int]  # generated ids, the stopping token (<eos> or a stop id) left out
+    stop: str  # "eos" | "stop" (a token of `stop_ids`) | "max_new"
     route_trace: list | None  # per position of prompt + tokens: an expert name, or the gate row of a dual token
     step_logits: list[torch.Tensor] | None = None  # [V] fp32 rows, one per generated token, when kept
 
@@ -86,9 +86,12 @@ def greedy_batch(
     *,
     keep_logits: bool = False,
     batch_size: int = 32,
+    stop_ids: Collection[int] = (),
 ) -> list[Generation]:
-    """Greedy continuation of each prompt until <eos> or `max_new` tokens. `plan_fn(i, ids)` returns the [1, len(ids),
-    E] plan of row i over its full history (None for a single-expert model)."""
+    """Greedy continuation of each prompt until <eos>, a token of `stop_ids` (E4: every token holding a newline) or
+    `max_new` tokens. `plan_fn(i, ids)` returns the [1, len(ids), E] plan of row i over its full history (None for a
+    single-expert model)."""
+    stop_ids = frozenset(int(t) for t in stop_ids)
     histories = [list(map(int, p)) for p in prompts]
     if any(not h for h in histories):
         raise ValueError("every prompt needs at least one token")
@@ -111,8 +114,8 @@ def greedy_batch(
                 token = int(row.argmax())
                 if keep_logits:
                     logits_kept[i].append(row.clone())
-                if token == eos:
-                    stop[i] = "eos"
+                if token == eos or token in stop_ids:
+                    stop[i] = "eos" if token == eos else "stop"
                     continue
                 histories[i].append(token)
                 new[i].append(token)

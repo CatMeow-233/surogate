@@ -315,8 +315,8 @@ def test_t2_routes_only_translation_answers_to_the_bridge_and_equals_t0_elsewher
     segs = it.prompt_segments(stand_in_tok, e4)
     plan = it.item_plan(e4, segs, 3, "en", model3.expert_names, t2)
     names = [model3.expert_names[i] for i in plan.route_ids()[0].tolist()]
-    n_prompt = sum(len(s.ids) for s in segs)
-    assert names[n_prompt:] == ["bridge"] * 3 and "bridge" not in names[:n_prompt]
+    n_source = len(segs[0].ids) + len(segs[1].ids)  # <eos> and the source segment
+    assert set(names[:n_source]) == {"zh"} and set(names[n_source:]) == {"bridge"}  # instruction and answer
     assert t2.label(e4) == ("R_out+answer>bridge", "one_hot") and t2.label(items[0]) == ("R_out", "one_hot")
 
 

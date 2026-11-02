@@ -361,18 +361,21 @@ def test_bridge_layout_unpair_and_direction_on_track_s_pairs(track_s_ci):
     assert {parallel.direction(d) for d in docs} == {"zh>en", "en>zh"}
     laid = [parallel.bridge_layout(d) for d in docs]
     for before, after in zip(docs, laid, strict=True):
-        src, tgt = after.segments
+        src, instr, tgt = after.segments  # Track S pairs are in the E4 translate format (CR1)
         assert (src.route, src.loss, tgt.route, tgt.loss) == (src.lang, False, "bridge", True)
+        assert (instr.role, instr.lang, instr.route, instr.loss) == ("instruction", tgt.lang, "bridge", False)
         assert [s.text for s in after.segments] == [s.text for s in before.segments if s.text is not None]
+    plain = parallel.bridge_layout(docs[0].replace(segments=(docs[0].segments[0], docs[0].segments[2])))
+    assert [s.role for s in plain.segments] == ["source", "target"]  # a natural pair has no instruction
     zh_en = parallel.select_direction(docs, "zh>en")
     assert zh_en and all(parallel.direction(d) == "zh>en" for d in zh_en)
     broken = parallel.unpair(docs, seed=5)
     assert broken == parallel.unpair(docs, seed=5) and broken != parallel.unpair(docs, seed=6)
     for before, after in zip(docs, broken, strict=True):
-        assert after.segments[0].text == before.segments[0].text  # the source stays
-        assert after.segments[1].text != before.segments[1].text  # its own target never does
+        assert after.segments[:2] == before.segments[:2]  # the source and its instruction stay
+        assert after.segments[2].text != before.segments[2].text  # its own target never does
         assert parallel.direction(after) == parallel.direction(before)
-    assert sorted(d.segments[1].text for d in broken) == sorted(d.segments[1].text for d in docs)  # same sentences
+    assert sorted(d.segments[2].text for d in broken) == sorted(d.segments[2].text for d in docs)  # same sentences
 
 
 def test_shard_bridge_command_writes_the_layout_the_recipes_read(data_pipeline, track_s_ci, tmp_path):
@@ -400,7 +403,7 @@ def test_shard_bridge_command_writes_the_layout_the_recipes_read(data_pipeline, 
         names = np.asarray(reader.route_names)[np.asarray(reader.routes)]
         loss = np.asarray(reader.loss_mask)
         assert set(names) == ({"zh", "bridge"} if name == "zh_en" else {"zh", "en", "bridge"})
-        assert (loss[names == "bridge"] == 1).all() and (loss[names != "bridge"] == 0).all()
+        assert (loss[names != "bridge"] == 0).all() and (loss[names == "bridge"] == 1).any()  # instructions: 0
     both = [
         "shard",
         "--manifest",

@@ -9,6 +9,12 @@ Rules (a training document is flagged when any of its n-grams under any rule occ
 - `token13`: 13-grams of token ids (the text encoded as user text); needs the tokenizer, so it runs after the
   tokenizer is trained.
 
+Short held-out text (CR1 review): a held-out segment shorter than n elements has no n-gram, so on its own it could
+never flag anything. A held-out segment of at least SHORT_MIN[rule] elements but fewer than n is therefore indexed
+whole, and a training segment that contains it as a contiguous run of elements is flagged (the short-example rule
+of GPT-3's contamination study, [建议] minimums: 8 words, 13 Han characters, 8 tokens). Segments shorter than the
+minimum are too generic to test and are counted in the report (`short_skipped`).
+
 n-grams are compared by 64-bit hashes (a polynomial rolling hash over per-element splitmix64 hashes, numpy
 uint64 arithmetic). A hash collision can only flag a clean document, never miss an overlap, so the filter errs on
 the side of removing.
@@ -18,22 +24,21 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import sys
 import unicodedata
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 
-from ..canonical import atomic_write_json, check_format
+from ..canonical import atomic_write_json
 from ..config import DEFAULTS
 from .docs import Doc, is_han
+from .overlap import FORMAT
 
-FORMAT = "bilingual-overlap/1"
 RULES = {"en_word13": 13, "zh_han25": 25, "token13": 13}
-_MASK = np.uint64(0xFFFFFFFFFFFFFFFF)
+SHORT_MIN = {"en_word13": 8, "zh_han25": 13, "token13": 8}  # [建议] shorter held-out segments are not tested
 _BASE = np.uint64(0x100000001B3)
 
 
@@ -102,6 +107,44 @@ def doc_grams(doc: Doc, rule: str, tok=None) -> np.ndarray:
     return np.unique(np.concatenate(parts)) if parts else np.zeros(0, dtype=np.uint64)
 
 
+def _unique(parts: list[np.ndarray]) -> np.ndarray:
+    return np.unique(np.concatenate(parts)) if parts else np.zeros(0, dtype=np.uint64)
+
+
+def heldout_index(heldout: Iterable[Doc], rule: str, tok=None) -> tuple[dict[int, np.ndarray], int]:
+    """({length: sorted hashes}, short segments skipped): the n-grams of every held-out segment (length n), and the
+    whole-segment hash of each segment with SHORT_MIN <= length < n (its own length)."""
+    n, short = RULES[rule], SHORT_MIN[rule]
+    parts: dict[int, list[np.ndarray]] = {}
+    skipped = 0
+    for doc in heldout:
+        for seg in doc.segments:
+            if not seg.text:
+                continue
+            e = elements(seg.text, rule, tok)
+            if len(e) >= n:
+                parts.setdefault(n, []).append(ngram_hashes(e, n))
+            elif len(e) >= short:
+                parts.setdefault(len(e), []).append(ngram_hashes(e, len(e)))
+            elif len(e):
+                skipped += 1
+    return {length: _unique(p) for length, p in sorted(parts.items())}, skipped
+
+
+def _hits(grams: np.ndarray, held: np.ndarray) -> bool:
+    if not len(grams) or not len(held):
+        return False
+    pos = np.searchsorted(held, grams)
+    pos[pos == len(held)] = 0
+    return bool((held[pos] == grams).any())
+
+
+def segment_hits(text: str, rule: str, index: dict[int, np.ndarray], tok=None) -> bool:
+    """True when the segment shares an n-gram with the held-out set, or contains a short held-out segment whole."""
+    e = elements(text, rule, tok)
+    return any(len(e) >= length and _hits(ngram_hashes(e, length), held) for length, held in index.items())
+
+
 @dataclass(frozen=True)
 class OverlapReport:
     rules: tuple[str, ...]
@@ -109,15 +152,18 @@ class OverlapReport:
     n_heldout: int
     flagged: dict[str, list[str]]  # train doc key -> rules that matched
     per_rule: dict[str, int]
+    short_skipped: dict[str, int] = field(default_factory=dict)  # held-out segments under SHORT_MIN, per rule
 
     def to_json(self) -> dict:
         return {
             "format": FORMAT,
             "rules": list(self.rules),
             "n": {r: RULES[r] for r in self.rules},
+            "short_min": {r: SHORT_MIN[r] for r in self.rules},
             "n_train": self.n_train,
             "n_heldout": self.n_heldout,
             "per_rule": dict(self.per_rule),
+            "short_skipped": dict(self.short_skipped),
             "flagged": {k: list(v) for k, v in sorted(self.flagged.items())},
         }
 
@@ -125,7 +171,8 @@ class OverlapReport:
 def overlap_report(
     train: Iterable[Doc], heldout: Iterable[Doc], tok=None, rules: Sequence[str] | None = None
 ) -> OverlapReport:
-    """Flag every training document that shares an n-gram with any held-out document, per rule."""
+    """Flag every training document that shares an n-gram with any held-out document (or contains a short held-out
+    segment whole), per rule."""
     if rules is None:  # DEFAULTS["data"]["decontam_rules"]; token13 only once the tokenizer exists
         rules = [r for r in DEFAULTS["data"]["decontam_rules"] if r != "token13" or tok is not None]
     rules = tuple(rules)
@@ -133,9 +180,9 @@ def overlap_report(
         if rule not in RULES:
             raise DecontamError(f"unknown rule {rule!r}; known: {sorted(RULES)}")
     heldout = list(heldout)
-    held = {
-        r: np.unique(np.concatenate([doc_grams(d, r, tok) for d in heldout] or [np.zeros(0, np.uint64)])) for r in rules
-    }
+    index, skipped = {}, {}
+    for rule in rules:
+        index[rule], skipped[rule] = heldout_index(heldout, rule, tok)
     flagged: dict[str, list[str]] = {}
     per_rule = {r: 0 for r in rules}
     n_train = 0
@@ -143,28 +190,12 @@ def overlap_report(
         n_train += 1
         hits = []
         for rule in rules:
-            grams = doc_grams(doc, rule, tok)
-            if len(grams) and len(held[rule]):
-                pos = np.searchsorted(held[rule], grams)
-                pos[pos == len(held[rule])] = 0
-                if bool((held[rule][pos] == grams).any()):
-                    hits.append(rule)
-                    per_rule[rule] += 1
+            if any(segment_hits(s.text, rule, index[rule], tok) for s in doc.segments if s.text):
+                hits.append(rule)
+                per_rule[rule] += 1
         if hits:
             flagged[doc.key] = hits
-    return OverlapReport(rules, n_train, len(heldout), flagged, per_rule)
-
-
-def filter_docs(docs: Iterable[Doc], report: OverlapReport | Mapping) -> list[Doc]:
-    """The documents the report did not flag, in order."""
-    flagged = report.flagged if isinstance(report, OverlapReport) else report["flagged"]
-    return [d for d in docs if d.key not in flagged]
-
-
-def load_report(path: Path) -> dict:
-    doc = json.loads(Path(path).read_text(encoding="utf-8"))
-    check_format(doc, "overlap")
-    return doc
+    return OverlapReport(rules, n_train, len(heldout), flagged, per_rule, skipped)
 
 
 def main(argv: Sequence[str]) -> int:

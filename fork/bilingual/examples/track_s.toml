@@ -28,6 +28,7 @@ parallel_pairs_per_person = 10
 qa_per_fact = { seed = 1, zh = 2, en = 2 }   # QA documents per fact (and per language for P_seed)
 seed_par_samples = 20000      # E3-par format samples over P_seed pairs (both variants, both languages)
 seed_ctx_samples = 80000      # E3-ctx format samples in D_seed, the eight language orders equally
+seed_e4_per_person = { translate = 1, switchback = 1 }  # E4 format samples in D_seed per P_seed person (CR1)
 expert_ctx_samples = 40000    # monolingual E3-ctx samples in D_zh and in D_en each
 items = { test = 2000, dev = 500 }            # per family, variant and direction
 ctx_categories = 7            # K: the rules are a bijection between 7 colours and the 7 weekdays
@@ -46,6 +47,7 @@ parallel_pairs_per_person = 2
 qa_per_fact = { seed = 1, zh = 1, en = 1 }
 seed_par_samples = 40
 seed_ctx_samples = 64
+seed_e4_per_person = { translate = 1, switchback = 1 }
 expert_ctx_samples = 24
 items = { test = 24, dev = 8 }
 ctx_categories = 7

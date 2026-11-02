@@ -6,13 +6,22 @@ Output directory:
 <out>/
   entities.jsonl               people (id, name, partition, group, attribute value indices)
   seed/track_s.jsonl           the D_seed component: P_seed biographies (zh and en) and QA, E3-par and E3-ctx
-                               format samples (train templates, fresh entities, all eight E3-ctx language orders)
+                               format samples (train templates, fresh entities, all eight E3-ctx language orders),
+                               and E4 format samples (translate and switchback documents over P_seed people)
   zh/track_s.jsonl             the D_zh component: P_zh biographies, zh QA of the qa_train half, zh mono E3-ctx
   en/track_s.jsonl             the D_en component (symmetric)
-  parallel/track_s.jsonl       the D_parallel component: zh/en biography pairs of the P_par train group
+  parallel/track_s.jsonl       the D_parallel component: zh/en biography pairs of the P_par train group, each in
+                               the E4 translate format (source, instruction, target)
   items/<family>.<split>.jsonl dev and test items (bilingual-item/1)
   datacard.json                bilingual-datacard/1, kind "track_s"
 ```
+
+E4 format (generator 1.1.0, CR1 review): every E4 prompt format occurs in training, with train templates only. A
+translate document is `source\n` + instruction + target (the target follows the instruction directly, exactly where
+an E4 item's generation starts); a switchback document adds `\n` + back instruction + back target. D_parallel holds
+translate documents only, so that every T arm (T1' one direction per run, T2, T3') trains on the same documents;
+the switchback format is in D_seed. The E4 documents of D_seed reuse renderings of the person's seed biographies, so
+the declared exposures per fact do not change.
 
 The same (generator version, spec bytes, profile, seed) gives byte-identical files: every random stream is a
 numpy Generator seeded with (seed, stream id), JSON is canonical, and nothing records a time. `datacard.json`
@@ -38,7 +47,7 @@ from ..docs import Doc, Segment, doc_line
 from . import leak
 from .checker import Checker, group_items, label_shares
 from .entities import CodeAllocator, Person, by_group, draw_people
-from .render import ANSWER_SEP, Renderer, join_segments
+from .render import ANSWER_SEP, Renderer
 from .tasks import (
     DIRECTIONS,
     FAMILIES,
@@ -54,7 +63,7 @@ from .tasks import (
 from .templates import load_registry
 from .values import ATTRIBUTES, lexicon
 
-TRACK_S_VERSION = "1.0.0"
+TRACK_S_VERSION = "1.1.0"
 CARD_FORMAT = "bilingual-datacard/1"
 COMPONENTS = ("seed", "zh", "en", "parallel")
 SPLITS = ("dev", "test")
@@ -148,9 +157,17 @@ def _bios(
     min_rewrites: int,
     rng,
     rewrite_stats: list,
-) -> None:
+    reserve: Mapping[str, int] | None = None,
+) -> dict[str, list[tuple[str, list[str]]]]:
+    """`exposures` renderings per person (the first `min_rewrites` distinct). The last reserve[person id] of them
+    are returned instead of written as biography documents (the E4 format documents of D_seed use them), so every
+    rendering still states each fact once in the corpus."""
+    reserved: dict[str, list[tuple[str, list[str]]]] = {}
     for person in people:
         seen: set[str] = set()
+        keep = (reserve or {}).get(person.id, 0)
+        if keep > exposures:
+            raise BuildError(f"{person.id}: {keep} renderings reserved for E4 documents, only {exposures} exposures")
         for k in range(exposures):
             for _ in range(50):
                 text, tids, _ = r.bio(person, lang, "train", rng)
@@ -159,6 +176,9 @@ def _bios(
             else:
                 raise BuildError(f"cannot draw {min_rewrites} distinct biographies of {person.id}")
             seen.add(text)
+            if k >= exposures - keep:
+                reserved.setdefault(person.id, []).append((text, tids))
+                continue
             w.add(
                 "bio",
                 [Segment(text=text, lang=lang, role="bio")],
@@ -169,6 +189,74 @@ def _bios(
                 item_family="E4",
             )
         rewrite_stats.append(len(seen))
+    return reserved
+
+
+def e4_format_segments(
+    r: Renderer, src: str, tgt: str, bios: Sequence[str], rng, *, back: bool
+) -> tuple[list[Segment], list[str]]:
+    """(segments, instruction template ids) of an E4-format training document with train templates: source `\n`,
+    instruction, target (and, with `back`, `\n`, back instruction, back target). The layout is the E4 prompt of
+    data.synth.tasks.e4_items followed by its answers, as eval.score generates them."""
+    instr = r.instruction("e4_instr", tgt, "train", rng)
+    segs = [
+        Segment(text=bios[0] + "\n", lang=src, role="source"),
+        Segment(text=instr.text, lang=tgt, role="instruction"),
+        Segment(text=bios[1] + ("\n" if back else ""), lang=tgt, role="target"),
+    ]
+    ids = [instr.id]
+    if back:
+        again = r.instruction("e4_back", src, "train", rng)
+        segs += [Segment(text=again.text, lang=src, role="instruction"), Segment(text=bios[2], lang=src, role="back")]
+        ids.append(again.id)
+    return segs, ids
+
+
+SEED_E4_KINDS = ("translate", "switchback")
+
+
+def seed_e4_plan(people: Sequence[Person], per_person: Mapping[str, int]) -> list[tuple[Person, str, str, str]]:
+    """(person, kind, source, target) of every E4-format document of D_seed: per person `per_person[kind]` documents
+    of each kind; the translate direction alternates with the person's index and switchback takes the other one."""
+    unknown = sorted(set(per_person) - set(SEED_E4_KINDS))
+    if unknown:
+        raise BuildError(f"seed_e4_per_person: unknown kinds {unknown}; known {SEED_E4_KINDS}")
+    out = []
+    for i, person in enumerate(people):
+        first = ("zh", "en") if i % 2 == 0 else ("en", "zh")
+        for kind in SEED_E4_KINDS:
+            src, tgt = first if kind == "translate" else first[::-1]
+            out += [(person, kind, src, tgt)] * int(per_person.get(kind, 0))
+    return out
+
+
+def seed_e4_reserve(plan: Sequence[tuple[Person, str, str, str]]) -> dict[str, dict[str, int]]:
+    """{lang: {person id: renderings the plan uses}}: translate uses one per side, switchback two of its source."""
+    need: dict[str, dict[str, int]] = {"zh": defaultdict(int), "en": defaultdict(int)}
+    for person, kind, src, tgt in plan:
+        need[src][person.id] += 2 if kind == "switchback" else 1
+        need[tgt][person.id] += 1
+    return {lang: dict(v) for lang, v in need.items()}
+
+
+def _seed_e4_docs(w: DocWriter, r: Renderer, plan, reserved: Mapping[str, Mapping[str, list]], rng) -> None:
+    pools = {lang: {pid: list(v) for pid, v in by.items()} for lang, by in reserved.items()}
+    for person, kind, src, tgt in plan:
+        order = [src, tgt, src] if kind == "switchback" else [src, tgt]
+        picked = [pools[lang][person.id].pop(0) for lang in order]
+        segs, instr_ids = e4_format_segments(r, src, tgt, [t for t, _ in picked], rng, back=kind == "switchback")
+        w.add(
+            "e4",
+            segs,
+            entity_id=person.id,
+            persons=[person.id],
+            facts=[(person.id, a) for a in ATTRIBUTES],
+            template_ids=[tid for _, tids in picked for tid in tids] + instr_ids,
+            item_family="E4",
+        )
+    left = sorted(f"{lang}:{pid}" for lang, by in pools.items() for pid, v in by.items() if v)
+    if left:
+        raise BuildError(f"reserved biography renderings left unused: {left[:3]}")
 
 
 def _qa_docs(w: DocWriter, r: Renderer, people, lang: str, per_fact: int, rng) -> None:
@@ -229,16 +317,16 @@ def _parallel_docs(w: DocWriter, r: Renderer, people: Sequence[Person], pairs: i
             order = [ATTRIBUTES[k] for k in rng.permutation(len(ATTRIBUTES))]
             texts = {lang: r.bio(person, lang, "train", rng, order) for lang in ("zh", "en")}
             src, tgt = (("zh", "en"), ("en", "zh"))[j % 2]
-            body = join_segments([texts[src][0], texts[tgt][0]])
+            segs, instr_ids = e4_format_segments(r, src, tgt, [texts[src][0], texts[tgt][0]], rng, back=False)
             w.add(
                 "parallel",
-                [Segment(text=body[0], lang=src, role="source"), Segment(text=body[1], lang=tgt, role="target")],
+                segs,
                 kind="parallel",
                 entity_id=person.id,
                 pair_id=f"{person.id}-{j}",
                 persons=[person.id],
                 facts=[(person.id, a) for a in ATTRIBUTES],
-                template_ids=texts[src][1] + texts[tgt][1],
+                template_ids=texts[src][1] + texts[tgt][1] + instr_ids,
                 item_family="E4",
             )
 
@@ -248,8 +336,11 @@ def training_docs(people: Sequence[Person], r: Renderer, prof: Mapping, seed: in
     rewrites: dict[str, list] = defaultdict(list)
     exp, qa = prof["bio_exposures"], prof["qa_per_fact"]
     p_seed = by_group(people, "seed")
+    e4_plan = seed_e4_plan(p_seed, prof["seed_e4_per_person"])
+    reserve = seed_e4_reserve(e4_plan)
+    reserved = {}
     for lang in ("zh", "en"):
-        _bios(
+        reserved[lang] = _bios(
             writers["seed"],
             r,
             p_seed,
@@ -258,8 +349,10 @@ def training_docs(people: Sequence[Person], r: Renderer, prof: Mapping, seed: in
             prof["min_rewrites"],
             stream(seed, f"bio/seed/{lang}"),
             rewrites[f"seed/{lang}"],
+            reserve[lang],
         )
         _qa_docs(writers["seed"], r, p_seed, lang, qa["seed"], stream(seed, f"qa/seed/{lang}"))
+    _seed_e4_docs(writers["seed"], r, e4_plan, reserved, stream(seed, "e4/seed"))
     _par_docs(writers["seed"], r, p_seed, prof["seed_par_samples"], stream(seed, "par/seed"))
     _ctx_docs(writers["seed"], r, prof["seed_ctx_samples"], LANG_ORDERS, codes, prof, stream(seed, "ctx/seed"))
     for lang in ("zh", "en"):

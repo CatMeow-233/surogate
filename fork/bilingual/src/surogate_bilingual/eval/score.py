@@ -282,8 +282,15 @@ def _stage_plan_fn(ctx: EvalContext, item, segs: Sequence[Seg], answer_lang: str
     return fn
 
 
+def newline_ids(tok) -> frozenset[int]:
+    """Every vocabulary id whose text holds a newline: an E4 answer is one line (data.synth.build renders the
+    target, then a newline and the back instruction in switchback documents), so a stage stops there."""
+    return frozenset(i for i in range(tok.get_vocab_size()) if "\n" in tok.decode([i], skip_special_tokens=False))
+
+
 def generate_items(ctx: EvalContext, items: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """E4: greedy generation stage by stage, batched across items, then exact slot scoring."""
+    """E4: greedy generation stage by stage, batched across items, then exact slot scoring. A stage ends at <eos>, at
+    a newline (the training documents end an answer there) or after max_new tokens."""
     records: dict[str, dict[str, Any]] = {}
     state = {}
     for item in items:
@@ -295,6 +302,7 @@ def generate_items(ctx: EvalContext, items: Sequence[Mapping[str, Any]]) -> list
             continue
         state[item["id"]] = {"item": item, "segs": list(segs), "stages": []}
     newline = encode_user_text(ctx.tok, "\n")
+    stops = newline_ids(ctx.tok) if state else frozenset()
     n_stages = max((len(s["item"]["stages"]) for s in state.values()), default=0)
     for k in range(n_stages):
         active = [s for s in state.values() if k < len(s["item"]["stages"])]
@@ -310,7 +318,14 @@ def generate_items(ctx: EvalContext, items: Sequence[Mapping[str, Any]]) -> list
         fns = [_stage_plan_fn(ctx, s["item"], s["segs"], s["item"]["stages"][k]["answer_lang"]) for s in active]
         prompts = [[t for seg in s["segs"] for t in seg.ids] for s in active]
         with ctx.autocast_ctx():
-            gens = greedy_batch(ctx.model, prompts, lambda i, ids, fns=fns: fns[i](i, ids), ctx.max_new, ctx.eos)
+            gens = greedy_batch(
+                ctx.model,
+                prompts,
+                lambda i, ids, fns=fns: fns[i](i, ids),
+                ctx.max_new,
+                ctx.eos,
+                stop_ids=stops,
+            )
         for s, gen in zip(active, gens, strict=True):
             stage = s["item"]["stages"][k]
             text = decode(ctx.tok, gen.tokens)

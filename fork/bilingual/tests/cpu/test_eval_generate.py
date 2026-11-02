@@ -94,3 +94,37 @@ def test_i6_e3_a_plan_of_the_wrong_length_is_refused(zh_en):
 
     with pytest.raises(ValueError, match="covers"):
         greedy_batch(zh_en.model, [[1, 5, 6]], short, max_new=2, eos=1)
+
+
+def test_an_e4_stage_stops_at_a_newline_token(zh_en):
+    """E4 answers are one line in the training documents (a switchback document goes on with "\\n" and the back
+    instruction), so a stage stops at any token holding a newline; that token is not part of the output."""
+    import torch
+
+    from surogate_bilingual.eval.score import newline_ids
+
+    class Always(torch.nn.Module):
+        def __init__(self, token: int):
+            super().__init__()
+            self.anchor = torch.nn.Parameter(torch.zeros(1))
+            self.cfg = zh_en.model.cfg
+            self.token = token
+
+        def forward(self, tokens, plan=None):
+            logits = torch.zeros(*tokens.shape, self.cfg.vocab_size)
+            logits[..., self.token] = 1.0
+            return logits
+
+    plain = greedy_batch(Always(7), [[1, 5]], lambda i, ids: None, 4, eos=1)
+    stopped = greedy_batch(Always(7), [[1, 5]], lambda i, ids: None, 4, eos=1, stop_ids={7})
+    assert (plain[0].tokens, plain[0].stop) == ([7, 7, 7, 7], "max_new")
+    assert (stopped[0].tokens, stopped[0].stop) == ([], "stop")
+
+    class Tok:  # newline_ids reads the decoded text of every id
+        def get_vocab_size(self):
+            return 4
+
+        def decode(self, ids, skip_special_tokens=False):
+            return ["a", "\n", "b\n", "c"][ids[0]]
+
+    assert newline_ids(Tok()) == frozenset({1, 2})

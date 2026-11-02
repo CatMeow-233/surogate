@@ -271,7 +271,10 @@ def seed_mixture(data_pipeline, track_s_ci):
 
     rng = np.random.default_rng(12)
     pools = pools_from_docs(data_pipeline["derived"].iter_docs(split="seed_train"))
-    pools["track_s"] = list(iter_file_docs(track_s_ci[0] / "seed" / "track_s.jsonl", source=None, kind=None))[:80]
+    seed_docs = iter_file_docs(track_s_ci[0] / "seed" / "track_s.jsonl", source=None, kind=None)
+    # the first 80 documents other than the E4 format samples (five biographies each), so that the fixture's pools
+    # fill the shares that the Track S tokens imply
+    pools["track_s"] = [d for d in seed_docs if d.meta.get("family") != "e4"][:80]
     # more natural text than the pipeline fixture holds, so the 80 % share can be filled
     pools["zh"] += [Doc(f"zh-extra/{i}", "zh", (Segment(text=zh_text(rng, 12), lang="zh"),)) for i in range(900)]
     pools["en"] += [Doc(f"en-extra/{i}", "en", (Segment(text=en_text(rng, 12), lang="en"),)) for i in range(900)]

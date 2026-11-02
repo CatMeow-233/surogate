@@ -9,9 +9,9 @@ its own and the record says so (`boundary_merge`).
 
 Plans (`item_plan`) come from segment metadata through `routing.policies`: the prompt segments and one answer
 segment of the longest candidate (or the generation budget) get their routes from the routing policy before the
-answer starts (route causality, MS §5.4); then the gate policy of a dual arm applies. `answer_route` sends the answer
-segments of translation items (E4) to a named expert (the Bridge arm T2 under variant (c): source on the source
-expert, target on the Bridge); other items route as without it.
+answer starts (route causality, MS §5.4); then the gate policy of a dual arm applies. `answer_route` sends the
+instruction and answer segments of translation items (E4) to a named expert (the Bridge arm T2 under variant (c):
+source on the source expert, target side on the Bridge); other items route as without it.
 """
 
 from __future__ import annotations
@@ -133,10 +133,10 @@ class Routing:
     """How an arm routes: a routing policy (None for a single-expert model), a gate policy and its parameters (the
     defaults of g and window are DEFAULTS["routing"], B-O5).
 
-    `answer_route` sends the answer segments of translation items (E4) to a named expert: the Bridge under variant
-    (c) (source on the source expert, instruction and target routed by R_out, the target answer on the Bridge). On
-    every other item the arm routes exactly as without it, so a T arm on E1/E2/E3 is T0 by construction (MS §7.3,
-    §8.4: the monolingual retention of T2 holds when routing is correct)."""
+    `answer_route` sends the instruction and answer segments of translation items (E4) to a named expert: the
+    Bridge under variant (c) (source on the source expert, the target side on the Bridge, as in the Bridge layout of
+    the training shards, data.parallel). On every other item the arm routes exactly as without it, so a T arm on
+    E1/E2/E3 is T0 by construction (MS §7.3, §8.4: the monolingual retention of T2 holds when routing is correct)."""
 
     route: str | None = "R_out"
     gate: str = "one_hot"
@@ -200,12 +200,12 @@ def item_plan(
     if missing:
         raise SkipItem(f"missing expert {missing} (the model has {tuple(names)})")
     plan = plan_from_segments(meta, names, routing.route, knowledge_source=source, rng=rng())
-    if answers:  # every answer segment of a translation item (earlier stages included) and the new answer
+    if answers:  # the target side of a translation item: every instruction and answer (earlier stages included)
         gates = plan.gates.clone()
         target = list(names).index(routing.answer_route)
         start = 0
         for _lang, n, role in meta:
-            if role == "answer":
+            if role in ("instruction", "answer"):
                 gates[:, start : start + n] = 0.0
                 gates[:, start : start + n, target] = 1.0
             start += n
