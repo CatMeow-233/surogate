@@ -204,9 +204,8 @@ def check_tokenizer(tok, n: int = 500, seed: int = 0) -> dict:
     unk = tok.token_to_id("<unk>")
     failures, unks = [], 0
     for text in random_strings(n, seed) + list(SPECIAL_TOKENS):
-        ids = encode_user_text(tok, text)
-        unks += ids.count(unk)
-        if decode(tok, ids) != text:
+        unks += encode_user_text(tok, text).count(unk)
+        if not round_trips(tok, text):
             failures.append(text)
     for text in CONTROL_TAGS:
         ids = tok.encode(text, add_special_tokens=False).ids

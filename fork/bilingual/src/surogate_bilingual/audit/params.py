@@ -22,10 +22,11 @@ import torch
 from torch import nn
 from torch.overrides import TorchFunctionMode
 
-from ..ops.reads import declare_partial_read, partial_read_sink
+from ..ops.reads import partial_read_sink
 from ..routing.plan import RoutePlan
 
-__all__ = ["declare_partial_read", "gate_patterns", "p_active", "p_total", "p_update"]
+ACTIVE_BUDGET = 100_000_000  # MS §5.1: P_active <= 100M per token
+UPDATE_BUDGET = 100_000_000  # MS §5.1: P_update <= 100M per run (recorded, not enforced: B12a is over it by design)
 
 
 def _key(p: torch.Tensor) -> tuple:

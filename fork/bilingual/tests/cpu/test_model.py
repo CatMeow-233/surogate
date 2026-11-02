@@ -11,8 +11,14 @@ from surogate_bilingual.config import profile
 from surogate_bilingual.model.executor import Executor, dense_reference_ffn
 from surogate_bilingual.model.lm import RoutedLM
 from surogate_bilingual.routing.plan import RoutePlan
-from surogate_bilingual.train.objectives import masked_ce
 from surogate_bilingual.train.recipes import ExpertRecipe
+
+
+def next_token_ce(logits, tokens):
+    """Mean CE of predicting tokens[:, t] from logits[:, t - 1] (a test objective; training uses target_ce_sum)."""
+    pred = logits[:, :-1].float()
+    return torch.nn.functional.cross_entropy(pred.reshape(-1, pred.shape[-1]), tokens[:, 1:].reshape(-1))
+
 
 NAMES = ("zh", "en", "bridge")
 FAMILY_FUSIONS = [("swiglu", "output"), ("swiglu", "concat"), ("slot", "pre"), ("slot", "post")]
@@ -213,7 +219,7 @@ def test_i2_a7_checkpointing_leaves_gradients_unchanged_and_frozen_grads_none(fa
         model = model_for("smoke", family, fusion).train()
         plan_ = ExpertRecipe("en").freeze_plan(model).apply()
         x = torch.randint(5, model.cfg.vocab_size, (2, 37), generator=torch.Generator().manual_seed(9))
-        loss = masked_ce(model(x, random_plan(NAMES, 2, 37, "mixed", seed=11), checkpointing=checkpointing), x)
+        loss = next_token_ce(model(x, random_plan(NAMES, 2, 37, "mixed", seed=11), checkpointing=checkpointing), x)
         loss.backward()
         plan_.check_grads()
         assert all(p.grad is not None for p in plan_.parameters())

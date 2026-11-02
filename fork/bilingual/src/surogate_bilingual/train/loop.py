@@ -46,8 +46,7 @@ import torch
 from ..assembly.freeze import FreezeError, FreezePlan
 from ..assembly.hashing import content_hash
 from ..assembly.packs import TOKENIZER, AssemblyError, ExpertPack, SeedPack, read_pack
-from ..audit.budget import UPDATE_BUDGET
-from ..audit.params import p_update
+from ..audit.params import UPDATE_BUDGET, p_update
 from ..canonical import sha256_file, sha256_json
 from ..config import RunConfig, config_hash, load_toml, stage_names
 from ..data.sampler import EpochChunkSampler

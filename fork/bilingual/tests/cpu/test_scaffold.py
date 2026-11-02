@@ -234,6 +234,85 @@ except (ModuleNotFoundError, OSError):
 # --- reference/ ----------------------------------------------------------------------------------------------------
 
 
+# --- intra-package layering (CR1 review; docs/spec.md, 模块边界) --------------------------------------------------
+#
+# Groups of modules (longest prefix wins) and the groups each may import from, top-level and function-level imports
+# alike. The direction is one way: evaluation never imports training or the audit reports, data never imports a
+# model, the counting audit (params, flops, memory) is below training, and the audit reports (budget, bench,
+# resources) sit on top of training and import nothing from eval.
+
+LAYER_GROUPS = {
+    "canonical": "core", "config": "core", "devices": "core",
+    "ops": "ops", "routing": "routing", "model": "model", "data": "data", "registry": "registry",
+    "assembly": "assembly", "audit.params": "counting", "audit.flops": "counting", "audit.memory": "counting",
+    "train": "train", "eval": "eval", "audit.budget": "reports", "audit.bench": "reports", "audit.resources": "reports",
+}  # fmt: skip
+LAYER_ALLOWED = {
+    "core": {"core"},
+    "ops": {"core", "ops"},
+    "routing": {"core", "routing"},
+    "model": {"core", "ops", "routing", "model"},
+    "data": {"core", "data"},
+    "registry": {"core", "registry"},
+    "assembly": {"core", "model", "routing", "data", "registry", "assembly"},
+    "counting": {"core", "ops", "routing", "counting"},
+    "train": {"core", "model", "routing", "data", "registry", "assembly", "counting", "train"},
+    "eval": {"core", "ops", "model", "routing", "data", "registry", "assembly", "eval"},
+    "reports": {"core", "ops", "model", "routing", "registry", "counting", "train", "reports"},
+}
+
+
+def layer_of(module: str) -> str | None:
+    """The group of a module path relative to the package (e.g. "audit.budget"); None for the package root."""
+    parts = module.split(".")
+    for n in range(len(parts), 0, -1):
+        if ".".join(parts[:n]) in LAYER_GROUPS:
+            return LAYER_GROUPS[".".join(parts[:n])]
+    return None
+
+
+def layering_problems(source: str, module: str) -> list[str]:
+    """Relative imports of `module` (package-relative dotted path) that cross the layer table."""
+    tree = ast.parse(source)
+    package = module.split(".")[:-1]  # a module's package; for "x.__init__" that is x itself
+    here = layer_of(module)
+    problems = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or node.level == 0:
+            continue
+        base = package[: len(package) - node.level + 1]
+        targets = [".".join([*base, node.module])] if node.module else [".".join([*base, a.name]) for a in node.names]
+        for target in targets:
+            there = layer_of(target)
+            if here is None or there is None:
+                problems.append(f"{module}: import of {target or '(package root)'} outside the layer table")
+            elif there not in LAYER_ALLOWED[here]:
+                problems.append(f"{module} ({here}) imports {target} ({there})")
+    return problems
+
+
+def test_src_modules_respect_the_layer_table():
+    problems = []
+    for path in sorted((SRC / "surogate_bilingual").rglob("*.py")):
+        rel = path.relative_to(SRC / "surogate_bilingual").with_suffix("")
+        if rel.parts in (("__init__",), ("__main__",)):
+            continue
+        module = ".".join(rel.parts)
+        problems += layering_problems(path.read_text("utf-8"), module)
+    assert not problems, problems
+    assert set(LAYER_GROUPS.values()) == set(LAYER_ALLOWED)
+
+
+def test_the_layer_check_catches_a_crossing_at_any_depth():
+    lazy = "def main():\n    from ..eval.report import results_markdown\n"
+    assert layering_problems(lazy, "audit.budget") == ["audit.budget (reports) imports eval.report (eval)"]
+    assert layering_problems("from ..train import loop\n", "eval.score") == ["eval.score (eval) imports train (train)"]
+    assert layering_problems("from ..model.lm import RoutedLM\n", "data.shards") == [
+        "data.shards (data) imports model.lm (model)"
+    ]
+    assert not layering_problems("from ..train.recipes import ExpertRecipe\n", "audit.budget")
+
+
 def test_reference_files_match_their_manifest():
     manifest = json.loads((REFERENCE / "MANIFEST.json").read_text(encoding="utf-8"))
     assert manifest["format"] == "bilingual-reference/1"

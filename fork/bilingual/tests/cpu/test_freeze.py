@@ -9,8 +9,14 @@ from surogate_bilingual.assembly.freeze import FreezeError, FreezePlan
 from surogate_bilingual.config import profile
 from surogate_bilingual.model.lm import RoutedLM
 from surogate_bilingual.routing.plan import RoutePlan
-from surogate_bilingual.train.objectives import masked_ce
 from surogate_bilingual.train.recipes import ExpertRecipe, SeedRecipe
+
+
+def next_token_ce(logits, tokens):
+    """Mean CE of predicting tokens[:, t] from logits[:, t - 1] (a test objective; training uses target_ce_sum)."""
+    pred = logits[:, :-1].float()
+    return torch.nn.functional.cross_entropy(pred.reshape(-1, pred.shape[-1]), tokens[:, 1:].reshape(-1))
+
 
 NAMES = ("zh", "en", "bridge")
 
@@ -27,7 +33,7 @@ def test_i2_a11_one_adamw_step_changes_only_the_trained_expert(family):
     g = torch.Generator().manual_seed(0)
     x = torch.randint(5, model.cfg.vocab_size, (2, 33), generator=g)
     routes = torch.randint(0, 3, (2, 33), generator=g)  # every expert sees tokens; only en may learn
-    masked_ce(model(x, RoutePlan.one_hot(routes, NAMES, "mixed")), x).backward()
+    next_token_ce(model(x, RoutePlan.one_hot(routes, NAMES, "mixed")), x).backward()
     plan.check_grads()
     assert all(model.get_parameter(n).grad is None for n in plan.frozen_names)
     opt.step()

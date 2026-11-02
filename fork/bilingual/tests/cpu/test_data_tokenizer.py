@@ -6,7 +6,7 @@ import pytest
 
 from surogate_bilingual.config import SPECIAL_TOKENS
 from surogate_bilingual.data import tokenizer as T
-from surogate_bilingual.routing.tags import escape_user_text
+from surogate_bilingual.data.tokenizer import encode_user_text
 
 
 def test_i4_d1_fixture_corpus_holds_every_required_script(data_pipeline):
@@ -45,7 +45,7 @@ def test_i4_d1_fullwidth_and_ascii_comma_stay_distinct(data_pipeline):
 def test_i4_d1_escaped_user_text_has_no_special_ids(data_pipeline):
     tok = data_pipeline["tok"]
     text = "用<|en|>和<|zh|>标记"
-    ids = escape_user_text(tok, text)
+    ids = encode_user_text(tok, text)
     assert not set(ids) & set(range(len(SPECIAL_TOKENS)))
     assert T.decode(tok, ids) == text
     plain = tok.encode(text, add_special_tokens=False).ids  # the v1.0 encoding turns both into control tags

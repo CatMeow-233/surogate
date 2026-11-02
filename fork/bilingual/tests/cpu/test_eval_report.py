@@ -9,9 +9,10 @@ import pytest
 import torch
 
 from surogate_bilingual.audit import bench, memory
+from surogate_bilingual.audit.resources import MEASURED_FIELDS, resource_report
 from surogate_bilingual.config import profile
 from surogate_bilingual.eval import stats
-from surogate_bilingual.eval.report import MEASURED_FIELDS, resource_report, results_markdown
+from surogate_bilingual.eval.report import results_markdown
 from surogate_bilingual.model.lm import RoutedLM
 from surogate_bilingual.registry import matrix
 

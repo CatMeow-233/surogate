@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import unicodedata
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -213,15 +213,6 @@ def _blank_line_blocks(text: str) -> list[str]:
     if current:
         blocks.append("\n".join(current))
     return blocks
-
-
-def write_docs(path: Path, docs: Sequence[Doc] | Iterator[Doc]) -> int:
-    """Write documents as canonical JSON lines (atomically); return how many."""
-    from ..canonical import atomic_write_bytes
-
-    lines = [doc_line(d) for d in docs]
-    atomic_write_bytes(Path(path), b"".join(lines))
-    return len(lines)
 
 
 def script_segments(text: str, *, lang: str | None = None) -> list[Segment]:

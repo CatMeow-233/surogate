@@ -13,9 +13,10 @@ from torch import nn
 
 from surogate_bilingual.__main__ import main as cli
 from surogate_bilingual.audit.flops import counted_flops, linear_flops, macs_per_token
-from surogate_bilingual.audit.params import declare_partial_read, p_active, p_total, p_update
+from surogate_bilingual.audit.params import p_active, p_total, p_update
 from surogate_bilingual.config import profile
 from surogate_bilingual.model.lm import RoutedLM
+from surogate_bilingual.ops.reads import declare_partial_read
 from surogate_bilingual.routing.plan import RoutePlan
 from surogate_bilingual.routing.policies import apply_gate_policy
 

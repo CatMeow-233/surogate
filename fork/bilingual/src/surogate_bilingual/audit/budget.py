@@ -37,11 +37,10 @@ from ..routing.plan import RoutePlan
 from ..routing.policies import apply_gate_policy
 from ..train.recipes import ExpertRecipe, JointWideRecipe
 from .flops import macs_per_token
-from .params import p_active, p_total, p_update
+from .params import ACTIVE_BUDGET, UPDATE_BUDGET, p_active, p_total, p_update
+from .resources import resource_report
 
 BUDGET_FORMAT = "bilingual-budget/1"
-ACTIVE_BUDGET = 100_000_000
-UPDATE_BUDGET = 100_000_000
 AUDIT_T = 8  # tokens of the executed meta forward
 BLOCK = 64  # B10-ch channel block width
 BLOCK_ROUTER_RANK = 8
@@ -379,8 +378,6 @@ def main(argv: Sequence[str]) -> int:
     args = ap.parse_args(list(argv))
     doc = report(args.profile)
     if args.resources:
-        from ..eval.report import resource_report  # the report layer; the budget itself stays in audit
-
         measured = json.loads(open(args.measured, encoding="utf-8").read()) if args.measured else None
         doc = resource_report(args.profile, measured, budget=doc)
         if args.out and not args.dry_run:

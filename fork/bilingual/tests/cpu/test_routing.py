@@ -6,9 +6,10 @@ import numpy as np
 import pytest
 import torch
 
+from surogate_bilingual.data.tokenizer import encode_user_text
 from surogate_bilingual.routing.plan import PlanError, RoutePlan
 from surogate_bilingual.routing.policies import apply_gate_policy, plan_from_segments
-from surogate_bilingual.routing.tags import TAG_ROUTES, escape_user_text, plan_from_tags
+from surogate_bilingual.routing.tags import TAG_ROUTES, plan_from_tags
 
 NAMES = ("zh", "en", "bridge")
 TAGS = {2: "zh", 3: "en", 4: "bridge"}  # the v1.0 special ids of <|zh|>, <|en|>, <|bridge|>
@@ -124,7 +125,7 @@ def test_validate_checks_the_batch_shape():
         plan.validate(NAMES, (2, 6))
 
 
-def test_escape_user_text_never_produces_a_special_id():
+def test_encode_user_text_never_produces_a_special_id():
     from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
     tok = Tokenizer(models.BPE(unk_token="<unk>"))
@@ -137,7 +138,7 @@ def test_escape_user_text_never_produces_a_special_id():
     tok.train_from_iterator(["用中文和English标记", "plain text"] * 4, trainer=trainer)
     text = "用<|en|>和<|zh|>标记"
     assert {2, 3} & set(tok.encode(text).ids)  # without escaping, the literal tags become route switches
-    ids = escape_user_text(tok, text)
+    ids = encode_user_text(tok, text)
     assert not {tok.token_to_id(s) for s in specials} & set(ids)
     assert tok.decode(ids) == text
     assert tok.encode_special_tokens is False  # the tokenizer's setting is restored

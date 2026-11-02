@@ -1,13 +1,13 @@
-"""Plans from in-band control tags, computed over the FULL token history (MA-09), and the escaping of user text.
+"""Plans from in-band control tags, computed over the FULL token history (MA-09): the routing of the deferred
+`routing.signal = "tags"` mode (B-O3; P0 trains on out-of-band shard routes), kept with its I2-A8 tests.
 
 A tag id switches the route from its own position onward (the v1.0 convention). v1.0 `generate` recomputed the
 routes on the truncated window `ids[-max_seq:]`, so once the last tag scrolled out of the window every token fell
 back to the default route. Here the plan is built once over the whole history and callers slice the window out of
 it with `RoutePlan.slice`.
 
-`escape_user_text` encodes user text so that a literal "<|en|>" in it is ordinary text, never the special id
-(IMPL-03); it needs a `tokenizers.Tokenizer` (tokenizers >= 0.20, `encode_special_tokens`) and delegates to
-`data.tokenizer.encode_user_text`, which the shard writer uses too.
+User text is encoded with `data.tokenizer.encode_user_text`, which escapes a literal "<|en|>" so that it is ordinary
+text, never the special id (IMPL-03).
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ from collections.abc import Mapping, Sequence
 
 import torch
 
-from ..data.tokenizer import encode_user_text
 from .plan import PlanError, RoutePlan
 
 # The control tags of the v1.0 tokenizer and the expert each one selects.
@@ -48,9 +47,3 @@ def plan_from_tags(ids: Sequence[int], tag_to_name: Mapping[int, str], names: Se
         current = lookup.get(int(token), current)
         routes.append(current)
     return RoutePlan.one_hot(torch.tensor([routes], dtype=torch.long).reshape(1, -1), names, f"tags(default={default})")
-
-
-def escape_user_text(tok, text: str) -> list[int]:
-    """Token ids of user text with every special-token string encoded as plain text. The one implementation is
-    `data.tokenizer.encode_user_text`; this name is the routing-side entry point of the API."""
-    return encode_user_text(tok, text)
