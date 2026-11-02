@@ -151,9 +151,12 @@ def test_i4_d7_full_size_build_has_100_test_templates_and_2000_items_per_family_
         assert registry.family_count(family, "test", tuple(prof["e4_attributes"])) >= 100, family
     assert prof["items"]["test"] >= 2000 and prof["items"]["dev"] >= 500
     # generate the full-size test items (no training documents) and count what they use
-    people = draw_people(prof["partitions"], {a: len(lex[a]) for a in ATTRIBUTES},
-                         {k: prof[k] for k in ("heldout_fraction", "eval_dev_fraction", "par_train_fraction")},
-                         B.stream(5, "people"))  # fmt: skip
+    people = draw_people(
+        prof["partitions"],
+        {a: len(lex[a]) for a in ATTRIBUTES},
+        {k: prof[k] for k in ("heldout_fraction", "eval_dev_fraction", "par_train_fraction")},
+        B.stream(5, "people"),
+    )
     small = dict(prof, items={"test": prof["items"]["test"], "dev": 0})
     from surogate_bilingual.data.synth.entities import CodeAllocator
 
@@ -175,8 +178,18 @@ def test_i4_d7_entity_partitions_are_disjoint_and_sized(track_s_ci):
     sizes = Counter(p.partition for p in people)
     assert dict(sizes) == card["profile"]["partitions"]
     groups = {(p.partition, p.group) for p in people}
-    assert groups == {("seed", "train"), ("zh", "qa_train"), ("zh", "dev"), ("zh", "test"), ("en", "qa_train"),
-                      ("en", "dev"), ("en", "test"), ("par", "train"), ("par", "dev"), ("par", "test")}  # fmt: skip
+    assert groups == {
+        ("seed", "train"),
+        ("zh", "qa_train"),
+        ("zh", "dev"),
+        ("zh", "test"),
+        ("en", "qa_train"),
+        ("en", "dev"),
+        ("en", "test"),
+        ("par", "train"),
+        ("par", "dev"),
+        ("par", "test"),
+    }
     # items only ask about held-out people of the right split; training documents never name them in QA
     by_id = {p.id: p for p in people}
     for it in _items(out):
@@ -199,8 +212,11 @@ def test_i4_d7_no_test_pair_cooccurs_and_codes_are_fresh(track_s_ci):
     checker = Checker(people, B.lexicons_for(card["profile"]))
     texts = [d for c in B.COMPONENTS for d in _load(out, f"{c}/track_s.jsonl")]
     named = [checker.names_in("\n".join(s["text"] for s in d["segments"] if "text" in s)) for d in texts]
-    pairs = [(by_id[it["structured"]["a"]].name, by_id[it["structured"]["b"]].name)
-             for it in _items(out) if it["family"] == "E3par" and it["split"] == "test"]  # fmt: skip
+    pairs = [
+        (by_id[it["structured"]["a"]].name, by_id[it["structured"]["b"]].name)
+        for it in _items(out)
+        if it["family"] == "E3par" and it["split"] == "test"
+    ]
     assert pairs and leak.cooccurrence(pairs, named) == []
     assert leak.cooccurrence([("A B", "C D")], [{"A B", "C D", "E F"}]) == [("A B", "C D")]  # the check can fire
     assert card["codes"]["shared_between_items"] == [] and card["codes"]["in_training"] == []
@@ -214,8 +230,14 @@ def test_i4_d7_no_test_pair_cooccurs_and_codes_are_fresh(track_s_ci):
 
 
 def test_i4_d7_chi2_survival_function_matches_known_quantiles():
-    for x, df, p in ((3.841459, 1, 0.05), (18.307038, 10, 0.05), (9.210340, 2, 0.01), (6.634897, 1, 0.01),
-                     (124.342113, 100, 0.05), (0.0, 3, 1.0)):  # fmt: skip
+    for x, df, p in (
+        (3.841459, 1, 0.05),
+        (18.307038, 10, 0.05),
+        (9.210340, 2, 0.01),
+        (6.634897, 1, 0.01),
+        (124.342113, 100, 0.05),
+        (0.0, 3, 1.0),
+    ):
         assert leak.chi2_sf(x, df) == pytest.approx(p, abs=1e-6)
     assert leak.chi2_sf(2.0, 2) == pytest.approx(np.exp(-1.0), abs=1e-12)  # df 2: exp(-x/2)
 
@@ -231,9 +253,12 @@ def test_i4_d7_attribute_values_are_independent_of_name_and_partition():
 @pytest.fixture(scope="module")
 def large_pools():
     rng = np.random.default_rng(2)
-    people = draw_people({"seed": 0, "zh": 3000, "en": 3000, "par": 0},
-                         {"year": 100, "month": 12, "city": 200, "occupation": 100, "employer": 200, "hobby": 60},
-                         {"heldout_fraction": 1.0, "eval_dev_fraction": 0.0, "par_train_fraction": 0.5}, rng)  # fmt: skip
+    people = draw_people(
+        {"seed": 0, "zh": 3000, "en": 3000, "par": 0},
+        {"year": 100, "month": 12, "city": 200, "occupation": 100, "employer": 200, "hobby": 60},
+        {"heldout_fraction": 1.0, "eval_dev_fraction": 0.0, "par_train_fraction": 0.5},
+        rng,
+    )
     return people, {p.id: p for p in people}
 
 
@@ -298,9 +323,12 @@ def test_i4_d7_e3ctx_either_segment_alone_leaves_the_gold_uniform(track_s_ci, fu
 def test_i4_d7_candidates_hold_the_other_language_form_and_labels_balance(full):
     _, prof, registry, lex = full
     r = Renderer(registry, lex)
-    people = draw_people({"seed": 0, "zh": 400, "en": 400, "par": 0}, {a: len(lex[a]) for a in ATTRIBUTES},
-                         {"heldout_fraction": 1.0, "eval_dev_fraction": 0.0, "par_train_fraction": 0.5},
-                         np.random.default_rng(8))  # fmt: skip
+    people = draw_people(
+        {"seed": 0, "zh": 400, "en": 400, "par": 0},
+        {a: len(lex[a]) for a in ATTRIBUTES},
+        {"heldout_fraction": 1.0, "eval_dev_fraction": 0.0, "par_train_fraction": 0.5},
+        np.random.default_rng(8),
+    )
     from surogate_bilingual.data.synth.entities import CodeAllocator
 
     codes = CodeAllocator(np.random.default_rng(9))
@@ -318,7 +346,7 @@ def test_i4_d7_candidates_hold_the_other_language_form_and_labels_balance(full):
             {},
             n_colors=10,
             distractors=(0, 3),
-        ),  # fmt: skip
+        ),
     }
     for family, items in groups.items():
         for it in items:
@@ -339,8 +367,12 @@ def test_i4_d7_exposures_per_fact_equal_the_declared_number(track_s_ci):
     prof = card["profile"]
     people = _people(out)
     lex = B.lexicons_for(prof)
-    declared = {"seed": sum(prof["bio_exposures"]["seed"].values()), "zh": prof["bio_exposures"]["zh"]["zh"],
-                "en": prof["bio_exposures"]["en"]["en"], "parallel": 2 * prof["parallel_pairs_per_person"]}  # fmt: skip
+    declared = {
+        "seed": sum(prof["bio_exposures"]["seed"].values()),
+        "zh": prof["bio_exposures"]["zh"]["zh"],
+        "en": prof["bio_exposures"]["en"]["en"],
+        "parallel": 2 * prof["parallel_pairs_per_person"],
+    }
     # count directly from the text, without the checker: name + every attribute value of that person
     counts = Counter()
     by_name = {p.name: p for p in people}

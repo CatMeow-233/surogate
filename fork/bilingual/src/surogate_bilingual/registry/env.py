@@ -25,9 +25,23 @@ from ..canonical import atomic_write_json
 ENV_FORMAT = "bilingual-env/1"
 SRC_DIR = Path(__file__).resolve().parents[2]  # fork/bilingual/src
 REQUIRED_KEYS = (
-    "format", "python", "platform", "torch", "cuda", "cudnn", "driver", "gpu", "cpu", "threads", "numpy",
-    "tokenizers", "safetensors", "git_commit", "git_dirty", "created",
-)  # fmt: skip
+    "format",
+    "python",
+    "platform",
+    "torch",
+    "cuda",
+    "cudnn",
+    "driver",
+    "gpu",
+    "cpu",
+    "threads",
+    "numpy",
+    "tokenizers",
+    "safetensors",
+    "git_commit",
+    "git_dirty",
+    "created",
+)
 
 
 def code_identity() -> tuple[str | None, bool | None]:
@@ -95,8 +109,9 @@ def environment() -> dict[str, Any]:
         gpus = []
         for i in range(torch.cuda.device_count()):
             p = torch.cuda.get_device_properties(i)
-            gpus.append({"index": i, "name": p.name, "capability": f"{p.major}.{p.minor}",
-                         "memory_bytes": int(p.total_memory)})  # fmt: skip
+            gpus.append(
+                {"index": i, "name": p.name, "capability": f"{p.major}.{p.minor}", "memory_bytes": int(p.total_memory)}
+            )
     return {
         "format": ENV_FORMAT,
         "python": sys.version.split()[0],
@@ -112,7 +127,7 @@ def environment() -> dict[str, Any]:
             "torch": torch.get_num_threads(),
             "torch_interop": torch.get_num_interop_threads(),
             "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"),
-        },  # fmt: skip
+        },
         "numpy": _version("numpy"),
         "tokenizers": _version("tokenizers"),
         "safetensors": _version("safetensors"),

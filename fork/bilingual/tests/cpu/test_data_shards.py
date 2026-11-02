@@ -16,21 +16,44 @@ def _docs():
     return [
         Doc("a", "zh", (Segment(text="第一篇，中文。", lang="zh"),)),
         Doc("b", "en", (Segment(text="The second one.", lang="en"),), route="en"),
-        Doc("c", "parallel", (Segment(text="源句。\n", lang="zh", route="zh", loss=False),
-                              Segment(text="Target text.", lang="en", route="bridge"))),
-        Doc("d", "codeswitch", (Segment(tag="<|zh|>"), Segment(text="我说", lang="zh"), Segment(tag="<|en|>"),
-                                Segment(text=" hello <|zh|> literally", lang="en"))),
-    ]  # fmt: skip
+        Doc(
+            "c",
+            "parallel",
+            (
+                Segment(text="源句。\n", lang="zh", route="zh", loss=False),
+                Segment(text="Target text.", lang="en", route="bridge"),
+            ),
+        ),
+        Doc(
+            "d",
+            "codeswitch",
+            (
+                Segment(tag="<|zh|>"),
+                Segment(text="我说", lang="zh"),
+                Segment(tag="<|en|>"),
+                Segment(text=" hello <|zh|> literally", lang="en"),
+            ),
+        ),
+    ]
 
 
 def _write(tmp_path, pipeline, docs=None, **kw):
-    return SH.write_shard(tmp_path / "shard", docs or _docs(), pipeline["tok"], ROUTES, "seed_train", "m" * 64,
-                          tokenizer_sha256=pipeline["tokenizer_sha256"], **kw)  # fmt: skip
+    return SH.write_shard(
+        tmp_path / "shard",
+        docs or _docs(),
+        pipeline["tok"],
+        ROUTES,
+        "seed_train",
+        "m" * 64,
+        tokenizer_sha256=pipeline["tokenizer_sha256"],
+        **kw,
+    )
 
 
 def _reader(path, pipeline, **kw):
-    return SH.ShardReader(path, tokenizer_sha256=pipeline["tokenizer_sha256"],
-                          vocab_size=pipeline["tok"].get_vocab_size(), **kw)  # fmt: skip
+    return SH.ShardReader(
+        path, tokenizer_sha256=pipeline["tokenizer_sha256"], vocab_size=pipeline["tok"].get_vocab_size(), **kw
+    )
 
 
 def _expected(docs, tok, default=None):
@@ -139,8 +162,9 @@ def test_i4_d5_tag_counts_and_mixed_windows_equal_brute_force(tmp_path, data_pip
     assert header["tag_counts"] == {t: ids.count(tok.token_to_id(t)) for t in ("<|zh|>", "<|en|>", "<|bridge|>")}
     # the chunked scan agrees with itself across chunk sizes (the carry between chunks)
     codes = np.array([SH.LANG_CODE[x] for x in langs], dtype=np.uint8)
-    assert all(SH.mixed_window_fraction(codes, seq, chunk=c) == header["mixed_window_fraction"]["value"]
-               for c in (1, 7, 100))  # fmt: skip
+    assert all(
+        SH.mixed_window_fraction(codes, seq, chunk=c) == header["mixed_window_fraction"]["value"] for c in (1, 7, 100)
+    )
 
 
 def test_i4_d5_seed_shard_holds_each_tag_at_least_the_declared_minimum(tmp_path, data_pipeline, seed_mixture):
@@ -154,6 +178,14 @@ def test_i4_d5_seed_shard_holds_each_tag_at_least_the_declared_minimum(tmp_path,
     for tag, minimum in declared.items():
         assert header["tag_counts"][tag] >= minimum
     with pytest.raises(SH.ShardError, match="below the declared minimum"):
-        SH.write_shard(tmp_path / "short", [d for d in docs if d.meta.get("mix") != "tagged"], tok, ROUTES,
-                       "seed_train", None, tokenizer_sha256="x", min_tag_counts=declared)  # fmt: skip
+        SH.write_shard(
+            tmp_path / "short",
+            [d for d in docs if d.meta.get("mix") != "tagged"],
+            tok,
+            ROUTES,
+            "seed_train",
+            None,
+            tokenizer_sha256="x",
+            min_tag_counts=declared,
+        )
     assert not (tmp_path / "short").exists()  # a refused shard leaves nothing behind

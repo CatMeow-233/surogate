@@ -131,8 +131,11 @@ class Registry:
         """How many composed template ids a split offers for one family (both languages, every role)."""
         total = 0
         for lang in LANGS:
-            size = {(role, key): self.size(lang, role, split, key) for (lg, role, key, sp) in self._pools
-                    if lg == lang and sp == split}  # fmt: skip
+            size = {
+                (role, key): self.size(lang, role, split, key)
+                for (lg, role, key, sp) in self._pools
+                if lg == lang and sp == split
+            }
 
             def s(role, key=None, size=size):
                 return size.get((role, key), 0)
@@ -148,8 +151,9 @@ class Registry:
                 sizes = {a: s("bio", a) for a in ATTRIBUTES}
                 lo, hi = e4_attributes
                 # a source passage is an ordered attribute sequence of length k, each sentence from its pool
-                passages = sum(prod(sizes[a] for a in order) for k in range(lo, hi + 1)
-                               for order in permutations(ATTRIBUTES, k))  # fmt: skip
+                passages = sum(
+                    prod(sizes[a] for a in order) for k in range(lo, hi + 1) for order in permutations(ATTRIBUTES, k)
+                )
                 total += passages + s("e4_instr") + s("e4_back")
             else:
                 raise TemplateError(f"unknown family {family!r}")
@@ -177,8 +181,9 @@ def load_registry(tables: Mapping) -> Registry:
                         tid = f"{lang}-{role}" + (f"-{key}" if key else "") + f"-{split}{i:02d}"
                         t = Template(tid, lang, role, key, split, text)
                         if placeholders(text) != wanted:
-                            raise TemplateError(f"{tid}: placeholders {sorted(placeholders(text))}, "
-                                                f"expected {sorted(wanted)}")  # fmt: skip
+                            raise TemplateError(
+                                f"{tid}: placeholders {sorted(placeholders(text))}, expected {sorted(wanted)}"
+                            )
                         _check_spacing(t)
                         literal = text
                         for name in wanted:
@@ -195,6 +200,7 @@ def load_registry(tables: Mapping) -> Registry:
             sets = [{t.text for t in templates if (t.lang, t.role, t.split) == (lang, role, s)} for s in SPLITS]
             for (i, a), (j, b) in ((p, q) for p in enumerate(sets) for q in enumerate(sets) if p[0] < q[0]):
                 if a & b:
-                    raise TemplateError(f"templates.{lang}.{role}: {sorted(a & b)[0]!r} is in both "
-                                        f"{SPLITS[i]} and {SPLITS[j]}")  # fmt: skip
+                    raise TemplateError(
+                        f"templates.{lang}.{role}: {sorted(a & b)[0]!r} is in both {SPLITS[i]} and {SPLITS[j]}"
+                    )
     return registry

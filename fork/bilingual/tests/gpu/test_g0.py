@@ -134,8 +134,9 @@ def test_g3_sdpa_backends_with_enable_gqa_and_no_silent_fallback(device):
     assert set(probe) == set(BACKENDS)
     fused = [b for b in FUSED if probe[b] == "ok"]
     if not fused:
-        pytest.fail(f"no fused SDPA backend accepts enable_gqa on this GPU ({probe}); set model.gqa = 'repeat' "
-                    "(runbook G0 g3)")  # fmt: skip
+        pytest.fail(
+            f"no fused SDPA backend accepts enable_gqa on this GPU ({probe}); set model.gqa = 'repeat' (runbook G0 g3)"
+        )
     x = torch.randint(5, cfg.vocab_size, (2, 256), device="cuda")
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
         for gqa in ("sdpa_gqa", "repeat"):
@@ -178,9 +179,15 @@ def test_g6_records_driver_torch_build_and_peak(device):
     from surogate_bilingual.registry.env import environment
 
     env = environment()
-    rec = {"driver": env["driver"], "torch": torch.__version__, "cuda": torch.version.cuda, "cudnn": env["cudnn"],
-           "gpu": env["gpu"], "peak_tflops": PEAK_TFLOPS,
-           "peak_tflops_status": "to verify against the NVIDIA spec sheet (dense BF16, fp32 accumulate)"}  # fmt: skip
+    rec = {
+        "driver": env["driver"],
+        "torch": torch.__version__,
+        "cuda": torch.version.cuda,
+        "cudnn": env["cudnn"],
+        "gpu": env["gpu"],
+        "peak_tflops": PEAK_TFLOPS,
+        "peak_tflops_status": "to verify against the NVIDIA spec sheet (dense BF16, fp32 accumulate)",
+    }
     record("g6", rec)
     if device == "cuda":
         missing = [k for k, v in rec.items() if v is None]

@@ -165,8 +165,11 @@ def item_plan(
     meta = [(s.lang, len(s.ids), s.role) for s in segs] + [(answer_lang, int(answer_len), "answer")]
     source = item.get("knowledge_source")
     if routing.route == "R_src" and source is None:
-        why = ("its facts live in two partitions (knowledge_sources), R_src is undefined"
-               if item.get("knowledge_sources") else "it has no knowledge_source")  # fmt: skip
+        why = (
+            "its facts live in two partitions (knowledge_sources), R_src is undefined"
+            if item.get("knowledge_sources")
+            else "it has no knowledge_source"
+        )
         raise SkipItem(f"R_src cannot route {item['id']}: {why}")
 
     def rng():

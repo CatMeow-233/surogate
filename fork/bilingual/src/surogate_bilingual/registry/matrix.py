@@ -129,8 +129,10 @@ def table(results: Sequence[dict] = ()) -> list[dict]:
 def markdown(entries: Sequence[dict]) -> str:
     lines = ["| ID | § | 条件 | 新训练 | 状态 | 训练阶段 | 结果 |", "|---|---|---|---|---|---|---|"]
     for e in entries:
-        lines.append(f"| {e['id']} | {e['section']} | {e['condition']} | {e['training']} | {e['status']} | "
-                     f"{e['stage'] or '—'} | {e['result']} |")  # fmt: skip
+        lines.append(
+            f"| {e['id']} | {e['section']} | {e['condition']} | {e['training']} | {e['status']} | "
+            f"{e['stage'] or '—'} | {e['result']} |"
+        )
     return "\n".join(lines)
 
 

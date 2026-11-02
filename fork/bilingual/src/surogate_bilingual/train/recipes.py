@@ -96,8 +96,9 @@ class Recipe:
     def model_config(self, cfg: ModelConfig) -> ModelConfig:
         return cfg
 
-    def build(self, cfg: ModelConfig, inputs: Inputs, *, fusion: str, gqa: str, init_seed: int,
-              anchor_kl: float) -> Built:  # fmt: skip
+    def build(
+        self, cfg: ModelConfig, inputs: Inputs, *, fusion: str, gqa: str, init_seed: int, anchor_kl: float
+    ) -> Built:
         raise NotImplementedError
 
     def param_groups(self, model, plan: FreezePlan, train: TrainConfig) -> list[dict[str, Any]]:
@@ -207,8 +208,9 @@ class ExpertRecipe(Recipe):
 
     def names(self) -> tuple[str, ...]:
         if self.expert in self.context or len(set(self.context)) != len(self.context):
-            raise RecipeError(f"context experts {self.context} must be distinct from each other and from "
-                              f"{self.expert!r}")  # fmt: skip
+            raise RecipeError(
+                f"context experts {self.context} must be distinct from each other and from {self.expert!r}"
+            )
         return (*self.context, self.expert)
 
     def route_map(self) -> dict[str, str] | None:

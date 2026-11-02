@@ -140,10 +140,16 @@ def budget_rows(profile_name: str = "pilot") -> list[BudgetRow]:
     half = cfg1.replace(ffn_width=f // 2)
     rows.append(
         _bank_rows(
-            "B10-I", "B10-I Top-2 of two f/2 experts", half, zh_en, "dual", True,
-            standalone_P_total=p_total(_model(half, ["zh"])), note="fidelity reference: the standalone half model",
+            "B10-I",
+            "B10-I Top-2 of two f/2 experts",
+            half,
+            zh_en,
+            "dual",
+            True,
+            standalone_P_total=p_total(_model(half, ["zh"])),
+            note="fidelity reference: the standalone half model",
         )
-    )  # fmt: skip
+    )
 
     bank = _model(cfg1, zh_en)
     shared = p_total(bank.backbone)
@@ -156,12 +162,19 @@ def budget_rows(profile_name: str = "pilot") -> list[BudgetRow]:
         )  # `blocks` of the 2 * blocks channel blocks, each 64 rows/cols of gate, up, down
         rows.append(
             _row(
-                "B10-ch", f"B10-ch {blocks} of {2 * blocks} blocks (rank-{BLOCK_ROUTER_RANK} block router)", cfg1,
-                p_total(bank) + p_total(router), shared + selected + p_total(router), path, "single", True,
-                "structural", extra_macs=BLOCK_ROUTER_RANK * (d + 2 * blocks),
+                "B10-ch",
+                f"B10-ch {blocks} of {2 * blocks} blocks (rank-{BLOCK_ROUTER_RANK} block router)",
+                cfg1,
+                p_total(bank) + p_total(router),
+                shared + selected + p_total(router),
+                path,
+                "single",
+                True,
+                "structural",
+                extra_macs=BLOCK_ROUTER_RANK * (d + 2 * blocks),
                 note="channel selection and the block router run in P1; counted by declaration",
             )
-        )  # fmt: skip
+        )
     single = shared + path
     single_active = rows[0].P_active  # B4: the executed Top-1 path of this bank
     ranks = [128]
@@ -171,11 +184,19 @@ def budget_rows(profile_name: str = "pilot") -> list[BudgetRow]:
         adapters = _per_layer(cfg1, lambda r=r: ZeroInitAdapter(d, r))
         rows.append(
             _row(
-                f"B11-r{r}", f"B11 Top-1 + zero-init adapter r={r}", cfg1, p_total(bank) + p_total(adapters),
-                single_active + p_total(adapters), _update(bank, adapters), "single", True, "structural",
-                extra_macs=2 * d * r, note="adapters run in P1 (repair ladder); counted by declaration",
+                f"B11-r{r}",
+                f"B11 Top-1 + zero-init adapter r={r}",
+                cfg1,
+                p_total(bank) + p_total(adapters),
+                single_active + p_total(adapters),
+                _update(bank, adapters),
+                "single",
+                True,
+                "structural",
+                extra_macs=2 * d * r,
+                note="adapters run in P1 (repair ladder); counted by declaration",
             )
-        )  # fmt: skip
+        )
     for k in (2, 4, 6):
         if 2 * k >= L:
             continue
@@ -183,41 +204,102 @@ def budget_rows(profile_name: str = "pilot") -> list[BudgetRow]:
         model = _model(lp, zh_en)
         rows.append(
             _row(
-                f"LP-{k}", f"LP-{k} layer-partial Top-1", lp, p_total(model), _active(model, "single"),
-                _update(model), "single", True, "executed", P_active_dual=_active(model, "dual"),
+                f"LP-{k}",
+                f"LP-{k} layer-partial Top-1",
+                lp,
+                p_total(model),
+                _active(model, "single"),
+                _update(model),
+                "single",
+                True,
+                "executed",
+                P_active_dual=_active(model, "dual"),
             )
-        )  # fmt: skip
+        )
     # B10-II halves the slots, rounding up: n = 395 at the pilot geometry (B-O4).
     for n, tag, declared_dual in ((cfg2.slot_width, "II", False), ((cfg2.slot_width + 1) // 2, "B10-II", True)):
         cfg = cfg2.replace(slot_width=n)
         model = _model(cfg, zh_en)
         stand = p_total(_model(cfg, ["zh"]))
-        rows.append(_row(f"{tag}-single", f"{tag} n={n} Top-1", cfg, p_total(model), _active(model, "single"),
-                         _update(model), "single", True, "executed"))  # fmt: skip
-        rows.append(_row(f"{tag}-dual", f"{tag} n={n} dual (B8 pre / B9 post)", cfg, p_total(model),
-                         _active(model, "dual"), _update(model), "dual", declared_dual, "executed",
-                         standalone_P_total=stand))  # fmt: skip
+        rows.append(
+            _row(
+                f"{tag}-single",
+                f"{tag} n={n} Top-1",
+                cfg,
+                p_total(model),
+                _active(model, "single"),
+                _update(model),
+                "single",
+                True,
+                "executed",
+            )
+        )
+        rows.append(
+            _row(
+                f"{tag}-dual",
+                f"{tag} n={n} dual (B8 pre / B9 post)",
+                cfg,
+                p_total(model),
+                _active(model, "dual"),
+                _update(model),
+                "dual",
+                declared_dual,
+                "executed",
+                standalone_P_total=stand,
+            )
+        )
     if d < f:
         cfg = cfg2.replace(slot_width=d)
         model = _model(cfg, zh_en)
         note = "sensitivity row of budget_v11.json; not in the MS §5.1 table"
-        rows.append(_row(f"II-n{d}-single", f"II n={d} Top-1", cfg, p_total(model), _active(model, "single"),
-                         _update(model), "single", True, "executed", note=note))  # fmt: skip
-        rows.append(_row(f"II-n{d}-dual", f"II n={d} dual", cfg, p_total(model), _active(model, "dual"),
-                         _update(model), "dual", False, "executed", note=note))  # fmt: skip
+        rows.append(
+            _row(
+                f"II-n{d}-single",
+                f"II n={d} Top-1",
+                cfg,
+                p_total(model),
+                _active(model, "single"),
+                _update(model),
+                "single",
+                True,
+                "executed",
+                note=note,
+            )
+        )
+        rows.append(
+            _row(
+                f"II-n{d}-dual",
+                f"II n={d} dual",
+                cfg,
+                p_total(model),
+                _active(model, "dual"),
+                _update(model),
+                "dual",
+                False,
+                "executed",
+                note=note,
+            )
+        )
     if profile_name == "pilot":
         big = cfg1.replace(vocab_size=TWO_B["vocab_size"], ffn_width=TWO_B["ffn_width"])
         model = _model(big, [f"e{i:02d}" for i in range(TWO_B["experts"])])
         router = _per_layer(big, _linear_chain(d, TWO_B["experts"]))
         rows.append(
             _row(
-                "2B", f"2B extrapolation (V {big.vocab_size}, {TWO_B['experts']} FFNs of f={big.ffn_width} per layer, "
-                f"{d}x{TWO_B['experts']} router per layer)", big, p_total(model) + p_total(router),
-                _active(model, "single") + p_total(router), None, "single", True, "structural",
+                "2B",
+                f"2B extrapolation (V {big.vocab_size}, {TWO_B['experts']} FFNs of f={big.ffn_width} per layer, "
+                f"{d}x{TWO_B['experts']} router per layer)",
+                big,
+                p_total(model) + p_total(router),
+                _active(model, "single") + p_total(router),
+                None,
+                "single",
+                True,
+                "structural",
                 extra_macs=d * TWO_B["experts"],
                 note="the v1.0 §5.2 organisation; P_update undefined (not whole-path experts); router by declaration",
             )
-        )  # fmt: skip
+        )
     return rows
 
 

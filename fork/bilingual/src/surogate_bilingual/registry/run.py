@@ -36,9 +36,15 @@ RUNS_DIR = Path("data") / "runs"  # under the run root
 INDEX = "index.json"
 RUN_JSON = "run.json"
 IDENTITY_KEYS = (
-    "config_hash", "data_manifest_sha256", "tokenizer_sha256", "seed_fingerprint", "code_commit", "recipe",
-    "init_seed", "data_seed",
-)  # fmt: skip
+    "config_hash",
+    "data_manifest_sha256",
+    "tokenizer_sha256",
+    "seed_fingerprint",
+    "code_commit",
+    "recipe",
+    "init_seed",
+    "data_seed",
+)
 STATUSES = ("created", "running", "done", "failed")
 
 
@@ -168,8 +174,10 @@ def main(argv: Sequence[str]) -> int:
     try:
         if args.action == "list":
             for doc in list_runs(args.runs):
-                print(f"{doc['run_name']}\t{doc['run_id']}\t{doc.get('status')}\t{doc.get('recipe')}\t"
-                      f"{doc.get('matrix_row')}\tr{doc.get('replicate')}")  # fmt: skip
+                print(
+                    f"{doc['run_name']}\t{doc['run_id']}\t{doc.get('status')}\t{doc.get('recipe')}\t"
+                    f"{doc.get('matrix_row')}\tr{doc.get('replicate')}"
+                )
             return 0
         if not args.name:
             ap.error("show needs a run name")

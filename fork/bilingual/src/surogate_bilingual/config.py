@@ -394,8 +394,9 @@ class RunSpec:
                 raise ValueError(f"run.{name} must match {NAME_PATTERN.pattern}: {value!r}")
         for table in ("packs", "routes"):
             value = getattr(self, table)
-            if not isinstance(value, Mapping) or not all(isinstance(k, str) and isinstance(v, str)
-                                                         for k, v in value.items()):  # fmt: skip
+            if not isinstance(value, Mapping) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in value.items()
+            ):
                 raise ValueError(f"run.{table} must be a table of strings: {value!r}")
             object.__setattr__(self, table, dict(value))
         bad = [n for n in [*self.packs, *self.routes.values()] if not NAME_PATTERN.fullmatch(n)]

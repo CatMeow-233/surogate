@@ -173,8 +173,9 @@ def write_shard(
             if tag_counts[tag] < minimum:
                 raise ShardError(f"tag {tag} occurs {tag_counts[tag]} times, below the declared minimum {minimum}")
         if min_mixed_window_fraction is not None and (mixed is None or mixed < min_mixed_window_fraction):
-            raise ShardError(f"mixed-window fraction {mixed} at seq {seq} is below the declared floor "
-                             f"{min_mixed_window_fraction}")  # fmt: skip
+            raise ShardError(
+                f"mixed-window fraction {mixed} at seq {seq} is below the declared floor {min_mixed_window_fraction}"
+            )
         header = {
             "format": FORMAT,
             "split": split,
@@ -209,13 +210,17 @@ class ShardReader:
         h = self.header
         self.checks = {"files": verify, "tokenizer": tokenizer_sha256 is not None, "vocab": vocab_size is not None}
         if tokenizer_sha256 is not None and h["tokenizer_sha256"] != tokenizer_sha256:
-            raise ShardError(f"{self.path}: built with tokenizer {h['tokenizer_sha256'][:12]}…, "
-                             f"the run uses {tokenizer_sha256[:12]}…")  # fmt: skip
+            raise ShardError(
+                f"{self.path}: built with tokenizer {h['tokenizer_sha256'][:12]}…, "
+                f"the run uses {tokenizer_sha256[:12]}…"
+            )
         if h["dtype"] not in ("uint16", "uint32"):
             raise ShardError(f"{self.path}: unknown token dtype {h['dtype']!r}")
         if vocab_size is not None and h["dtype"] != token_dtype(vocab_size):
-            raise ShardError(f"{self.path}: dtype {h['dtype']} does not fit a vocabulary of {vocab_size} ids "
-                             f"(expected {token_dtype(vocab_size)})")  # fmt: skip
+            raise ShardError(
+                f"{self.path}: dtype {h['dtype']} does not fit a vocabulary of {vocab_size} ids "
+                f"(expected {token_dtype(vocab_size)})"
+            )
         if verify:
             for name in FILES:
                 if sha256_file(self.path / name) != h["files"][name]:
@@ -260,8 +265,11 @@ def main(argv: Sequence[str]) -> int:
 
     ap = argparse.ArgumentParser(prog="python -m surogate_bilingual shard", description="write a shard")
     ap.add_argument("--manifest", required=True, type=Path, help="a derived manifest whose files carry their split")
-    ap.add_argument("--split", required=True, help="a split, or several joined by commas (zh_train,en_train for "
-                                                    "the D_zh u D_en shard of B2 and B12a)")  # fmt: skip
+    ap.add_argument(
+        "--split",
+        required=True,
+        help="a split, or several joined by commas (zh_train,en_train for the D_zh u D_en shard of B2 and B12a)",
+    )
     ap.add_argument("--tokenizer", required=True, type=Path)
     ap.add_argument("--route-names", default="zh,en,bridge,seed")
     ap.add_argument("--route", help="default route of every token (e.g. seed for D_seed, zh for D_zh)")
@@ -269,9 +277,12 @@ def main(argv: Sequence[str]) -> int:
     ap.add_argument("--exclude", type=Path, help="bilingual-overlap/1 report; its flagged documents are skipped")
     ap.add_argument("--seed-mix", action="store_true", help="build the D_seed mixture (data.mixture) first")
     ap.add_argument("--mix-seed", type=int, default=0)
-    ap.add_argument("--bridge", action="store_true",
-                    help="parallel documents in the Bridge layout (data.parallel): source on its language's route "
-                         "with loss 0, target on the bridge route; for T2, T3' and T1'")  # fmt: skip
+    ap.add_argument(
+        "--bridge",
+        action="store_true",
+        help="parallel documents in the Bridge layout (data.parallel): source on its language's route "
+        "with loss 0, target on the bridge route; for T2, T3' and T1'",
+    )
     ap.add_argument("--direction", choices=["zh>en", "en>zh"], help="with --bridge: keep one direction (T1')")
     ap.add_argument("--unpair-seed", type=int, help="with --bridge: break every pair with this seed (T3')")
     ap.add_argument("--seq", type=int, default=DEFAULTS["train"]["seq"])
@@ -332,13 +343,27 @@ def _run(args, manifest, tok, tok_sha: str) -> int:
 
     with tempfile.TemporaryDirectory() as tmp:
         target = Path(tmp) / "shard" if args.dry_run else args.out
-        write_shard(target, docs, tok, args.route_names.split(","), "+".join(splits), manifest.sha256,
-                    tokenizer_sha256=tok_sha, split_sha256=derived.get("split_sha256"), default_route=args.route,
-                    seq=args.seq, inputs=inputs, extra=extra, **kwargs)  # fmt: skip
+        write_shard(
+            target,
+            docs,
+            tok,
+            args.route_names.split(","),
+            "+".join(splits),
+            manifest.sha256,
+            tokenizer_sha256=tok_sha,
+            split_sha256=derived.get("split_sha256"),
+            default_route=args.route,
+            seq=args.seq,
+            inputs=inputs,
+            extra=extra,
+            **kwargs,
+        )
         header = json.loads((target / "shard.json").read_text(encoding="utf-8"))
-    print(f"shard: {header['n_docs']} documents, {header['n_tokens']} tokens, tags {header['tag_counts']}, "
-          f"mixed-window fraction {header['mixed_window_fraction']['value']}"
-          + (" (dry run)" if args.dry_run else f" -> {args.out}"))  # fmt: skip
+    print(
+        f"shard: {header['n_docs']} documents, {header['n_tokens']} tokens, tags {header['tag_counts']}, "
+        f"mixed-window fraction {header['mixed_window_fraction']['value']}"
+        + (" (dry run)" if args.dry_run else f" -> {args.out}")
+    )
     return 0
 
 

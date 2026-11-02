@@ -107,9 +107,13 @@ def test_i2_a10_packs_round_trip_every_hash(packs):
 
 def test_expert_pack_records_its_dependencies(packs, tmp_path):
     path = write_expert_pack(
-        tmp_path / "bridge", asm.model_from_seed(packs["seed"], ["bridge"]), "bridge", packs["seed"],
-        {"recipe": "bridge", "bridge_variant": "c"}, depends_on=[packs["zh"], packs["en"]],
-    )  # fmt: skip
+        tmp_path / "bridge",
+        asm.model_from_seed(packs["seed"], ["bridge"]),
+        "bridge",
+        packs["seed"],
+        {"recipe": "bridge", "bridge_variant": "c"},
+        depends_on=[packs["zh"], packs["en"]],
+    )
     deps = read_pack(path).meta["depends_on"]
     assert [(d["name"], d["expert_hash"]) for d in deps] == [
         ("zh", read_pack(packs["zh"]).expert_hash),

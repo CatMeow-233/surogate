@@ -147,8 +147,18 @@ YES_NO = (("是", "yes"), ("否", "no"))  # E3-par same_city: index 0 = same cit
 MOD12 = tuple((str(k), str(k)) for k in range(12))  # E3-par month_sum_mod12: language-neutral digits
 
 ATTRIBUTES = ("year", "month", "city", "occupation", "employer", "hobby")
-LISTS = {"year": YEARS, "month": MONTHS, "city": CITIES, "occupation": OCCUPATIONS, "employer": EMPLOYERS,
-         "hobby": HOBBIES, "color": COLORS, "weekday": WEEKDAYS, "yes_no": YES_NO, "mod12": MOD12}  # fmt: skip
+LISTS = {
+    "year": YEARS,
+    "month": MONTHS,
+    "city": CITIES,
+    "occupation": OCCUPATIONS,
+    "employer": EMPLOYERS,
+    "hobby": HOBBIES,
+    "color": COLORS,
+    "weekday": WEEKDAYS,
+    "yes_no": YES_NO,
+    "mod12": MOD12,
+}
 
 
 class LexiconError(ValueError):
@@ -221,8 +231,9 @@ class Matcher:
             for surface, i in self.by_first.get(text[pos], ()):
                 if text.startswith(surface, pos):
                     end = pos + len(surface)
-                    if self.latin and ((pos > 0 and _is_word_char(text[pos - 1]))
-                                       or (end < len(text) and _is_word_char(text[end]))):  # fmt: skip
+                    if self.latin and (
+                        (pos > 0 and _is_word_char(text[pos - 1])) or (end < len(text) and _is_word_char(text[end]))
+                    ):
                         continue
                     hit = (surface, i)
                     break

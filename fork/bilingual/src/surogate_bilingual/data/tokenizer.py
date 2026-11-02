@@ -233,8 +233,10 @@ def main(argv: Sequence[str]) -> int:
     try:
         if args.action == "check":
             report = check_tokenizer(load_tokenizer(args.tokenizer), args.samples)
-            print(f"tokenizer: sha256 {tokenizer_sha256(args.tokenizer)}; {report['n']} random strings, "
-                  f"{report['unk']} <unk>, {len(report['failures'])} round-trip failures")  # fmt: skip
+            print(
+                f"tokenizer: sha256 {tokenizer_sha256(args.tokenizer)}; {report['n']} random strings, "
+                f"{report['unk']} <unk>, {len(report['failures'])} round-trip failures"
+            )
             return 0 if report["ok"] else 1
         manifest = load_manifest(args.manifest)
         files = args.files or [manifest.root / e["path"] for e in manifest.files(split=args.split)]

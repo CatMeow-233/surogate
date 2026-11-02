@@ -82,8 +82,15 @@ def resolve_norm(norm: str, lengths: Sequence[int]) -> str:
 
 
 @torch.no_grad()
-def candidate_logprobs(model, prompt_ids: Sequence[int], plan: RoutePlan | None, candidates: Sequence[Sequence[int]],
-                       *, batch: int = 16, pad: int = 1) -> list[float]:  # fmt: skip
+def candidate_logprobs(
+    model,
+    prompt_ids: Sequence[int],
+    plan: RoutePlan | None,
+    candidates: Sequence[Sequence[int]],
+    *,
+    batch: int = 16,
+    pad: int = 1,
+) -> list[float]:
     """sum_j log p(c_j | prompt, c_<j) for every candidate. `plan` covers at least the prompt and the longest
     candidate ([1, P + L_max, E]) or is None; each row runs on its last `max_seq` tokens with its plan's slice."""
     prompt = list(map(int, prompt_ids))
@@ -205,13 +212,29 @@ class EvalContext:
 def _record(ctx: EvalContext, item: Mapping[str, Any], **fields) -> dict[str, Any]:
     route, gate = ctx.routing.label() if len(ctx.names) > 1 else ("single", "one_hot")
     base = {
-        "format": PRED_FORMAT, "item_id": item["id"], "family": item["family"], "variant": item["variant"],
-        "direction": item["direction"], "split": item["split"], "arm": ctx.arm, "replicate": ctx.replicate,
-        "route_policy": route, "gate_policy": gate, "norm": None, "candidate_logprobs": None,
-        "candidate_tokens": None, "pred_index": None, "gold_index": item.get("gold_index"), "correct": None,
-        "lang_ok": None, "output": None, "route_trace": None, "skip_reason": None, "items_sha256": ctx.items_sha256,
+        "format": PRED_FORMAT,
+        "item_id": item["id"],
+        "family": item["family"],
+        "variant": item["variant"],
+        "direction": item["direction"],
+        "split": item["split"],
+        "arm": ctx.arm,
+        "replicate": ctx.replicate,
+        "route_policy": route,
+        "gate_policy": gate,
+        "norm": None,
+        "candidate_logprobs": None,
+        "candidate_tokens": None,
+        "pred_index": None,
+        "gold_index": item.get("gold_index"),
+        "correct": None,
+        "lang_ok": None,
+        "output": None,
+        "route_trace": None,
+        "skip_reason": None,
+        "items_sha256": ctx.items_sha256,
         "cluster": cluster_of(item),
-    }  # fmt: skip
+    }
     base.update(fields)
     return base
 
@@ -235,10 +258,17 @@ def rank_item(ctx: EvalContext, item: Mapping[str, Any]) -> dict[str, Any]:
     gold = item["gold_index"]
     margin = result.scores[gold] - max(x for i, x in enumerate(result.scores) if i != gold)  # MS §9.1 secondary
     return _record(
-        ctx, item, norm=result.norm, candidate_logprobs=result.logprobs, candidate_tokens=result.n_tokens,
-        pred_index=result.pred_index, correct=result.pred_index == gold, margin=margin,
-        lang_ok=None if distractor is None else result.pred_index != distractor, boundary_merge=merged,
-    )  # fmt: skip
+        ctx,
+        item,
+        norm=result.norm,
+        candidate_logprobs=result.logprobs,
+        candidate_tokens=result.n_tokens,
+        pred_index=result.pred_index,
+        correct=result.pred_index == gold,
+        margin=margin,
+        lang_ok=None if distractor is None else result.pred_index != distractor,
+        boundary_merge=merged,
+    )
 
 
 def _stage_plan_fn(ctx: EvalContext, item, segs: Sequence[Seg], answer_lang: str):
@@ -272,8 +302,10 @@ def generate_items(ctx: EvalContext, items: Sequence[Mapping[str, Any]]) -> list
                 back = [seg for seg in s["item"]["segments"] if seg["role"] == "instruction"][k]
                 prev = s["stages"][-1]
                 lang = s["item"]["stages"][k - 1]["answer_lang"]
-                s["segs"] += [Seg(lang, "answer", tuple(prev["ids"]) + tuple(newline)),
-                              Seg(back["lang"], "instruction", tuple(encode_user_text(ctx.tok, back["text"])))]  # fmt: skip
+                s["segs"] += [
+                    Seg(lang, "answer", tuple(prev["ids"]) + tuple(newline)),
+                    Seg(back["lang"], "instruction", tuple(encode_user_text(ctx.tok, back["text"]))),
+                ]
         fns = [_stage_plan_fn(ctx, s["item"], s["segs"], s["item"]["stages"][k]["answer_lang"]) for s in active]
         prompts = [[t for seg in s["segs"] for t in seg.ids] for s in active]
         with ctx.autocast_ctx():
@@ -283,18 +315,31 @@ def generate_items(ctx: EvalContext, items: Sequence[Mapping[str, Any]]) -> list
             text = decode(ctx.tok, gen.tokens)
             slots = score_slots(text, stage["slots"], stage["answer_lang"])
             ok = lang_ok(text, stage["answer_lang"], ignore=[stage["slots"].get("name", "")])
-            s["stages"].append({"answer_lang": stage["answer_lang"], "output": text, "ids": gen.tokens,
-                                "stop": gen.stop, "slots": slots, "lang_ok": ok, "route_trace": gen.route_trace})  # fmt: skip
+            s["stages"].append(
+                {
+                    "answer_lang": stage["answer_lang"],
+                    "output": text,
+                    "ids": gen.tokens,
+                    "stop": gen.stop,
+                    "slots": slots,
+                    "lang_ok": ok,
+                    "route_trace": gen.route_trace,
+                }
+            )
     for key, s in state.items():
         stages = s["stages"]
         n = sum(len(st["slots"]) for st in stages)
         hit = sum(sum(st["slots"].values()) if st["lang_ok"] else 0 for st in stages)
         records[key] = _record(
-            ctx, s["item"], output=stages[-1]["output"], route_trace=stages[-1]["route_trace"],
-            lang_ok=all(st["lang_ok"] for st in stages), slot_acc=hit / n if n else None,
+            ctx,
+            s["item"],
+            output=stages[-1]["output"],
+            route_trace=stages[-1]["route_trace"],
+            lang_ok=all(st["lang_ok"] for st in stages),
+            slot_acc=hit / n if n else None,
             correct=all(st["lang_ok"] and all(st["slots"].values()) for st in stages),
             stages=[{k: v for k, v in st.items() if k not in ("ids", "route_trace")} for st in stages],
-        )  # fmt: skip
+        )
     return [records[item["id"]] for item in items]
 
 
@@ -315,19 +360,45 @@ def evaluate(ctx: EvalContext, items: Sequence[Mapping[str, Any]]) -> list[dict[
 
 def generate_prompts(ctx: EvalContext, prompts: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """A fixed generation set (G1): free prompts {id, lang, text}; the output and its language are recorded."""
-    segs = [[bos(ctx.tok, p["lang"]), Seg(p["lang"], "question", tuple(encode_user_text(ctx.tok, p["text"])))]
-            for p in prompts]  # fmt: skip
-    fake = [{"id": p["id"], "family": "gen", "variant": "free", "direction": p["lang"], "split": "fixed",
-             "segments": [], "template_ids": {}} for p in prompts]  # fmt: skip
+    segs = [
+        [bos(ctx.tok, p["lang"]), Seg(p["lang"], "question", tuple(encode_user_text(ctx.tok, p["text"])))]
+        for p in prompts
+    ]
+    fake = [
+        {
+            "id": p["id"],
+            "family": "gen",
+            "variant": "free",
+            "direction": p["lang"],
+            "split": "fixed",
+            "segments": [],
+            "template_ids": {},
+        }
+        for p in prompts
+    ]
     fns = [_stage_plan_fn(ctx, f, s, p["lang"]) for f, s, p in zip(fake, segs, prompts, strict=True)]
     with torch.no_grad(), ctx.autocast_ctx():
-        gens = greedy_batch(ctx.model, [[t for seg in s for t in seg.ids] for s in segs], lambda i, ids: fns[i](i, ids), ctx.max_new,
-                            ctx.eos)  # fmt: skip
+        gens = greedy_batch(
+            ctx.model,
+            [[t for seg in s for t in seg.ids] for s in segs],
+            lambda i, ids: fns[i](i, ids),
+            ctx.max_new,
+            ctx.eos,
+        )
     out = []
     for f, p, gen in zip(fake, prompts, gens, strict=True):
         text = decode(ctx.tok, gen.tokens)
-        out.append(_record(ctx, f, output=text, lang_ok=lang_ok(text, p["lang"]), route_trace=gen.route_trace,
-                           gold_index=None, stop=gen.stop))  # fmt: skip
+        out.append(
+            _record(
+                ctx,
+                f,
+                output=text,
+                lang_ok=lang_ok(text, p["lang"]),
+                route_trace=gen.route_trace,
+                gold_index=None,
+                stop=gen.stop,
+            )
+        )
     return out
 
 
@@ -340,8 +411,10 @@ def _pair(text: str) -> tuple[float, float]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog="python -m surogate_bilingual eval-tasks",
-                                 description="candidate ranking and generation scoring on Track S items")  # fmt: skip
+    ap = argparse.ArgumentParser(
+        prog="python -m surogate_bilingual eval-tasks",
+        description="candidate ranking and generation scoring on Track S items",
+    )
     ap.add_argument("--model", type=Path, required=True, help="a seed pack directory or an assembly manifest")
     ap.add_argument("--arm", required=True, help="the arm label (an MS §7 row id sets the routing preset)")
     ap.add_argument("--row", help="the matrix row the results belong to (default: the arm)")
@@ -387,17 +460,29 @@ def run(args) -> dict[str, Any]:
     from .models import arm_routing, load_model
     from .report import results_document, results_from_predictions
 
-    preset_routing, preset = arm_routing(args.arm, route=args.route, gate=args.gate, g=args.g, window=args.window,
-                                         answer_route=args.answer_route, rng_seed=args.rng_seed)  # fmt: skip
+    preset_routing, preset = arm_routing(
+        args.arm,
+        route=args.route,
+        gate=args.gate,
+        g=args.g,
+        window=args.window,
+        answer_route=args.answer_route,
+        rng_seed=args.rng_seed,
+    )
     merge_method = args.merge or preset.get("merge")
     merge = None
     if merge_method:
-        merge = {"method": merge_method, "lam": args.lam, "density": args.density,
-                 "experts": args.merge_experts.split(",")}  # fmt: skip
+        merge = {
+            "method": merge_method,
+            "lam": args.lam,
+            "density": args.density,
+            "experts": args.merge_experts.split(","),
+        }
     ev = load_model(args.model, fusion=args.fusion or preset.get("fusion"), merge=merge, device=_device(args.device))
     if args.items:
-        items, files = load_items(args.items, family=args.family, variant=args.variant, split=args.split,
-                                  limit=args.limit)  # fmt: skip
+        items, files = load_items(
+            args.items, family=args.family, variant=args.variant, split=args.split, limit=args.limit
+        )
         if any(i["split"] == "test" for i in items) and not args.allow_test:
             raise ValueError("test items are evaluated only after the preregistration lock (MS §9.7): --allow-test")
     else:
@@ -406,14 +491,37 @@ def run(args) -> dict[str, Any]:
         items = items[: args.limit] if args.limit else items
     sha = items_sha256(items)
     norm = args.norm or DEFAULTS["eval"]["length_norm"]
-    ctx = EvalContext(ev.model, ev.tokenizer, ev.names, preset_routing, args.arm, args.replicate, sha, norm,
-                      args.max_new, args.autocast == "bf16")  # fmt: skip
+    ctx = EvalContext(
+        ev.model,
+        ev.tokenizer,
+        ev.names,
+        preset_routing,
+        args.arm,
+        args.replicate,
+        sha,
+        norm,
+        args.max_new,
+        args.autocast == "bf16",
+    )
     commit, dirty = code_identity()
-    meta = {"model": ev.source, "tokenizer_sha256": ev.tokenizer_sha256, "item_files": files, "items_sha256": sha,
-            "n_items": len(items), "arm": args.arm, "row": args.row or args.arm, "replicate": args.replicate,
-            "routing": dict(zip(("route_policy", "gate_policy"), preset_routing.label(), strict=True)),
-            "norm": norm, "max_new": args.max_new, "autocast": args.autocast, "split": args.split,
-            "allow_test": args.allow_test, "code_commit": commit, "code_dirty": dirty}  # fmt: skip
+    meta = {
+        "model": ev.source,
+        "tokenizer_sha256": ev.tokenizer_sha256,
+        "item_files": files,
+        "items_sha256": sha,
+        "n_items": len(items),
+        "arm": args.arm,
+        "row": args.row or args.arm,
+        "replicate": args.replicate,
+        "routing": dict(zip(("route_policy", "gate_policy"), preset_routing.label(), strict=True)),
+        "norm": norm,
+        "max_new": args.max_new,
+        "autocast": args.autocast,
+        "split": args.split,
+        "allow_test": args.allow_test,
+        "code_commit": commit,
+        "code_dirty": dirty,
+    }
     if args.dry_run:
         return {"dry_run": True, **meta, "experts": list(ev.names)}
     preds = generate_prompts(ctx, items) if args.prompts else evaluate(ctx, items)

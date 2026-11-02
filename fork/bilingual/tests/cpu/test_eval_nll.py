@@ -76,19 +76,23 @@ def _switch_segments(tok, langs):
 def test_i6_e4_switch_decomposition(tiny_assemblies):
     ev = load_model(tiny_assemblies["zh_en"])
     tok = ev.tokenizer
-    same = switch.decompose_segments(ev.model, _switch_segments(tok, [("en", "source"), ("en", "instruction"),
-                                                                      ("en", "answer")]))  # fmt: skip
+    same = switch.decompose_segments(
+        ev.model, _switch_segments(tok, [("en", "source"), ("en", "instruction"), ("en", "answer")])
+    )
     assert not same["switched"] and same["M"] == same["R_new"] == same["R_old"]  # exactly, not approximately
-    out = switch.decompose_segments(ev.model, _switch_segments(tok, [("zh", "source"), ("en", "instruction"),
-                                                                     ("en", "answer")]))  # fmt: skip
+    out = switch.decompose_segments(
+        ev.model, _switch_segments(tok, [("zh", "source"), ("en", "instruction"), ("en", "answer")])
+    )
     assert {"M", "R_new", "R_old"} <= set(out) and out["switched"]
     assert (out["new_route"], out["old_route"]) == ("en", "zh")
     assert abs(out["M"] - out["R_new"]) > 1e-6 and abs(out["mismatch_cost"] - (out["M"] - out["R_new"])) <= 1e-15
     assert out["L_ref"] is None
     # with a translated history, L_ref is the target read after a history already in the target language
-    ref = switch.decompose_segments(ev.model, _switch_segments(tok, [("zh", "source"), ("en", "instruction"),
-                                                                     ("en", "answer")]),
-                                    reference_history=_switch_segments(tok, [("en", "source"), ("en", "instruction")]))  # fmt: skip
+    ref = switch.decompose_segments(
+        ev.model,
+        _switch_segments(tok, [("zh", "source"), ("en", "instruction"), ("en", "answer")]),
+        reference_history=_switch_segments(tok, [("en", "source"), ("en", "instruction")]),
+    )
     assert ref["L_ref"] is not None and abs(ref["reading_cost"] - (ref["R_new"] - ref["L_ref"])) <= 1e-15
     with pytest.raises(ValueError, match="two experts"):
         switch.decompose_segments(load_model(tiny_assemblies["zh"]).model, _switch_segments(tok, [("zh", "answer")]))
@@ -113,8 +117,12 @@ def test_i6_e4_spike_after_switch_averages_exactly_the_first_k_targets():
 
 def test_eval_nll_and_switch_commands(tiny_assemblies, item_maker, tmp_path, capsys):
     docs = tmp_path / "dev.jsonl"
-    docs.write_text("".join(json.dumps({"key": f"d{i}", "kind": lang, "text": text}) + "\n"
-                            for i, (lang, text) in enumerate([("zh", "z1 z2 z3"), ("en", "e1 e2 e3")])))  # fmt: skip
+    docs.write_text(
+        "".join(
+            json.dumps({"key": f"d{i}", "kind": lang, "text": text}) + "\n"
+            for i, (lang, text) in enumerate([("zh", "z1 z2 z3"), ("en", "e1 e2 e3")])
+        )
+    )
     out = tmp_path / "nll.json"
     argv = ["--model", str(tiny_assemblies["zh_en"]), "--docs", str(docs), "--out", str(out)]
     assert nll.main([*argv, "--dry-run"]) == 0 and not out.exists()
@@ -123,10 +131,16 @@ def test_eval_nll_and_switch_commands(tiny_assemblies, item_maker, tmp_path, cap
     assert doc["format"] == "bilingual-nll/1" and doc["matrix"]["rows"] == ["zh", "en"]
     seed = ["--model", str(tiny_assemblies["seed"]), "--docs", str(docs), "--out", str(tmp_path / "b0.json")]
     assert nll.main(seed) == 0 and json.loads((tmp_path / "b0.json").read_text())["matrix"]["rows"] == ["seed"]
-    e4 = item_maker(0, "E4", [("zh", "source", "z1 z2 z3\n"), ("en", "instruction", "e1 e2"), ("en", "answer", None)],
-                    variant="translate", direction="zh>en",
-                    stages=[{"answer_lang": "en", "slots": {"name": "Ab Cd"}, "reference": "e3 e4 e5"}],
-                    slots={"name": "Ab Cd"}, reference="e3 e4 e5")  # fmt: skip
+    e4 = item_maker(
+        0,
+        "E4",
+        [("zh", "source", "z1 z2 z3\n"), ("en", "instruction", "e1 e2"), ("en", "answer", None)],
+        variant="translate",
+        direction="zh>en",
+        stages=[{"answer_lang": "en", "slots": {"name": "Ab Cd"}, "reference": "e3 e4 e5"}],
+        slots={"name": "Ab Cd"},
+        reference="e3 e4 e5",
+    )
     items = tmp_path / "E4.dev.jsonl"
     items.write_text(json.dumps(e4) + "\n")
     sw = tmp_path / "switch.json"

@@ -73,8 +73,14 @@ class Person:
     attrs: Mapping[str, int] = field(default_factory=dict)  # attribute -> value index
 
     def to_json(self) -> dict:
-        return {"id": self.id, "name": self.name, "name_index": self.name_index, "partition": self.partition,
-                "group": self.group, "attrs": dict(self.attrs)}  # fmt: skip
+        return {
+            "id": self.id,
+            "name": self.name,
+            "name_index": self.name_index,
+            "partition": self.partition,
+            "group": self.group,
+            "attrs": dict(self.attrs),
+        }
 
     @classmethod
     def from_json(cls, d: Mapping) -> Person:

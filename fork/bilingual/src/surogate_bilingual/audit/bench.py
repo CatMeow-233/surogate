@@ -60,8 +60,10 @@ def grid(families, recipes, seqs, microbatches, checkpointing) -> list[dict[str,
     bad = [f for f in families if f not in FAMILIES] + [r for r in recipes if r not in RECIPES]
     if bad:
         raise ValueError(f"unknown families or recipes: {bad}")
-    return [{"family": f, "recipe": r, "seq": s, "microbatch": m, "checkpointing": c}
-            for f, r, s, m, c in itertools.product(families, recipes, seqs, microbatches, checkpointing)]  # fmt: skip
+    return [
+        {"family": f, "recipe": r, "seq": s, "microbatch": m, "checkpointing": c}
+        for f, r, s, m, c in itertools.product(families, recipes, seqs, microbatches, checkpointing)
+    ]
 
 
 def sdpa_probe(cfg, device: torch.device, dtype: torch.dtype = torch.bfloat16, seq: int = 256) -> dict[str, str]:
@@ -89,20 +91,40 @@ def _smi_used_gib(device: torch.device) -> float | None:
         return None
     index = device.index if device.index is not None else torch.cuda.current_device()
     try:
-        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits", "-i",
-                              str(index)], capture_output=True, text=True, timeout=30, check=True).stdout  # fmt: skip
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits", "-i", str(index)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        ).stdout
         return float(out.strip().splitlines()[0]) / 1024.0
     except (OSError, subprocess.SubprocessError, ValueError, IndexError):
         return None
 
 
-def bench_point(cfg, point: dict[str, Any], *, warmup: int, steps: int, device: torch.device, gqa: str = "sdpa_gqa",
-                peak_tflops: float = PEAK_TFLOPS) -> dict[str, Any]:  # fmt: skip
+def bench_point(
+    cfg,
+    point: dict[str, Any],
+    *,
+    warmup: int,
+    steps: int,
+    device: torch.device,
+    gqa: str = "sdpa_gqa",
+    peak_tflops: float = PEAK_TFLOPS,
+) -> dict[str, Any]:
     seq, mb, ckpt, recipe = point["seq"], point["microbatch"], point["checkpointing"], point["recipe"]
     names = ["seed"] if recipe == "seed" else ["zh"]
-    record: dict[str, Any] = {"format": BENCH_FORMAT, "kind": "point", **point, "device": str(device),
-                              "precision": "bf16" if device.type == "cuda" else "fp32", "gqa": gqa,
-                              "warmup": warmup, "steps": steps}  # fmt: skip
+    record: dict[str, Any] = {
+        "format": BENCH_FORMAT,
+        "kind": "point",
+        **point,
+        "device": str(device),
+        "precision": "bf16" if device.type == "cuda" else "fp32",
+        "gqa": gqa,
+        "warmup": warmup,
+        "steps": steps,
+    }
     model = optimizer = None
     try:
         model = RoutedLM(cfg, names, gqa=gqa, device=device, init_seed=0).train()
@@ -137,12 +159,19 @@ def bench_point(cfg, point: dict[str, Any], *, warmup: int, steps: int, device: 
             elapsed = time.perf_counter() - began
         tokens_per_s = mb * seq * steps / elapsed
         macs = macs_per_token(cfg, "single")
-        record.update(status="ok", tokens_per_s=tokens_per_s, step_s=elapsed / steps,
-                      max_memory_allocated_gib=peak.allocated_gib, max_memory_reserved_gib=peak.reserved_gib,
-                      nvidia_smi_used_gib=_smi_used_gib(device), weight_macs_per_token=macs,
-                      trainable_parameters=sum(p.numel() for p in trainable), final_loss=float(loss.detach()),
-                      mfu=(6.0 * macs * tokens_per_s / (peak_tflops * 1e12)) if device.type == "cuda" else None,
-                      peak_tflops=peak_tflops)  # fmt: skip
+        record.update(
+            status="ok",
+            tokens_per_s=tokens_per_s,
+            step_s=elapsed / steps,
+            max_memory_allocated_gib=peak.allocated_gib,
+            max_memory_reserved_gib=peak.reserved_gib,
+            nvidia_smi_used_gib=_smi_used_gib(device),
+            weight_macs_per_token=macs,
+            trainable_parameters=sum(p.numel() for p in trainable),
+            final_loss=float(loss.detach()),
+            mfu=(6.0 * macs * tokens_per_s / (peak_tflops * 1e12)) if device.type == "cuda" else None,
+            peak_tflops=peak_tflops,
+        )
     except torch.cuda.OutOfMemoryError as exc:
         record.update(status="oom", error=str(exc).splitlines()[0][:300])
     finally:
@@ -157,16 +186,32 @@ def choose(records: Sequence[dict[str, Any]], global_batch_tokens: int, seq: int
     out = []
     keys = sorted({(r["family"], r["recipe"]) for r in records if r.get("kind") == "point"})
     for family, recipe in keys:
-        ok = [r for r in records if r.get("kind") == "point" and r["family"] == family and r["recipe"] == recipe
-              and r["status"] == "ok" and r["seq"] == seq and global_batch_tokens % (r["microbatch"] * seq) == 0]  # fmt: skip
+        ok = [
+            r
+            for r in records
+            if r.get("kind") == "point"
+            and r["family"] == family
+            and r["recipe"] == recipe
+            and r["status"] == "ok"
+            and r["seq"] == seq
+            and global_batch_tokens % (r["microbatch"] * seq) == 0
+        ]
         best = max(ok, key=lambda r: r["tokens_per_s"], default=None)
-        out.append({"format": BENCH_FORMAT, "kind": "choice", "family": family, "recipe": recipe, "seq": seq,
-                    "global_batch_tokens": global_batch_tokens,
-                    "microbatch": best["microbatch"] if best else None,
-                    "accum": global_batch_tokens // (best["microbatch"] * seq) if best else None,
-                    "checkpointing": best["checkpointing"] if best else None,
-                    "tokens_per_s": best["tokens_per_s"] if best else None,
-                    "status": "ok" if best else "no point fits"})  # fmt: skip
+        out.append(
+            {
+                "format": BENCH_FORMAT,
+                "kind": "choice",
+                "family": family,
+                "recipe": recipe,
+                "seq": seq,
+                "global_batch_tokens": global_batch_tokens,
+                "microbatch": best["microbatch"] if best else None,
+                "accum": global_batch_tokens // (best["microbatch"] * seq) if best else None,
+                "checkpointing": best["checkpointing"] if best else None,
+                "tokens_per_s": best["tokens_per_s"] if best else None,
+                "status": "ok" if best else "no point fits",
+            }
+        )
     return out
 
 
@@ -190,15 +235,30 @@ def main(argv: Sequence[str]) -> int:
     ap.add_argument("--dry-run", action="store_true", help="validate the grid and print it; build nothing")
     args = ap.parse_args(list(argv))
     try:
-        points = grid(_csv(args.family), _csv(args.recipe), _csv(args.seq, int), _csv(args.microbatch, int),
-                      [_onoff(c) for c in _csv(args.checkpointing)])  # fmt: skip
+        points = grid(
+            _csv(args.family),
+            _csv(args.recipe),
+            _csv(args.seq, int),
+            _csv(args.microbatch, int),
+            [_onoff(c) for c in _csv(args.checkpointing)],
+        )
         cfgs = {f: profile(args.profile, f) for f in {p["family"] for p in points}}
         too_long = sorted({p["seq"] for p in points if p["seq"] > cfgs[p["family"]].max_seq})
         if too_long:
             raise ValueError(f"seq {too_long} exceeds max_seq of the {args.profile} profile")
         if args.dry_run:
-            print(json.dumps({"dry_run": True, "points": len(points), "profile": args.profile, "out": str(args.out),
-                              "grid": points}, indent=1))  # fmt: skip
+            print(
+                json.dumps(
+                    {
+                        "dry_run": True,
+                        "points": len(points),
+                        "profile": args.profile,
+                        "out": str(args.out),
+                        "grid": points,
+                    },
+                    indent=1,
+                )
+            )
             return 0
         if args.device == "auto":
             if not torch.cuda.is_available():
@@ -212,14 +272,44 @@ def main(argv: Sequence[str]) -> int:
     from ..registry.env import environment
 
     env = environment()
-    header = {"format": BENCH_FORMAT, "kind": "header", "profile": args.profile, "environment": env,
-              "sdpa_backends": sdpa_probe(cfgs[points[0]["family"]], device), "peak_tflops": args.peak_tflops}  # fmt: skip
+    header = {
+        "format": BENCH_FORMAT,
+        "kind": "header",
+        "profile": args.profile,
+        "environment": env,
+        "sdpa_backends": sdpa_probe(cfgs[points[0]["family"]], device),
+        "peak_tflops": args.peak_tflops,
+    }
     records = [header]
     for point in points:
-        records.append(bench_point(cfgs[point["family"]], point, warmup=args.warmup, steps=args.steps, device=device,
-                                   gqa=args.gqa, peak_tflops=args.peak_tflops))  # fmt: skip
-        print(json.dumps({k: records[-1].get(k) for k in ("family", "recipe", "seq", "microbatch", "checkpointing",
-                                                          "status", "tokens_per_s", "max_memory_reserved_gib")}))  # fmt: skip
+        records.append(
+            bench_point(
+                cfgs[point["family"]],
+                point,
+                warmup=args.warmup,
+                steps=args.steps,
+                device=device,
+                gqa=args.gqa,
+                peak_tflops=args.peak_tflops,
+            )
+        )
+        print(
+            json.dumps(
+                {
+                    k: records[-1].get(k)
+                    for k in (
+                        "family",
+                        "recipe",
+                        "seq",
+                        "microbatch",
+                        "checkpointing",
+                        "status",
+                        "tokens_per_s",
+                        "max_memory_reserved_gib",
+                    )
+                }
+            )
+        )
         atomic_write_bytes(args.out, b"".join(canonical_json(r) + b"\n" for r in records))
     seq = args.choice_seq or max(p["seq"] for p in points)
     records += choose(records, args.global_batch_tokens, seq)

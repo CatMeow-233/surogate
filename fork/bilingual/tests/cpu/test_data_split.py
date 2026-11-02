@@ -40,8 +40,15 @@ def test_i4_d3_near_duplicates_pairs_and_entities_stay_together():
             _doc(f"par/{i}/en", f"parallel {i}", kind="parallel", pair_id=f"p{i}"),
         ]
         docs += [_doc(f"syn/{i}/{j}", f"entity {i} doc {j}", kind="synthetic", entity_id=f"E{i}") for j in range(3)]
-    fractions = {"seed_train": 0.4, "zh_train": 0.1, "en_train": 0.1, "parallel_train": 0.1, "calib": 0.1,
-                 "dev": 0.1, "test": 0.1}  # fmt: skip
+    fractions = {
+        "seed_train": 0.4,
+        "zh_train": 0.1,
+        "en_train": 0.1,
+        "parallel_train": 0.1,
+        "calib": 0.1,
+        "dev": 0.1,
+        "test": 0.1,
+    }
     for seed in range(5):
         where = {k: name for name, keys in S.assign_splits(docs, fractions, seed).items() for k in keys}
         assert len({where["en/a"], where["en/b"], where["en/c"]}) == 1
@@ -75,10 +82,19 @@ def test_i4_d3_seven_sets_are_pairwise_disjoint(data_pipeline):
 
 def test_i4_d3_fractions_within_one_percent_on_10k_documents():
     rng = np.random.default_rng(3)
-    docs = [_doc(f"d/{i}", f"document {i} " + " ".join(map(str, rng.integers(0, 1000, 5))), kind="en")
-            for i in range(10_000)]  # fmt: skip
-    fractions = {"seed_train": 0.55, "zh_train": 0.12, "en_train": 0.12, "parallel_train": 0.06, "calib": 0.03,
-                 "dev": 0.06, "test": 0.06}  # fmt: skip
+    docs = [
+        _doc(f"d/{i}", f"document {i} " + " ".join(map(str, rng.integers(0, 1000, 5))), kind="en")
+        for i in range(10_000)
+    ]
+    fractions = {
+        "seed_train": 0.55,
+        "zh_train": 0.12,
+        "en_train": 0.12,
+        "parallel_train": 0.06,
+        "calib": 0.03,
+        "dev": 0.06,
+        "test": 0.06,
+    }
     splits = S.assign_splits(docs, fractions, seed=11)
     for name, target in fractions.items():
         assert abs(len(splits[name]) / len(docs) - target) <= 0.01, name

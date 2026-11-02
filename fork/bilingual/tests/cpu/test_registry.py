@@ -9,8 +9,15 @@ from surogate_bilingual.registry import env
 from surogate_bilingual.registry import run as registry
 from surogate_bilingual.train.loop import train
 
-IDENTITY = {"config_hash": "c" * 64, "data_manifest_sha256": "m" * 64, "tokenizer_sha256": "t" * 64,
-            "seed_fingerprint": None, "recipe": "seed", "init_seed": 1, "data_seed": 2}  # fmt: skip
+IDENTITY = {
+    "config_hash": "c" * 64,
+    "data_manifest_sha256": "m" * 64,
+    "tokenizer_sha256": "t" * 64,
+    "seed_fingerprint": None,
+    "recipe": "seed",
+    "init_seed": 1,
+    "data_seed": 2,
+}
 
 
 def test_i5_t14_run_id_is_deterministic_and_covers_every_identity_field():
@@ -27,8 +34,9 @@ def test_i5_t14_run_id_is_deterministic_and_covers_every_identity_field():
 
 def test_i5_t14_a_name_is_bound_to_one_run_id(tmp_path):
     clean = ("abc", False)
-    run_dir, doc, resumed = registry.open_run(tmp_path, "r0", IDENTITY, {"matrix_row": "B0"}, allow_dirty=False,
-                                              code=clean)  # fmt: skip
+    run_dir, doc, resumed = registry.open_run(
+        tmp_path, "r0", IDENTITY, {"matrix_row": "B0"}, allow_dirty=False, code=clean
+    )
     assert not resumed and doc["status"] == "created" and doc["code_commit"] == "abc"
     assert json.loads((tmp_path / "index.json").read_text()) == {"r0": doc["run_id"]}
     assert registry.open_run(tmp_path, "r0", IDENTITY, {}, allow_dirty=False, code=clean)[2]  # same id: resume

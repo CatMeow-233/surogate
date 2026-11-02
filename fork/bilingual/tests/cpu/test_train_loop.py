@@ -86,13 +86,40 @@ def processes(tiny_trained, tmp_path_factory):
     commands = {
         "t1a": [CLI_DRIVER, str(SRC), *cli_args, "--runs", str(base / "t1a")],
         "t1b": [CLI_DRIVER, str(SRC), *cli_args, "--runs", str(base / "t1b")],
-        "t2-tiny-seed": [KILL_DRIVER, str(SRC), "after_save", "5", str(root), str(base / "t2-tiny-seed"), "tiny-seed",
-                         str(TINY), *T2_OVERRIDES],
-        "t2-tiny-zh": [KILL_DRIVER, str(SRC), "after_save", "5", str(root), str(base / "t2-tiny-zh"), "tiny-zh",
-                       str(TINY), *T2_OVERRIDES],
-        "t3": [KILL_DRIVER, str(SRC), "before_replace", "10", str(root), str(base / "t3"), "tiny-seed", str(TINY),
-               *T2_OVERRIDES],
-    }  # fmt: skip
+        "t2-tiny-seed": [
+            KILL_DRIVER,
+            str(SRC),
+            "after_save",
+            "5",
+            str(root),
+            str(base / "t2-tiny-seed"),
+            "tiny-seed",
+            str(TINY),
+            *T2_OVERRIDES,
+        ],
+        "t2-tiny-zh": [
+            KILL_DRIVER,
+            str(SRC),
+            "after_save",
+            "5",
+            str(root),
+            str(base / "t2-tiny-zh"),
+            "tiny-zh",
+            str(TINY),
+            *T2_OVERRIDES,
+        ],
+        "t3": [
+            KILL_DRIVER,
+            str(SRC),
+            "before_replace",
+            "10",
+            str(root),
+            str(base / "t3"),
+            "tiny-seed",
+            str(TINY),
+            *T2_OVERRIDES,
+        ],
+    }
     procs = {
         key: subprocess.Popen(
             [sys.executable, "-I", "-B", "-c", *cmd],
@@ -100,7 +127,7 @@ def processes(tiny_trained, tmp_path_factory):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-        )  # fmt: skip
+        )
         for key, cmd in commands.items()
     }
     done = {}
@@ -126,8 +153,13 @@ def test_i5_t1_two_processes_give_the_same_init_and_loss_trace(processes, tiny_t
 def _final(run_dir: Path) -> dict:
     path = state.latest_state(run_dir)
     loaded = state.load_state(path, run_id=json.loads((run_dir / "run.json").read_text())["run_id"])
-    return {"step": loaded.step, "trainable": loaded.trainable, "optimizer": loaded.optimizer,
-            "scheduler": loaded.extra["scheduler"], "sampler": loaded.extra["sampler"]}  # fmt: skip
+    return {
+        "step": loaded.step,
+        "trainable": loaded.trainable,
+        "optimizer": loaded.optimizer,
+        "scheduler": loaded.extra["scheduler"],
+        "sampler": loaded.extra["sampler"],
+    }
 
 
 def _same_optimizer(a: dict, b: dict) -> bool:
@@ -155,8 +187,9 @@ def test_i5_t2_killed_and_resumed_equals_uninterrupted(processes, tiny_trained, 
     assert whole.sampler.state_dict() == resumed.sampler.state_dict()
     assert losses(whole.run_dir) == losses(run_dir)
     assert [m["step"] for m in metrics.read(run_dir / "metrics.jsonl")] == list(range(1, 11))
-    trained = dict(zip(resumed.optimizer.param_groups[0]["names"], resumed.optimizer.param_groups[0]["params"],
-                       strict=True))  # fmt: skip
+    trained = dict(
+        zip(resumed.optimizer.param_groups[0]["names"], resumed.optimizer.param_groups[0]["params"], strict=True)
+    )
     assert all(torch.equal(trained[k], a["trainable"][k]) for k in trained)
 
 
@@ -179,8 +212,9 @@ def test_i5_t3_retention_keeps_the_last_two_and_every_keep_every(tmp_path):
     p = torch.nn.Parameter(torch.zeros(3))
     opt = torch.optim.AdamW([p], lr=0.1)
     for step in range(1, 13):
-        state.save_state(tmp_path, step, trainable={"p": p}, optimizer=opt, extra={"run_id": "r", "tokens": 0},
-                         keep_every=4)  # fmt: skip
+        state.save_state(
+            tmp_path, step, trainable={"p": p}, optimizer=opt, extra={"run_id": "r", "tokens": 0}, keep_every=4
+        )
     assert [s for s, _ in state.list_states(tmp_path)] == [4, 8, 11, 12]
     assert not [p for p in (tmp_path / "state").iterdir() if "tmp" in p.name]
     state.save_state(tmp_path, 13, trainable={"p": p}, optimizer=opt, extra={"run_id": "r", "tokens": 0})
@@ -206,8 +240,12 @@ def test_i5_t4_resume_refuses_another_run_id_and_changed_frozen_tensors(tiny_tra
 
 
 def test_i5_t4_a_tampered_state_file_is_refused(tiny_trained, tiny_stage, tmp_path):
-    first = train(tiny_stage("tiny-seed", "run.steps=4", "run.save_every=2"), root=tiny_trained["root"],
-                  runs=tmp_path / "runs", stop_after=2)  # fmt: skip
+    first = train(
+        tiny_stage("tiny-seed", "run.steps=4", "run.save_every=2"),
+        root=tiny_trained["root"],
+        runs=tmp_path / "runs",
+        stop_after=2,
+    )
     path = state.latest_state(first.run_dir)
     weights = load_file(str(path / state.TRAINABLE))
     weights["backbone.final_norm.weight"][0] += 1
@@ -219,8 +257,14 @@ def test_i5_t4_a_tampered_state_file_is_refused(tiny_trained, tiny_stage, tmp_pa
 
 
 def test_i5_t5_the_seed_recipe_fits_a_fixed_batch(tiny_trained, tiny_stage, tmp_path):
-    run = tiny_stage("tiny-seed", 'run.shard="shards/fixed"', "run.steps=300", "run.save_every=0", "train.accum=1",
-                     "train.global_batch_tokens=32")  # fmt: skip
+    run = tiny_stage(
+        "tiny-seed",
+        'run.shard="shards/fixed"',
+        "run.steps=300",
+        "run.save_every=0",
+        "train.accum=1",
+        "train.global_batch_tokens=32",
+    )
     result = train(run, root=tiny_trained["root"], runs=tmp_path / "runs")
     trace = result.losses
     assert len(trace) == 300 and min(trace) < 0.1 * trace[0]
@@ -245,8 +289,9 @@ def test_i5_t11_checkpointing_leaves_the_loop_gradients_unchanged(tiny_trained, 
 
 @pytest.mark.parametrize("stage", ["tiny-seed", "tiny-zh", "tiny-bridge"])
 def test_i5_t12_three_bf16_autocast_steps_on_the_cpu_have_finite_loss(tiny_trained, tiny_stage, tmp_path, stage):
-    result = train(tiny_stage(stage, "run.steps=3", 'train.dtype="bf16"'), root=tiny_trained["root"],
-                   runs=tmp_path / "runs")  # fmt: skip
+    result = train(
+        tiny_stage(stage, "run.steps=3", 'train.dtype="bf16"'), root=tiny_trained["root"], runs=tmp_path / "runs"
+    )
     assert result.status == "done" and len(result.losses) == 3 and all(math.isfinite(x) for x in result.losses)
     doc = json.loads((result.run_dir / "run.json").read_text())
     assert doc["config"]["precision"] == "bf16"
@@ -264,8 +309,13 @@ def test_i5_t13_every_metrics_line_validates_and_cuda_fields_are_null_on_cpu(tin
         assert [d["step"] for d in lines] == list(range(1, result.total_steps + 1))
         assert [d["tokens"] for d in lines] == [64 * s for s in range(1, result.total_steps + 1)]
     good = lines[-1]
-    for bad in ({**good, "extra": 1}, {k: v for k, v in good.items() if k != "lr"}, {**good, "step": True},
-                {**good, "loss": float("nan")}, {**good, "format": "bilingual-metrics/2"}):  # fmt: skip
+    for bad in (
+        {**good, "extra": 1},
+        {k: v for k, v in good.items() if k != "lr"},
+        {**good, "step": True},
+        {**good, "loss": float("nan")},
+        {**good, "format": "bilingual-metrics/2"},
+    ):
         with pytest.raises(metrics.MetricsError):
             metrics.check_line(bad)
 
@@ -282,8 +332,18 @@ def test_i5_t16_inconsistent_batch_arithmetic_is_refused_before_training(tiny_tr
     with pytest.raises(ValueError, match="global_batch_tokens"):
         load_toml(TINY, stage="tiny-seed", overrides=("train.accum=3",))
     runs = tmp_path / "runs"
-    args = ["train", str(TINY), "--stage", "tiny-seed", "--root", str(tiny_trained["root"]), "--runs", str(runs),
-            "--set", "train.accum=3"]  # fmt: skip
+    args = [
+        "train",
+        str(TINY),
+        "--stage",
+        "tiny-seed",
+        "--root",
+        str(tiny_trained["root"]),
+        "--runs",
+        str(runs),
+        "--set",
+        "train.accum=3",
+    ]
     assert cli(args) == 1
     assert "global_batch_tokens" in capsys.readouterr().err and not runs.exists()
 
@@ -307,8 +367,17 @@ def test_train_refuses_eval_splits_missing_inputs_and_a_seq_beyond_max_seq(tiny_
 def test_train_dry_run_writes_nothing(tiny_trained, tmp_path, capsys):
     root = tiny_trained["root"]
     before = sorted(str(p) for p in root.rglob("*"))
-    args = ["train", str(TINY), "--stage", "tiny-bridge", "--root", str(root), "--set", "registry.allow_dirty=true",
-            "--dry-run"]  # fmt: skip
+    args = [
+        "train",
+        str(TINY),
+        "--stage",
+        "tiny-bridge",
+        "--root",
+        str(root),
+        "--set",
+        "registry.allow_dirty=true",
+        "--dry-run",
+    ]
     assert cli(args) == 0
     plan = json.loads(capsys.readouterr().out)
     assert plan["experts"] == ["zh", "en", "bridge"] and plan["total_steps"] == 10 and len(plan["run_id"]) == 16
@@ -327,5 +396,7 @@ def test_a_finished_run_is_idempotent(tiny_trained, tiny_stage):
     seed = json.loads((first.packs["zh"] / "pack.json").read_text())
     assert seed["train"]["run_id"] == first.run_id and seed["train"]["step"] == 20
     final = state.load_state(state.latest_state(first.run_dir), run_id=first.run_id).trainable
-    assert content_hash({f"ffn.{k.removeprefix('bank.experts.zh.')}": v for k, v in final.items()}) == \
-        seed["hashes"]["expert"]  # fmt: skip
+    assert (
+        content_hash({f"ffn.{k.removeprefix('bank.experts.zh.')}": v for k, v in final.items()})
+        == seed["hashes"]["expert"]
+    )

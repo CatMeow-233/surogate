@@ -313,9 +313,13 @@ def verify_fidelity(
         passed = max_abs <= tol.max_abs and (tol.min_argmax_agreement is None or agreement >= tol.min_argmax_agreement)
         results.append(SlotFidelity(name, pack.expert_hash, max_abs, agreement, passed))
     return FidelityReport(
-        str(manifest), str(device), str(dtype).removeprefix("torch."), None if autocast is None else str(autocast),
-        tol, tuple(results),
-    )  # fmt: skip
+        str(manifest),
+        str(device),
+        str(dtype).removeprefix("torch."),
+        None if autocast is None else str(autocast),
+        tol,
+        tuple(results),
+    )
 
 
 # --- command line --------------------------------------------------------------------------------------------------

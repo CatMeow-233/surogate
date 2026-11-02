@@ -92,9 +92,14 @@ def load_model(
         if chosen not in FUSIONS[cfg.family]:
             raise ValueError(f"fusion {chosen!r} does not belong to family {cfg.family!r}")
         experts = {name: pack.weights for name, pack in assembly.slots}
-        source = {"kind": "assembly", "path": str(path), "seed_fingerprint": seed.seed_fingerprint,
-                  "experts": {name: pack.expert_hash for name, pack in assembly.slots}, "fusion": chosen,
-                  "fusion_override": fusion is not None and fusion != assembly.fusion}  # fmt: skip
+        source = {
+            "kind": "assembly",
+            "path": str(path),
+            "seed_fingerprint": seed.seed_fingerprint,
+            "experts": {name: pack.expert_hash for name, pack in assembly.slots},
+            "fusion": chosen,
+            "fusion_override": fusion is not None and fusion != assembly.fusion,
+        }
         if merge:
             state = merged_state(seed, cfg, experts, merge)
             model = RoutedLM(cfg, ["merged"], chosen, gqa)
@@ -110,8 +115,9 @@ def load_model(
     return Evaluated(model.to(device).eval(), load_tokenizer(tok_path), tokenizer_sha256(tok_path), source)
 
 
-def merged_state(seed: SeedPack, cfg, experts: Mapping[str, Mapping[str, torch.Tensor]], merge: Mapping[str, Any]
-                 ) -> dict[str, torch.Tensor]:  # fmt: skip
+def merged_state(
+    seed: SeedPack, cfg, experts: Mapping[str, Mapping[str, torch.Tensor]], merge: Mapping[str, Any]
+) -> dict[str, torch.Tensor]:
     method = merge.get("method")
     names = list(merge.get("experts") or ["zh", "en"])
     missing = [n for n in names if n not in experts]
@@ -132,8 +138,11 @@ def merged_state(seed: SeedPack, cfg, experts: Mapping[str, Mapping[str, torch.T
 def arm_routing(arm: str | None, **overrides) -> tuple[Routing, dict[str, Any]]:
     """(routing, preset) of an arm with explicit overrides (None values keep the preset)."""
     preset = dict(ARMS.get(arm or "", {}))
-    values = {"route": preset.get("route", "R_out"), "gate": preset.get("gate", "one_hot"),
-              "answer_route": preset.get("answer_route")}  # fmt: skip
+    values = {
+        "route": preset.get("route", "R_out"),
+        "gate": preset.get("gate", "one_hot"),
+        "answer_route": preset.get("answer_route"),
+    }
     for key, value in overrides.items():
         if value is not None:
             values[key] = value

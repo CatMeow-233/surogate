@@ -75,11 +75,68 @@ def pilot():
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 TRACK_S_SPEC = EXAMPLES / "track_s.toml"
 
-ZH_WORDS = ("我们", "今天", "城市", "学校", "老师", "学生", "朋友", "天气", "公园", "图书馆", "火车", "电脑", "音乐",
-            "电影", "河流", "山顶", "早餐", "晚上", "周末", "工作", "问题", "答案", "故事", "历史", "科学", "安静")  # fmt: skip
-EN_WORDS = ("the", "river", "city", "school", "teacher", "student", "friend", "weather", "park", "library", "train",
-            "computer", "music", "film", "mountain", "breakfast", "evening", "weekend", "work", "question", "answer",
-            "story", "history", "science", "quickly", "green", "small", "large", "walks", "reads", "near", "with")  # fmt: skip
+ZH_WORDS = (
+    "我们",
+    "今天",
+    "城市",
+    "学校",
+    "老师",
+    "学生",
+    "朋友",
+    "天气",
+    "公园",
+    "图书馆",
+    "火车",
+    "电脑",
+    "音乐",
+    "电影",
+    "河流",
+    "山顶",
+    "早餐",
+    "晚上",
+    "周末",
+    "工作",
+    "问题",
+    "答案",
+    "故事",
+    "历史",
+    "科学",
+    "安静",
+)
+EN_WORDS = (
+    "the",
+    "river",
+    "city",
+    "school",
+    "teacher",
+    "student",
+    "friend",
+    "weather",
+    "park",
+    "library",
+    "train",
+    "computer",
+    "music",
+    "film",
+    "mountain",
+    "breakfast",
+    "evening",
+    "weekend",
+    "work",
+    "question",
+    "answer",
+    "story",
+    "history",
+    "science",
+    "quickly",
+    "green",
+    "small",
+    "large",
+    "walks",
+    "reads",
+    "near",
+    "with",
+)
 EXTRA = ("😀", "🎉", "𠀀", "𠀁", "𪚥", "\t")  # emoji, CJK Extension B, a tab
 
 
@@ -117,14 +174,25 @@ def write_fixture_corpus(root: Path, seed: int = 0, n: int = 300, track_s: Path 
     root.mkdir(parents=True, exist_ok=True)
     lines = [json.dumps({"text": zh_text(rng, int(rng.integers(8, 20)))}, ensure_ascii=False) for _ in range(n)]
     (root / "zh.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    (root / "en.txt").write_text("\n\n".join(en_text(rng, int(rng.integers(8, 20))) for _ in range(n)) + "\n",
-                                 encoding="utf-8")  # fmt: skip
-    pairs = [json.dumps({"id": f"p{i}", "pair_id": f"p{i}", "segments": [
-        {"lang": "zh", "text": zh_text(rng, 6)}, {"lang": "en", "text": en_text(rng, 6)}]}, ensure_ascii=False)
-        for i in range(n // 2)]  # fmt: skip
+    (root / "en.txt").write_text(
+        "\n\n".join(en_text(rng, int(rng.integers(8, 20))) for _ in range(n)) + "\n", encoding="utf-8"
+    )
+    pairs = [
+        json.dumps(
+            {
+                "id": f"p{i}",
+                "pair_id": f"p{i}",
+                "segments": [{"lang": "zh", "text": zh_text(rng, 6)}, {"lang": "en", "text": en_text(rng, 6)}],
+            },
+            ensure_ascii=False,
+        )
+        for i in range(n // 2)
+    ]
     (root / "parallel.jsonl").write_text("\n".join(pairs) + "\n", encoding="utf-8")
-    cs = [json.dumps({"text": zh_text(rng, 4) + " " + en_text(rng, 5) + " " + zh_text(rng, 3)}, ensure_ascii=False)
-          for _ in range(n // 2)]  # fmt: skip
+    cs = [
+        json.dumps({"text": zh_text(rng, 4) + " " + en_text(rng, 5) + " " + zh_text(rng, 3)}, ensure_ascii=False)
+        for _ in range(n // 2)
+    ]
     (root / "codeswitch.jsonl").write_text("\n".join(cs) + "\n", encoding="utf-8")
     spec = [
         '[[source]]\nname = "zh-nat"\nkind = "zh"\nfiles = ["zh.jsonl"]\nlicence = "CC-BY-SA-4.0"\n',
@@ -133,8 +201,10 @@ def write_fixture_corpus(root: Path, seed: int = 0, n: int = 300, track_s: Path 
         '[[source]]\nname = "cs"\nkind = "codeswitch"\nfiles = ["codeswitch.jsonl"]\nlicence = "CC0-1.0"\n',
     ]
     if track_s is not None:
-        spec.append('[[source]]\nname = "track-s-seed"\nkind = "synthetic"\nfiles = ["track_s/seed/*.jsonl"]\n'
-                    'licence = "LicenseRef-generated"\nlicence_verified = true\n')  # fmt: skip
+        spec.append(
+            '[[source]]\nname = "track-s-seed"\nkind = "synthetic"\nfiles = ["track_s/seed/*.jsonl"]\n'
+            'licence = "LicenseRef-generated"\nlicence_verified = true\n'
+        )
     (root / "spec.toml").write_text("\n".join(spec), encoding="utf-8")
     return root / "spec.toml"
 
@@ -166,9 +236,16 @@ def data_pipeline(tmp_path_factory, track_s_ci):
     derived = manifest.load_manifest(split.write_split_corpora(m, s, base / "splits"))
     files = [derived.root / e["path"] for e in derived.files(split="seed_train")]
     tok_path = tokenizer.train_tokenizer(files, 1024, base / "tok" / "tokenizer.json", derived)
-    return {"base": base, "corpus": corpus, "manifest": m, "split": s, "derived": derived,
-            "tokenizer_path": tok_path, "tok": tokenizer.load_tokenizer(tok_path),
-            "tokenizer_sha256": tokenizer.tokenizer_sha256(tok_path)}  # fmt: skip
+    return {
+        "base": base,
+        "corpus": corpus,
+        "manifest": m,
+        "split": s,
+        "derived": derived,
+        "tokenizer_path": tok_path,
+        "tok": tokenizer.load_tokenizer(tok_path),
+        "tokenizer_sha256": tokenizer.tokenizer_sha256(tok_path),
+    }
 
 
 @pytest.fixture(scope="session")
@@ -248,15 +325,22 @@ def build_tiny_root(root: Path, seed: int = 0) -> Path:
         tgt = "en" if src == "zh" else "zh"
         k, n = int(rng.integers(29)), int(rng.integers(5, 10))
         words = {"zh": zh, "en": en}
-        return Doc(f"par/{src}{key}", "parallel", (
-            Segment(text=counting(words[src], k, n), lang=src, route=src, loss=False),
-            Segment(text=counting(words[tgt], k, n), lang=tgt, route="bridge")), pair_id=f"p-{src}{key}")  # fmt: skip
+        return Doc(
+            f"par/{src}{key}",
+            "parallel",
+            (
+                Segment(text=counting(words[src], k, n), lang=src, route=src, loss=False),
+                Segment(text=counting(words[tgt], k, n), lang=tgt, route="bridge"),
+            ),
+            pair_id=f"p-{src}{key}",
+        )
 
     shards = root / "shards"
 
     def shard(name, docs, split, route=None):
-        write_shard(shards / name, docs, tok, ROUTE_NAMES, split, None, tokenizer_sha256=sha, default_route=route,
-                    seq=16)  # fmt: skip
+        write_shard(
+            shards / name, docs, tok, ROUTE_NAMES, split, None, tokenizer_sha256=sha, default_route=route, seq=16
+        )
 
     shard("d_seed", [mono("zh" if i % 2 else "en", i) for i in range(80)], "seed_train", "seed")
     shard("d_zh", [mono("zh", i) for i in range(60)], "zh_train", "zh")
@@ -296,9 +380,14 @@ def tiny_trained(tiny_root):
         results = {stage: train(tiny_run(stage), root=tiny_root) for stage in ("tiny-seed", "tiny-zh", "tiny-en")}
     finally:
         torch.set_num_threads(previous)
-    return {"root": tiny_root, "runs": tiny_root / "data" / "runs", "results": results,
-            "seed": results["tiny-seed"].packs["seed"], "zh": results["tiny-zh"].packs["zh"],
-            "en": results["tiny-en"].packs["en"]}  # fmt: skip
+    return {
+        "root": tiny_root,
+        "runs": tiny_root / "data" / "runs",
+        "results": results,
+        "seed": results["tiny-seed"].packs["seed"],
+        "zh": results["tiny-zh"].packs["zh"],
+        "en": results["tiny-en"].packs["en"],
+    }
 
 
 @pytest.fixture(scope="session")
@@ -329,12 +418,26 @@ def tiny_item(
     """A bilingual-item/1 record in the tiny stand-in vocabulary (z0..z28, e0..e29)."""
     segs = [{"lang": lang, "role": role, "text": text} for lang, role, text in segments]
     answer_lang = answer_lang or next(s["lang"] for s in reversed(segs) if s["role"] in ("question", "answer"))
-    item = {"format": "bilingual-item/1", "id": f"{family}-{variant}-{index:04d}", "family": family,
-            "variant": variant, "direction": direction, "split": split,
-            "template_ids": {"question": question_template}, "segments": segs, "answer_lang": answer_lang,
-            "answer_sep": " ", "candidates": list(candidates), "gold_index": gold, "distractor_index": distractor,
-            "chance": 1 / len(candidates) if candidates else None, "knowledge_source": knowledge_source,
-            "structured": {}, "difficulty": {}, "generator": {"version": "test", "seed": 0}}  # fmt: skip
+    item = {
+        "format": "bilingual-item/1",
+        "id": f"{family}-{variant}-{index:04d}",
+        "family": family,
+        "variant": variant,
+        "direction": direction,
+        "split": split,
+        "template_ids": {"question": question_template},
+        "segments": segs,
+        "answer_lang": answer_lang,
+        "answer_sep": " ",
+        "candidates": list(candidates),
+        "gold_index": gold,
+        "distractor_index": distractor,
+        "chance": 1 / len(candidates) if candidates else None,
+        "knowledge_source": knowledge_source,
+        "structured": {},
+        "difficulty": {},
+        "generator": {"version": "test", "seed": 0},
+    }
     item.update(extra)
     return item
 

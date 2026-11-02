@@ -80,8 +80,13 @@ def independence(table: np.ndarray) -> dict[str, float]:
     expected = np.outer(t.sum(axis=1), t.sum(axis=0)) / n
     chi2 = float(((t - expected) ** 2 / expected).sum())
     df = (t.shape[0] - 1) * (t.shape[1] - 1)
-    return {"chi2": chi2, "df": df, "p": chi2_sf(chi2, df), "n": int(n),
-            "bayes_accuracy": float(t.max(axis=1).sum() / n)}  # fmt: skip
+    return {
+        "chi2": chi2,
+        "df": df,
+        "p": chi2_sf(chi2, df),
+        "n": int(n),
+        "bayes_accuracy": float(t.max(axis=1).sum() / n),
+    }
 
 
 def contingency(rows: Sequence[int], cols: Sequence[int], n_rows: int, n_cols: int) -> np.ndarray:
@@ -95,9 +100,14 @@ def bin_of(value: int, n_values: int, n_bins: int) -> int:
 
 
 def single_fact_leak(
-    items: Sequence[Mapping[str, Any]], people: Mapping[str, Person], side: str, attr: str, n_values: int,
-    n_labels: int, n_bins: int = 10,
-) -> dict[str, float]:  # fmt: skip
+    items: Sequence[Mapping[str, Any]],
+    people: Mapping[str, Person],
+    side: str,
+    attr: str,
+    n_values: int,
+    n_labels: int,
+    n_bins: int = 10,
+) -> dict[str, float]:
     """Chi-square test of (binned value of one person's `attr`) x (label) over E3-par items."""
     bins = min(n_bins, n_values)
     rows = [bin_of(people[it["structured"][side]].attrs[attr], n_values, bins) for it in items]
@@ -205,8 +215,11 @@ def template_disjointness(sets: Mapping[str, Mapping[str, set[str]]], parts: Cal
                 pb = set().union(*(parts(t) for t in by_split[b])) if by_split[b] else set()
                 overlaps[f"{a}&{b}"] = sorted(common)
                 part_overlaps[f"{a}&{b}"] = sorted(pa & pb)
-        report[family] = {"counts": {s: len(v) for s, v in by_split.items()}, "overlap": overlaps,
-                          "part_overlap": part_overlaps}  # fmt: skip
+        report[family] = {
+            "counts": {s: len(v) for s, v in by_split.items()},
+            "overlap": overlaps,
+            "part_overlap": part_overlaps,
+        }
     return report
 
 

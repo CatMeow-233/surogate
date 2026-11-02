@@ -133,8 +133,9 @@ def overlap_report(
         if rule not in RULES:
             raise DecontamError(f"unknown rule {rule!r}; known: {sorted(RULES)}")
     heldout = list(heldout)
-    held = {r: np.unique(np.concatenate([doc_grams(d, r, tok) for d in heldout] or [np.zeros(0, np.uint64)]))
-            for r in rules}  # fmt: skip
+    held = {
+        r: np.unique(np.concatenate([doc_grams(d, r, tok) for d in heldout] or [np.zeros(0, np.uint64)])) for r in rules
+    }
     flagged: dict[str, list[str]] = {}
     per_rule = {r: 0 for r in rules}
     n_train = 0
@@ -200,8 +201,10 @@ def main(argv: Sequence[str]) -> int:
     report = overlap_report(train, held, tok, args.rules.split(",") if args.rules else None)
     if not args.dry_run:
         atomic_write_json(args.out, report.to_json())
-    print(f"decontam: {len(report.flagged)} of {report.n_train} training documents overlap {report.n_heldout} "
-          f"held-out documents; per rule {report.per_rule}" + (" (dry run)" if args.dry_run else ""))  # fmt: skip
+    print(
+        f"decontam: {len(report.flagged)} of {report.n_train} training documents overlap {report.n_heldout} "
+        f"held-out documents; per rule {report.per_rule}" + (" (dry run)" if args.dry_run else "")
+    )
     return 0
 
 

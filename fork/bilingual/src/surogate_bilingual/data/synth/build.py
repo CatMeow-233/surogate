@@ -86,8 +86,10 @@ def lexicons_for(prof: Mapping) -> dict:
         if len(lex[attr]) < K:
             raise BuildError(f"attribute {attr} has {len(lex[attr])} values; candidate sets need at least {K}")
     if prof["ctx_categories"] != K:
-        raise BuildError(f"ctx_categories must equal K = {K}: the rules are a bijection onto the K weekdays "
-                         "(tasks.py; a smaller rule set would let the rule segment alone narrow the gold)")  # fmt: skip
+        raise BuildError(
+            f"ctx_categories must equal K = {K}: the rules are a bijection onto the K weekdays "
+            "(tasks.py; a smaller rule set would let the rule segment alone narrow the gold)"
+        )
     return lex
 
 
@@ -101,20 +103,52 @@ class DocWriter:
         self.counts: Counter = Counter()
         self.template_ids: dict[str, set[str]] = defaultdict(set)
 
-    def add(self, family: str, segments: Sequence[Segment], *, kind: str = "synthetic", entity_id=None,
-            pair_id=None, persons=(), facts=(), template_ids=(), item_family: str | None = None) -> None:  # fmt: skip
+    def add(
+        self,
+        family: str,
+        segments: Sequence[Segment],
+        *,
+        kind: str = "synthetic",
+        entity_id=None,
+        pair_id=None,
+        persons=(),
+        facts=(),
+        template_ids=(),
+        item_family: str | None = None,
+    ) -> None:
         key = f"track_s/{self.component}/{family}/{self.counts[family]:08d}"
         self.counts[family] += 1
-        meta = {"family": family, "persons": list(persons), "facts": [list(f) for f in facts],
-                "template_ids": list(template_ids)}  # fmt: skip
-        self.docs.append(Doc(key, kind, tuple(segments), source=f"track_s_{self.component}", pair_id=pair_id,
-                             entity_id=entity_id, meta=meta))  # fmt: skip
+        meta = {
+            "family": family,
+            "persons": list(persons),
+            "facts": [list(f) for f in facts],
+            "template_ids": list(template_ids),
+        }
+        self.docs.append(
+            Doc(
+                key,
+                kind,
+                tuple(segments),
+                source=f"track_s_{self.component}",
+                pair_id=pair_id,
+                entity_id=entity_id,
+                meta=meta,
+            )
+        )
         if item_family:
             self.template_ids[item_family].update(template_ids)
 
 
-def _bios(w: DocWriter, r: Renderer, people: Sequence[Person], lang: str, exposures: int, min_rewrites: int, rng,
-          rewrite_stats: list) -> None:  # fmt: skip
+def _bios(
+    w: DocWriter,
+    r: Renderer,
+    people: Sequence[Person],
+    lang: str,
+    exposures: int,
+    min_rewrites: int,
+    rng,
+    rewrite_stats: list,
+) -> None:
     for person in people:
         seen: set[str] = set()
         for k in range(exposures):
@@ -125,8 +159,15 @@ def _bios(w: DocWriter, r: Renderer, people: Sequence[Person], lang: str, exposu
             else:
                 raise BuildError(f"cannot draw {min_rewrites} distinct biographies of {person.id}")
             seen.add(text)
-            w.add("bio", [Segment(text=text, lang=lang, role="bio")], entity_id=person.id, persons=[person.id],
-                  facts=[(person.id, a) for a in ATTRIBUTES], template_ids=tids, item_family="E4")  # fmt: skip
+            w.add(
+                "bio",
+                [Segment(text=text, lang=lang, role="bio")],
+                entity_id=person.id,
+                persons=[person.id],
+                facts=[(person.id, a) for a in ATTRIBUTES],
+                template_ids=tids,
+                item_family="E4",
+            )
         rewrite_stats.append(len(seen))
 
 
@@ -136,8 +177,14 @@ def _qa_docs(w: DocWriter, r: Renderer, people, lang: str, per_fact: int, rng) -
             for _ in range(per_fact):
                 q, tid = r.qa(person, attr, lang, "train", rng)
                 answer = r.value(attr, person.attrs[attr], lang)
-                w.add("qa", [Segment(text=q + ANSWER_SEP[lang] + answer, lang=lang, role="qa")], entity_id=person.id,
-                      persons=[person.id], template_ids=[tid], item_family="E1")  # fmt: skip
+                w.add(
+                    "qa",
+                    [Segment(text=q + ANSWER_SEP[lang] + answer, lang=lang, role="qa")],
+                    entity_id=person.id,
+                    persons=[person.id],
+                    template_ids=[tid],
+                    item_family="E1",
+                )
 
 
 def _par_docs(w: DocWriter, r: Renderer, people: Sequence[Person], n: int, rng) -> None:
@@ -151,8 +198,13 @@ def _par_docs(w: DocWriter, r: Renderer, people: Sequence[Person], n: int, rng) 
         else:
             answer = r.lexicons["mod12"].surface(month_sum_label(a, b), lang)
         q, tid = r.par(a.name, b.name, variant, lang, "train", rng)
-        w.add("par", [Segment(text=q + ANSWER_SEP[lang] + answer, lang=lang, role="qa")], persons=[a.id, b.id],
-              template_ids=[tid], item_family="E3par")  # fmt: skip
+        w.add(
+            "par",
+            [Segment(text=q + ANSWER_SEP[lang] + answer, lang=lang, role="qa")],
+            persons=[a.id, b.id],
+            template_ids=[tid],
+            item_family="E3par",
+        )
 
 
 LANG_ORDERS = tuple((a, b, c) for a in ("zh", "en") for b in ("zh", "en") for c in ("zh", "en"))
@@ -178,10 +230,17 @@ def _parallel_docs(w: DocWriter, r: Renderer, people: Sequence[Person], pairs: i
             texts = {lang: r.bio(person, lang, "train", rng, order) for lang in ("zh", "en")}
             src, tgt = (("zh", "en"), ("en", "zh"))[j % 2]
             body = join_segments([texts[src][0], texts[tgt][0]])
-            w.add("parallel", [Segment(text=body[0], lang=src, role="source"), Segment(text=body[1], lang=tgt, role="target")],
-                  kind="parallel", entity_id=person.id, pair_id=f"{person.id}-{j}", persons=[person.id],
-                  facts=[(person.id, a) for a in ATTRIBUTES], template_ids=texts[src][1] + texts[tgt][1],
-                  item_family="E4")  # fmt: skip
+            w.add(
+                "parallel",
+                [Segment(text=body[0], lang=src, role="source"), Segment(text=body[1], lang=tgt, role="target")],
+                kind="parallel",
+                entity_id=person.id,
+                pair_id=f"{person.id}-{j}",
+                persons=[person.id],
+                facts=[(person.id, a) for a in ATTRIBUTES],
+                template_ids=texts[src][1] + texts[tgt][1],
+                item_family="E4",
+            )
 
 
 def training_docs(people: Sequence[Person], r: Renderer, prof: Mapping, seed: int, codes: CodeAllocator):
@@ -190,19 +249,40 @@ def training_docs(people: Sequence[Person], r: Renderer, prof: Mapping, seed: in
     exp, qa = prof["bio_exposures"], prof["qa_per_fact"]
     p_seed = by_group(people, "seed")
     for lang in ("zh", "en"):
-        _bios(writers["seed"], r, p_seed, lang, exp["seed"][lang], prof["min_rewrites"], stream(seed, f"bio/seed/{lang}"),
-              rewrites[f"seed/{lang}"])  # fmt: skip
+        _bios(
+            writers["seed"],
+            r,
+            p_seed,
+            lang,
+            exp["seed"][lang],
+            prof["min_rewrites"],
+            stream(seed, f"bio/seed/{lang}"),
+            rewrites[f"seed/{lang}"],
+        )
         _qa_docs(writers["seed"], r, p_seed, lang, qa["seed"], stream(seed, f"qa/seed/{lang}"))
     _par_docs(writers["seed"], r, p_seed, prof["seed_par_samples"], stream(seed, "par/seed"))
     _ctx_docs(writers["seed"], r, prof["seed_ctx_samples"], LANG_ORDERS, codes, prof, stream(seed, "ctx/seed"))
     for lang in ("zh", "en"):
         w = writers[lang]
-        _bios(w, r, by_group(people, lang), lang, exp[lang][lang], prof["min_rewrites"], stream(seed, f"bio/{lang}"),
-              rewrites[f"{lang}/{lang}"])  # fmt: skip
+        _bios(
+            w,
+            r,
+            by_group(people, lang),
+            lang,
+            exp[lang][lang],
+            prof["min_rewrites"],
+            stream(seed, f"bio/{lang}"),
+            rewrites[f"{lang}/{lang}"],
+        )
         _qa_docs(w, r, by_group(people, lang, "qa_train"), lang, qa[lang], stream(seed, f"qa/{lang}"))
         _ctx_docs(w, r, prof["expert_ctx_samples"], [(lang,) * 3], codes, prof, stream(seed, f"ctx/{lang}"))
-    _parallel_docs(writers["parallel"], r, by_group(people, "par", "train"), prof["parallel_pairs_per_person"],
-                   stream(seed, "parallel"))  # fmt: skip
+    _parallel_docs(
+        writers["parallel"],
+        r,
+        by_group(people, "par", "train"),
+        prof["parallel_pairs_per_person"],
+        stream(seed, "parallel"),
+    )
     for c, w in writers.items():
         order = stream(seed, f"shuffle/{c}").permutation(len(w.docs))
         w.docs = [w.docs[int(i)] for i in order]
@@ -212,8 +292,9 @@ def training_docs(people: Sequence[Person], r: Renderer, prof: Mapping, seed: in
 # --- items --------------------------------------------------------------------------------------------------------
 
 
-def eval_items(people: Sequence[Person], r: Renderer, prof: Mapping, seed: int, codes: CodeAllocator,
-               generator: Mapping) -> dict[tuple[str, str], list[dict]]:  # fmt: skip
+def eval_items(
+    people: Sequence[Person], r: Renderer, prof: Mapping, seed: int, codes: CodeAllocator, generator: Mapping
+) -> dict[tuple[str, str], list[dict]]:
     out: dict[tuple[str, str], list[dict]] = {}
     for split in SPLITS:
         n = prof["items"][split]
@@ -228,12 +309,30 @@ def eval_items(people: Sequence[Person], r: Renderer, prof: Mapping, seed: int, 
                     a_side, b_side = by_group(people, "zh", split), by_group(people, "en", split)
                     items[family] += par_items(variant, a_side, b_side, langs[0], split, n, r, rng, generator)
                 elif family == "E3ctx":
-                    items[family] += ctx_items(variant, langs, split, n, r, codes, rng, generator,
-                                               n_colors=len(r.lexicons["color"]),
-                                               distractors=tuple(prof["ctx_distractors"]))  # fmt: skip
+                    items[family] += ctx_items(
+                        variant,
+                        langs,
+                        split,
+                        n,
+                        r,
+                        codes,
+                        rng,
+                        generator,
+                        n_colors=len(r.lexicons["color"]),
+                        distractors=tuple(prof["ctx_distractors"]),
+                    )
                 else:
-                    items[family] += e4_items(variant, langs, by_group(people, "par", split), split, n, r, rng,
-                                              generator, attributes=tuple(prof["e4_attributes"]))  # fmt: skip
+                    items[family] += e4_items(
+                        variant,
+                        langs,
+                        by_group(people, "par", split),
+                        split,
+                        n,
+                        r,
+                        rng,
+                        generator,
+                        attributes=tuple(prof["e4_attributes"]),
+                    )
         for family in FAMILIES:
             out[(family, split)] = sorted(items[family], key=lambda it: it["id"])
     return out
@@ -251,8 +350,12 @@ def run_checks(people, lex, writers, items, prof, seed, registry) -> dict[str, A
     by_id = {p.id: p for p in people}
     # exposures from the text scan must equal the declared numbers exactly
     exp = prof["bio_exposures"]
-    declared = {"seed": sum(exp["seed"].values()), "zh": exp["zh"]["zh"], "en": exp["en"]["en"],
-                "parallel": 2 * prof["parallel_pairs_per_person"]}  # fmt: skip
+    declared = {
+        "seed": sum(exp["seed"].values()),
+        "zh": exp["zh"]["zh"],
+        "en": exp["en"]["en"],
+        "parallel": 2 * prof["parallel_pairs_per_person"],
+    }
     observed: dict[str, dict] = {}
     exposure_ok = True
     for corpus, want in declared.items():
@@ -269,16 +372,18 @@ def run_checks(people, lex, writers, items, prof, seed, registry) -> dict[str, A
     for variant, attr, n_labels in (("same_city", "city", 2), ("month_sum", "month", 12)):
         chosen = [it for it in par if it["variant"] == variant]
         for side in ("a", "b"):
-            leaks[f"{variant}/{side}.{attr}"] = leak.single_fact_leak(chosen, by_id, side, attr, n_values[attr],
-                                                                       n_labels)  # fmt: skip
+            leaks[f"{variant}/{side}.{attr}"] = leak.single_fact_leak(
+                chosen, by_id, side, attr, n_values[attr], n_labels
+            )
     rng = stream(seed, "leak/control")
     control = leak.born_earlier_items(by_group(people, "zh"), by_group(people, "en"), max(400, len(par)), rng)
     leaks["control_born_earlier/a.year"] = leak.single_fact_leak(control, by_id, "a", "year", n_values["year"], 2)
     leaks["attribute_independence"] = leak.attribute_independence(INDEPENDENCE_DRAWS, n_values, seed)
     # co-occurrence of test pairs and fresh codes, from the text of the training documents
     training_texts = [d.text for w in writers.values() for d in w.docs]
-    test_pairs = [(by_id[it["structured"]["a"]].name, by_id[it["structured"]["b"]].name)
-                  for it in par if it["split"] == "test"]  # fmt: skip
+    test_pairs = [
+        (by_id[it["structured"]["a"]].name, by_id[it["structured"]["b"]].name) for it in par if it["split"] == "test"
+    ]
     cooc = leak.cooccurrence(test_pairs, (checker.names_in(t) for t in training_texts))
     item_codes = {it["id"]: [c for c, _ in it["structured"]["facts"]] for it in all_items if it["family"] == "E3ctx"}
     codes = leak.fresh_codes(item_codes, training_texts)
@@ -310,8 +415,10 @@ def run_checks(people, lex, writers, items, prof, seed, registry) -> dict[str, A
         partitions[p.partition][p.group] += 1
     leak_ok = all(v["p"] >= LEAK_ALPHA for k, v in leaks.items() if "/" in k and not k.startswith("control"))
     leak_ok &= all(v["p"] >= LEAK_ALPHA for v in leaks["attribute_independence"].values())
-    control_flagged = leaks["control_born_earlier/a.year"]["p"] < 1e-6 and \
-        leaks["control_born_earlier/a.year"]["bayes_accuracy"] >= 0.7  # fmt: skip
+    control_flagged = (
+        leaks["control_born_earlier/a.year"]["p"] < 1e-6
+        and leaks["control_born_earlier/a.year"]["bayes_accuracy"] >= 0.7
+    )
     status = {
         "checker": report.ok and not checker.doc_errors,
         "exposures_exact": exposure_ok,
@@ -331,7 +438,7 @@ def run_checks(people, lex, writers, items, prof, seed, registry) -> dict[str, A
             "n_errors": len(report.errors),
             "doc_errors": checker.doc_errors[:50],
             "ablation_uniform": report.ablation_uniform,
-        },  # fmt: skip
+        },
         "exposures": observed,
         "leak_tests": leaks,
         "cooccurring_test_pairs": cooc,
@@ -342,7 +449,7 @@ def run_checks(people, lex, writers, items, prof, seed, registry) -> dict[str, A
             "registry_counts": {
                 f: {s: registry.family_count(f, s, tuple(prof["e4_attributes"])) for s in ("train", "dev", "test")}
                 for f in FAMILIES
-            },  # fmt: skip
+            },
         },
         "label_balance": balance,
         "entity_partitions": {k: dict(v) for k, v in sorted(partitions.items())},
@@ -396,19 +503,21 @@ def build_track_s(spec: Path, out: Path, seed: int, profile: str = "full") -> di
         "rewrites": {
             "declared_min": prof["min_rewrites"],
             "distinct_per_person": {k: {"min": a, "max": b} for k, (a, b) in sorted(rewrites.items())},
-        },  # fmt: skip
+        },
         "licence": {
             "licence": "LicenseRef-generated",
             "licence_verified": True,
             "note": "generated by this package; names and employers are invented, cities are real place names",
-        },  # fmt: skip
+        },
         "seed_mix": None,  # recorded by the D_seed builder's card (data.mixture)
         **checks,
     }
     if not all(checks["status"].values()):
         failed = [k for k, v in checks["status"].items() if not v]
-        raise BuildError(f"Track S checks failed: {failed}; errors: {checks['checker']['errors'][:5]} "
-                         f"{checks['checker']['doc_errors'][:5]}")  # fmt: skip
+        raise BuildError(
+            f"Track S checks failed: {failed}; errors: {checks['checker']['errors'][:5]} "
+            f"{checks['checker']['doc_errors'][:5]}"
+        )
     atomic_write_json(out / "datacard.json", card)
     return card
 
@@ -438,8 +547,10 @@ def main(argv: Sequence[str]) -> int:
     try:
         if args.dry_run:
             info = plan(args.spec, args.profile)
-            print(f"synth: {info['templates']} templates; test templates per family {info['test_templates']}; "
-                  f"people {info['people']} (dry run)")  # fmt: skip
+            print(
+                f"synth: {info['templates']} templates; test templates per family {info['test_templates']}; "
+                f"people {info['people']} (dry run)"
+            )
             return 0
         if args.out is None:
             ap.error("--out is required unless --dry-run")

@@ -108,22 +108,51 @@ def test_i6_e7_every_runbook_line_is_known_and_well_formed(blocks):
                     if w.startswith("fork/bilingual"):
                         assert (REPO / w).exists(), w
     # the gates use every evaluation command
-    assert {"env", "bench", "synth", "train", "assemble", "verify", "eval-tasks", "eval-nll", "switch", "stats",
-            "matrix"} <= seen  # fmt: skip
+    assert {
+        "env",
+        "bench",
+        "synth",
+        "train",
+        "assemble",
+        "verify",
+        "eval-tasks",
+        "eval-nll",
+        "switch",
+        "stats",
+        "matrix",
+    } <= seen
 
 
 def test_i6_e7_the_runbook_passes_the_strict_doc_check():
-    out = subprocess.run([sys.executable, "-I", str(REPO / "fork" / "tools" / "check_doc_links.py")], cwd=REPO,
-                         capture_output=True, text=True, timeout=120)  # fmt: skip
+    out = subprocess.run(
+        [sys.executable, "-I", str(REPO / "fork" / "tools" / "check_doc_links.py")],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
     problems = [line for line in out.stdout.splitlines() if "fork/bilingual/docs/runbook.md" in line]
     assert not problems, problems
 
 
 # --- the rehearsal --------------------------------------------------------------------------------------------------
 
-TRAIN_TINY = ["--set", 'model.profile="tiny"', "--set", "train.global_batch_tokens=64", "--set", "train.microbatch=2",
-              "--set", "train.seq=16", "--set", "train.accum=2", "--set", "run.tokens=128", "--set",
-              "registry.allow_dirty=true"]  # fmt: skip
+TRAIN_TINY = [
+    "--set",
+    'model.profile="tiny"',
+    "--set",
+    "train.global_batch_tokens=64",
+    "--set",
+    "train.microbatch=2",
+    "--set",
+    "train.seq=16",
+    "--set",
+    "train.accum=2",
+    "--set",
+    "run.tokens=128",
+    "--set",
+    "registry.allow_dirty=true",
+]
 TINY = {
     "synth": ["--profile", "ci"],
     "eval-tasks": ["--limit", "4", "--n-boot", "50", "--max-new", "3", "--device", "cpu"],
@@ -134,14 +163,29 @@ CUDA_ONLY = ("bench",)
 
 
 def _tree(root: Path) -> dict[str, tuple[int, int]]:
-    return {p.relative_to(root).as_posix(): (p.stat().st_size, p.stat().st_mtime_ns)
-            for p in root.rglob("*") if p.is_file()}  # fmt: skip
+    return {
+        p.relative_to(root).as_posix(): (p.stat().st_size, p.stat().st_mtime_ns) for p in root.rglob("*") if p.is_file()
+    }
 
 
 def _repo_state() -> str:
-    return subprocess.run(["git", "-C", str(REPO), "status", "--porcelain", "--untracked-files=all",
-                           "--ignored=matching", "--", "fork/bilingual", "data"],
-                          capture_output=True, text=True, check=True).stdout  # fmt: skip
+    return subprocess.run(
+        [
+            "git",
+            "-C",
+            str(REPO),
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignored=matching",
+            "--",
+            "fork/bilingual",
+            "data",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
 
 
 def _run(argv: list[str]) -> int:
@@ -158,12 +202,15 @@ def _stage_corpus(root: Path, track_s_ci, corpus_writer) -> None:
     (corpus / "ts_small").mkdir()
     (corpus / "ts_small" / "seed.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
     with open(spec, "a", encoding="utf-8") as f:
-        f.write('\n[[source]]\nname = "track-s-seed"\nkind = "synthetic"\nfiles = ["ts_small/*.jsonl"]\n'
-                'licence = "LicenseRef-generated"\nlicence_verified = true\n')  # fmt: skip
+        f.write(
+            '\n[[source]]\nname = "track-s-seed"\nkind = "synthetic"\nfiles = ["ts_small/*.jsonl"]\n'
+            'licence = "LicenseRef-generated"\nlicence_verified = true\n'
+        )
 
 
-def test_i6_e7_runbook_commands_dry_run_then_rehearse_at_tiny_scale(blocks, tmp_path, monkeypatch, track_s_ci,
-                                                                      corpus_writer, capsys):  # fmt: skip
+def test_i6_e7_runbook_commands_dry_run_then_rehearse_at_tiny_scale(
+    blocks, tmp_path, monkeypatch, track_s_ci, corpus_writer, capsys
+):
     root, tmp = tmp_path / "root", tmp_path / "tmp"
     root.mkdir()
     tmp.mkdir()

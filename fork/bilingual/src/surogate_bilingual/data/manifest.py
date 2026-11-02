@@ -245,8 +245,10 @@ def main(argv: Sequence[str]) -> int:
     if not args.dry_run:
         atomic_write_json(args.out, _with_root(doc, args.root, args.out))
     n_docs = sum(f["n_docs"] for f in doc["files"])
-    print(f"manifest: {len(doc['sources'])} sources, {len(doc['files'])} files, {n_docs} documents, "
-          f"manifest_sha256 {doc['manifest_sha256']}" + (" (dry run)" if args.dry_run else f" -> {args.out}"))  # fmt: skip
+    print(
+        f"manifest: {len(doc['sources'])} sources, {len(doc['files'])} files, {n_docs} documents, "
+        f"manifest_sha256 {doc['manifest_sha256']}" + (" (dry run)" if args.dry_run else f" -> {args.out}")
+    )
     for name in doc["unverified_licences"]:
         print(f"manifest: warning: the licence of source {name!r} is not verified (licence_verified = false)")
     return 0

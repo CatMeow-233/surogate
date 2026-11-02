@@ -35,8 +35,10 @@ from ..routing.plan import RoutePlan
 
 NLL_FORMAT = "bilingual-nll/1"
 LN2 = math.log(2.0)
-MATRIX_LABEL = ("rows: the expert on the forced route (a single-expert model's only expert); columns: the evaluation "
-                "language; BPB = nats / (ln 2 * UTF-8 bytes), compared only within a column (SCI-10)")  # fmt: skip
+MATRIX_LABEL = (
+    "rows: the expert on the forced route (a single-expert model's only expert); columns: the evaluation "
+    "language; BPB = nats / (ln 2 * UTF-8 bytes), compared only within a column (SCI-10)"
+)
 
 
 def bpb(nats: float, n_bytes: int) -> float:
@@ -46,8 +48,9 @@ def bpb(nats: float, n_bytes: int) -> float:
 
 
 @torch.no_grad()
-def token_nll(model, ids: Sequence[int], plan: RoutePlan | None = None, *, stride: int | None = None,
-              autocast: bool = False) -> np.ndarray:  # fmt: skip
+def token_nll(
+    model, ids: Sequence[int], plan: RoutePlan | None = None, *, stride: int | None = None, autocast: bool = False
+) -> np.ndarray:
     """NLL in nats of ids[t] given ids[:t], for t = 1 .. len(ids) - 1 (index t - 1 of the result)."""
     ids = list(map(int, ids))
     n, width = len(ids), model.cfg.max_seq
@@ -100,8 +103,9 @@ def doc_language(doc: Doc) -> str | None:
 PlanFor = Callable[[int], RoutePlan | None]
 
 
-def nll_matrix(model, tok, docs: Sequence[Doc], rows: Mapping[str, PlanFor], *, stride: int | None = None,
-               autocast: bool = False) -> dict[str, Any]:  # fmt: skip
+def nll_matrix(
+    model, tok, docs: Sequence[Doc], rows: Mapping[str, PlanFor], *, stride: int | None = None, autocast: bool = False
+) -> dict[str, Any]:
     """The labelled matrix of pooled BPB (and nats per token) per row and evaluation language."""
     cols = list(LANGS)
     encoded = []
@@ -123,13 +127,25 @@ def nll_matrix(model, tok, docs: Sequence[Doc], rows: Mapping[str, PlanFor], *, 
             tables["tokens"][r][c] += len(nll)
             tables["bytes"][r][c] += n_bytes
             tables["docs"][r][c] += 1
-    bpb_t = [[bpb(tables["nats"][r][c], tables["bytes"][r][c]) if tables["bytes"][r][c] else None
-              for c in range(len(cols))] for r in range(len(rows))]  # fmt: skip
-    npt = [[tables["nats"][r][c] / tables["tokens"][r][c] if tables["tokens"][r][c] else None
-            for c in range(len(cols))] for r in range(len(rows))]  # fmt: skip
-    return {"label": MATRIX_LABEL, "rows": list(rows), "cols": cols, "bpb": bpb_t, "nats_per_token": npt,
-            "tokens": tables["tokens"], "bytes": tables["bytes"], "docs": tables["docs"],
-            "skipped_mixed_docs": skipped}  # fmt: skip
+    bpb_t = [
+        [bpb(tables["nats"][r][c], tables["bytes"][r][c]) if tables["bytes"][r][c] else None for c in range(len(cols))]
+        for r in range(len(rows))
+    ]
+    npt = [
+        [tables["nats"][r][c] / tables["tokens"][r][c] if tables["tokens"][r][c] else None for c in range(len(cols))]
+        for r in range(len(rows))
+    ]
+    return {
+        "label": MATRIX_LABEL,
+        "rows": list(rows),
+        "cols": cols,
+        "bpb": bpb_t,
+        "nats_per_token": npt,
+        "tokens": tables["tokens"],
+        "bytes": tables["bytes"],
+        "docs": tables["docs"],
+        "skipped_mixed_docs": skipped,
+    }
 
 
 def unigram_bpb(counts: np.ndarray, tok, docs: Sequence[Doc]) -> dict[str, Any]:
@@ -164,8 +180,13 @@ def spike_after_switch(nll: np.ndarray, routes: Sequence, mask: Sequence[bool] |
         positions = [t for t in range(s, stop) if mask[t]][:k]
         taken += positions
         per.append({"at": s, "n": len(positions), "mean": float(nll[positions].mean()) if positions else None})
-    return {"k": k, "n_switches": len(switches), "n_tokens": len(taken),
-            "mean": float(nll[taken].mean()) if taken else None, "per_switch": per}  # fmt: skip
+    return {
+        "k": k,
+        "n_switches": len(switches),
+        "n_tokens": len(taken),
+        "mean": float(nll[taken].mean()) if taken else None,
+        "per_switch": per,
+    }
 
 
 # --- command line ----------------------------------------------------------------------------------------------------
@@ -203,20 +224,31 @@ def main(argv: Sequence[str]) -> int:
         unknown = [n for n in forced if n not in names]
         if unknown:
             raise ValueError(f"the model has no experts {unknown}: {names}")
-        rows = {name: (lambda n, name=name: None if len(names) == 1 else RoutePlan.forced(name, names, 1, n))
-                for name in forced}  # fmt: skip
-        doc = {"format": NLL_FORMAT, "model": ev.source, "tokenizer_sha256": ev.tokenizer_sha256, "docs": files,
-               "n_docs": len(docs), "rows": forced, "autocast": args.autocast}  # fmt: skip
+        rows = {
+            name: (lambda n, name=name: None if len(names) == 1 else RoutePlan.forced(name, names, 1, n))
+            for name in forced
+        }
+        doc = {
+            "format": NLL_FORMAT,
+            "model": ev.source,
+            "tokenizer_sha256": ev.tokenizer_sha256,
+            "docs": files,
+            "n_docs": len(docs),
+            "rows": forced,
+            "autocast": args.autocast,
+        }
         if args.dry_run:
             print(json.dumps({**doc, "dry_run": True}, indent=1, sort_keys=True))
             return 0
-        doc["matrix"] = nll_matrix(ev.model, ev.tokenizer, docs, rows, stride=args.stride,
-                                   autocast=args.autocast == "bf16")  # fmt: skip
+        doc["matrix"] = nll_matrix(
+            ev.model, ev.tokenizer, docs, rows, stride=args.stride, autocast=args.autocast == "bf16"
+        )
         if args.unigram_shard:
             from ..data.shards import ShardReader
 
-            shard = ShardReader(args.unigram_shard, tokenizer_sha256=ev.tokenizer_sha256,
-                                vocab_size=ev.model.cfg.vocab_size)  # fmt: skip
+            shard = ShardReader(
+                args.unigram_shard, tokenizer_sha256=ev.tokenizer_sha256, vocab_size=ev.model.cfg.vocab_size
+            )
             counts = np.bincount(np.asarray(shard.tokens, dtype=np.int64), minlength=ev.model.cfg.vocab_size)
             doc["unigram"] = {"shard": str(args.unigram_shard), **unigram_bpb(counts, ev.tokenizer, docs)}
     except (OSError, ValueError, KeyError) as exc:

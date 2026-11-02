@@ -85,8 +85,9 @@ class EpochChunkSampler:
             raise SamplerError(f"not a {STATE_FORMAT} state: {state.get('format')!r}")
         for key in ("n_tokens", "seq", "seed"):
             if int(state[key]) != getattr(self, key):
-                raise SamplerError(f"sampler state was taken with {key} = {state[key]}, this sampler has "
-                                   f"{getattr(self, key)}")  # fmt: skip
+                raise SamplerError(
+                    f"sampler state was taken with {key} = {state[key]}, this sampler has {getattr(self, key)}"
+                )
         self.epoch, self.index = int(state["epoch"]), int(state["index"])
         self._plan_epoch()
         if int(state["offset"]) != self.offset or not 0 <= self.index <= len(self.order):

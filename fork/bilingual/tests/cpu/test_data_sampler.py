@@ -73,10 +73,25 @@ def test_i4_d6_routes_and_loss_mask_slice_in_lockstep(tmp_path, data_pipeline):
     tok = data_pipeline["tok"]
     docs = []
     for i in range(30):
-        docs.append(Doc(f"d{i}", "parallel", (Segment(text=f"源{i}。\n", lang="zh", route="zh", loss=False),
-                                             Segment(text=f"target {i}.", lang="en", route="bridge"))))  # fmt: skip
-    path = SH.write_shard(tmp_path / "s", docs, tok, ["zh", "en", "bridge"], "parallel_train", None,
-                          tokenizer_sha256=data_pipeline["tokenizer_sha256"])  # fmt: skip
+        docs.append(
+            Doc(
+                f"d{i}",
+                "parallel",
+                (
+                    Segment(text=f"源{i}。\n", lang="zh", route="zh", loss=False),
+                    Segment(text=f"target {i}.", lang="en", route="bridge"),
+                ),
+            )
+        )
+    path = SH.write_shard(
+        tmp_path / "s",
+        docs,
+        tok,
+        ["zh", "en", "bridge"],
+        "parallel_train",
+        None,
+        tokenizer_sha256=data_pipeline["tokenizer_sha256"],
+    )
     r = SH.ShardReader(path, tokenizer_sha256=data_pipeline["tokenizer_sha256"], vocab_size=tok.get_vocab_size())
     sampler = EpochChunkSampler(len(r), 12, 4)
     starts, _ = sampler.next_batch(6)

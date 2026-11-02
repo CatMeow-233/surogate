@@ -48,8 +48,13 @@ class MetricsError(ValueError):
 
 
 def line(**values: Any) -> dict[str, Any]:
-    doc = {"format": METRICS_FORMAT, "kl": None, "dev": None,
-           "time": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"), **values}  # fmt: skip
+    doc = {
+        "format": METRICS_FORMAT,
+        "kl": None,
+        "dev": None,
+        "time": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        **values,
+    }
     check_line(doc)
     return doc
 

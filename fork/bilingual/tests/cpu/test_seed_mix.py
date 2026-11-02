@@ -82,17 +82,36 @@ def test_i4_d8_mixed_window_fraction_exceeds_the_declared_floor(mixture, data_pi
     tok = data_pipeline["tok"]
     floor = DEFAULTS["data"]["min_mixed_window_fraction"]
     seq = 64
-    path = SH.write_shard(tmp_path / "seed", docs, tok, ["zh", "en", "bridge", "seed"], "seed_train", None,
-                          tokenizer_sha256=data_pipeline["tokenizer_sha256"], default_route="seed", seq=seq,
-                          min_mixed_window_fraction=floor)  # fmt: skip
+    path = SH.write_shard(
+        tmp_path / "seed",
+        docs,
+        tok,
+        ["zh", "en", "bridge", "seed"],
+        "seed_train",
+        None,
+        tokenizer_sha256=data_pipeline["tokenizer_sha256"],
+        default_route="seed",
+        seq=seq,
+        min_mixed_window_fraction=floor,
+    )
     mixed = json.loads((path / "shard.json").read_text())["mixed_window_fraction"]
     assert mixed["value"] > floor and mixed["floor"] == floor
     # the v1.0 packing of the same documents (all zh, then all en, then the rest) is far below the floor
     v10 = sorted(docs, key=lambda d: {"zh": 0, "en": 1}.get(d.kind, 2))
     v10 = [d for d in v10 if d.kind in ("zh", "en")]
     with pytest.raises(SH.ShardError, match="below the declared floor"):
-        SH.write_shard(tmp_path / "v10", v10, tok, ["seed"], "seed_train", None, tokenizer_sha256="x",
-                       default_route="seed", seq=seq, min_mixed_window_fraction=floor)  # fmt: skip
+        SH.write_shard(
+            tmp_path / "v10",
+            v10,
+            tok,
+            ["seed"],
+            "seed_train",
+            None,
+            tokenizer_sha256="x",
+            default_route="seed",
+            seq=seq,
+            min_mixed_window_fraction=floor,
+        )
     path = SH.write_shard(tmp_path / "v10b", v10, tok, ["seed"], "seed_train", None, tokenizer_sha256="x", seq=seq)
     v10_value = json.loads((path / "shard.json").read_text())["mixed_window_fraction"]["value"]
     assert v10_value < floor / 2 and mixed["value"] > 10 * floor

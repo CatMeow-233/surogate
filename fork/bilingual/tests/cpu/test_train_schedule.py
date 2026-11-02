@@ -52,8 +52,14 @@ def _fp64_expert_trainer(tiny_trained, tiny_stage, decay: str, lam: float):
     run = tiny_stage("tiny-zh", f'train.expert_decay="{decay}"', f"train.expert_decay_lambda={lam}")
     seed = read_pack(tiny_trained["seed"])
     recipe = ExpertRecipe("zh")
-    built = recipe.build(run.model, Inputs(seed=seed, seed_path=tiny_trained["seed"]), fusion=run.fusion,
-                         gqa=run.gqa, init_seed=0, anchor_kl=0.0)  # fmt: skip
+    built = recipe.build(
+        run.model,
+        Inputs(seed=seed, seed_path=tiny_trained["seed"]),
+        fusion=run.fusion,
+        gqa=run.gqa,
+        init_seed=0,
+        anchor_kl=0.0,
+    )
     model = built.model.to(torch.float64)
     g = torch.Generator().manual_seed(3)
     with torch.no_grad():

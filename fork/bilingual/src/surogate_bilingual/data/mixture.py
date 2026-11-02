@@ -138,10 +138,18 @@ def build_seed_mixture(
     parts["natural"] = natural
     tokens["natural"] = tokens["natural/zh"] + tokens["natural/en"]
     par_target = target["codeswitch_parallel"] * parallel_fraction
-    par_docs, n_par = _draw(pools.get("parallel", []), par_target, tok, rng("parallel"), used, "parallel",
-                            concat_parallel)  # fmt: skip
-    cs_docs, n_cs = _draw(pools.get("codeswitch", []), target["codeswitch_parallel"] - n_par, tok, rng("codeswitch"),
-                          used, "codeswitch", lambda d: d.replace(segments=tuple(_langs_of(d))))  # fmt: skip
+    par_docs, n_par = _draw(
+        pools.get("parallel", []), par_target, tok, rng("parallel"), used, "parallel", concat_parallel
+    )
+    cs_docs, n_cs = _draw(
+        pools.get("codeswitch", []),
+        target["codeswitch_parallel"] - n_par,
+        tok,
+        rng("codeswitch"),
+        used,
+        "codeswitch",
+        lambda d: d.replace(segments=tuple(_langs_of(d))),
+    )
     parts["codeswitch_parallel"] = par_docs + cs_docs
     tokens["codeswitch_parallel"] = n_par + n_cs
     tokens["codeswitch_parallel/parallel"], tokens["codeswitch_parallel/codeswitch"] = n_par, n_cs

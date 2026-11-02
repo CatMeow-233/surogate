@@ -582,8 +582,13 @@ def test_i3_c7_b10_ch_channel_count_is_what_channel_select_declares():
 
 def test_i3_c7_channel_select_refuses_bad_selections():
     experts, x = [swiglu(0), swiglu(1)], inputs()
-    for selection in ([], [(0, torch.arange(3)), (0, torch.arange(3, 6))], [(2, torch.arange(3))],
-                      [(0, torch.tensor([1, 1]))], [(0, torch.tensor([M]))]):  # fmt: skip
+    for selection in (
+        [],
+        [(0, torch.arange(3)), (0, torch.arange(3, 6))],
+        [(2, torch.arange(3))],
+        [(0, torch.tensor([1, 1]))],
+        [(0, torch.tensor([M]))],
+    ):
         with pytest.raises(ValueError):
             channel_select(x, experts, selection)
 

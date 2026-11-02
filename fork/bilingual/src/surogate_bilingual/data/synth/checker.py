@@ -241,11 +241,14 @@ class Checker:
         # structural ablation: rules are a bijection from the item's colours onto all K weekday candidates, and every
         # fact colour (the target's included) is one of them
         k = len(item["candidates"]) - 1
-        answer_days = sorted(day.index_of(c, lang) for i, c in enumerate(item["candidates"])
-                             if i != item["distractor_index"])  # fmt: skip
+        answer_days = sorted(
+            day.index_of(c, lang) for i, c in enumerate(item["candidates"]) if i != item["distractor_index"]
+        )
         if sorted(rules.values()) != answer_days or len(rules) != k or not set(facts.values()) <= set(rules):
-            report.fail(item["id"], "the rules are not a bijection onto the candidates: one segment alone would "
-                                    "not leave the gold uniform")  # fmt: skip
+            report.fail(
+                item["id"],
+                "the rules are not a bijection onto the candidates: one segment alone would not leave the gold uniform",
+            )
         else:
             report.ablation_uniform += 1
 

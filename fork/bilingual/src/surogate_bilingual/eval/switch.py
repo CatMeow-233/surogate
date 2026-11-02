@@ -54,8 +54,9 @@ def switch_segments(tok, item: Mapping[str, Any]) -> list[Seg]:
     return [bos(tok, segs[0].lang), *segs]
 
 
-def decompose_segments(model, segs: Sequence[Seg], *, reference_history: Sequence[Seg] | None = None, k: int = 16
-                       ) -> dict[str, Any]:  # fmt: skip
+def decompose_segments(
+    model, segs: Sequence[Seg], *, reference_history: Sequence[Seg] | None = None, k: int = 16
+) -> dict[str, Any]:
     """M, R_new, R_old (and L_ref) of the last segment of `segs` (see the module docstring)."""
     names = model.expert_names
     if len(names) < 2:
@@ -76,8 +77,17 @@ def decompose_segments(model, segs: Sequence[Seg], *, reference_history: Sequenc
     m, m_nll = mean_nll(m_plan)
     r_new, _ = mean_nll(RoutePlan.forced(new, names, 1, len(ids)))
     r_old, _ = mean_nll(RoutePlan.forced(old, names, 1, len(ids)))
-    out = {"M": m, "R_new": r_new, "R_old": r_old, "L_ref": None, "new_route": new, "old_route": old,
-           "switched": old != new, "n_target_tokens": n_target, "mismatch_cost": m - r_new}  # fmt: skip
+    out = {
+        "M": m,
+        "R_new": r_new,
+        "R_old": r_old,
+        "L_ref": None,
+        "new_route": new,
+        "old_route": old,
+        "switched": old != new,
+        "n_target_tokens": n_target,
+        "mismatch_cost": m - r_new,
+    }
     if reference_history is not None:
         ref_ids = [t for s in reference_history for t in s.ids] + list(segs[-1].ids)
         out["L_ref"], _ = mean_nll(RoutePlan.forced(new, names, 1, len(ref_ids)), ref_ids, len(ref_ids) - n_target)
@@ -91,8 +101,12 @@ def decompose_segments(model, segs: Sequence[Seg], *, reference_history: Sequenc
 
 
 def decompose_switch(model, tok, item: Mapping[str, Any], *, k: int = 16) -> dict[str, Any]:
-    return {"item_id": item["id"], "direction": item["direction"], "variant": item["variant"],
-            **decompose_segments(model, switch_segments(tok, item), k=k)}  # fmt: skip
+    return {
+        "item_id": item["id"],
+        "direction": item["direction"],
+        "variant": item["variant"],
+        **decompose_segments(model, switch_segments(tok, item), k=k),
+    }
 
 
 def summarize(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -102,9 +116,11 @@ def summarize(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     out = {}
     for key, group in sorted(groups.items()):
         spikes = [r["spike_M"]["mean"] for r in group if r["spike_M"]["mean"] is not None]
-        out[key] = {"n": len(group), **{f"mean_{m}": float(np.mean([r[m] for r in group]))
-                                       for m in ("M", "R_new", "R_old", "mismatch_cost")},
-                    "mean_spike_M": float(np.mean(spikes)) if spikes else None}  # fmt: skip
+        out[key] = {
+            "n": len(group),
+            **{f"mean_{m}": float(np.mean([r[m] for r in group])) for m in ("M", "R_new", "R_old", "mismatch_cost")},
+            "mean_spike_M": float(np.mean(spikes)) if spikes else None,
+        }
     return out
 
 
@@ -131,8 +147,14 @@ def main(argv: Sequence[str]) -> int:
             raise ValueError("test items are evaluated only after the preregistration lock (MS §9.7): --allow-test")
         if len(ev.names) < 2:
             raise ValueError(f"the decomposition needs at least two experts; {args.model} has {ev.names}")
-        doc = {"format": SWITCH_FORMAT, "model": ev.source, "item_files": files, "items_sha256": items_sha256(items),
-               "n_items": len(items), "k": args.k}  # fmt: skip
+        doc = {
+            "format": SWITCH_FORMAT,
+            "model": ev.source,
+            "item_files": files,
+            "items_sha256": items_sha256(items),
+            "n_items": len(items),
+            "k": args.k,
+        }
         if args.dry_run:
             print(json.dumps({**doc, "dry_run": True}, indent=1, sort_keys=True))
             return 0

@@ -89,8 +89,9 @@ class Renderer:
         """The rule segment: an opening and one sentence per (colour index, weekday index)."""
         intro = pick(self.registry.pool(lang, "ctx_rule_intro", split), rng)
         core = pick(self.registry.pool(lang, "ctx_rule", split), rng)
-        sentences = [core.render(category=self.value("color", c, lang), value=self.value("weekday", v, lang))
-                     for c, v in rules]  # fmt: skip
+        sentences = [
+            core.render(category=self.value("color", c, lang), value=self.value("weekday", v, lang)) for c, v in rules
+        ]
         return intro.text + JOIN[lang] + JOIN[lang].join(sentences), f"{intro.id}+{core.id}"
 
     def ctx_question(self, code: str, lang: str, split: str, rng) -> tuple[str, str]:

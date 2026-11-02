@@ -198,8 +198,16 @@ def decide(diffs: Sequence[float], alpha: float, sesoi: float) -> dict[str, Any]
     else:
         decision = "inconclusive"
     lo, hi = r.ci(alpha)
-    return {"decision": decision, "p": r.p, "estimate": r.mean, "sd": r.sd, "n": r.n, "alpha": alpha,
-            "sesoi": sesoi, "ci_1m2alpha": [lo, hi]}  # fmt: skip
+    return {
+        "decision": decision,
+        "p": r.p,
+        "estimate": r.mean,
+        "sd": r.sd,
+        "n": r.n,
+        "alpha": alpha,
+        "sesoi": sesoi,
+        "ci_1m2alpha": [lo, hi],
+    }
 
 
 # --- the clustered bootstrap ---------------------------------------------------------------------------------------
@@ -362,14 +370,24 @@ def mde(sd: float, alpha: float, R: int, power: float = POWER_TARGET) -> float:
 
 
 def replicate_rule(
-    sd: float, sesoi: float, alpha: float = ALPHA_BRANCH, power: float = POWER_TARGET, bounds: tuple[int, int] = REPLICATES
-) -> dict[str, Any]:  # fmt: skip
+    sd: float,
+    sesoi: float,
+    alpha: float = ALPHA_BRANCH,
+    power: float = POWER_TARGET,
+    bounds: tuple[int, int] = REPLICATES,
+) -> dict[str, Any]:
     """MS §9.5: the smallest R in bounds whose power at the SESOI is >= `power`; otherwise the MDE at the largest R
     and the label "underpowered, exploratory"."""
     table = {r: power_paired_t(sd, sesoi, alpha, r) for r in range(bounds[0], bounds[1] + 1)}
     chosen = next((r for r, p in table.items() if p >= power), None)
-    out: dict[str, Any] = {"sd": sd, "sesoi": sesoi, "alpha": alpha, "target_power": power,
-                           "power_by_R": {str(r): p for r, p in table.items()}, "R": chosen}  # fmt: skip
+    out: dict[str, Any] = {
+        "sd": sd,
+        "sesoi": sesoi,
+        "alpha": alpha,
+        "target_power": power,
+        "power_by_R": {str(r): p for r, p in table.items()},
+        "R": chosen,
+    }
     if chosen is None:
         out.update(mde_at_max=mde(sd, alpha, bounds[1], power), label="underpowered, exploratory")
     else:
@@ -387,9 +405,16 @@ def pilot_gate(acc: Mapping[str, Sequence[float]], chance: float = G1P_CHANCE, m
         raise ValueError("the G1' gate needs at least one arm")
     means = {arm: float(np.mean(v)) for arm, v in acc.items()}
     best = max(means, key=lambda a: (means[a], a))
-    return {"gate": "G1'", "chance": chance, "margin": margin, "threshold": chance + margin, "means": means,
-            "per_replicate": {a: list(map(float, v)) for a, v in acc.items()}, "best": best,
-            "passed": means[best] >= chance + margin}  # fmt: skip
+    return {
+        "gate": "G1'",
+        "chance": chance,
+        "margin": margin,
+        "threshold": chance + margin,
+        "means": means,
+        "per_replicate": {a: list(map(float, v)) for a, v in acc.items()},
+        "best": best,
+        "passed": means[best] >= chance + margin,
+    }
 
 
 def futility(b12a_minus_b4: float, b6_minus_b4: float, sesoi_a: float = SESOI["H_A"]) -> dict[str, Any]:
@@ -397,9 +422,15 @@ def futility(b12a_minus_b4: float, b6_minus_b4: float, sesoi_a: float = SESOI["H
     dev are both below SESOI_A / 2. Branch 2 is unaffected."""
     half = sesoi_a / 2.0
     stop = b12a_minus_b4 < half and b6_minus_b4 < half
-    return {"rule": "MS §9.6 family-I-first futility (B-O18)", "sesoi_a": sesoi_a, "threshold": half,
-            "b12a_minus_b4": b12a_minus_b4, "b6_minus_b4": b6_minus_b4,
-            "decision": "futility stop: branch 1 not tested" if stop else "continue", "stop_branch_1": stop}  # fmt: skip
+    return {
+        "rule": "MS §9.6 family-I-first futility (B-O18)",
+        "sesoi_a": sesoi_a,
+        "threshold": half,
+        "b12a_minus_b4": b12a_minus_b4,
+        "b6_minus_b4": b6_minus_b4,
+        "decision": "futility stop: branch 1 not tested" if stop else "continue",
+        "stop_branch_1": stop,
+    }
 
 
 def discordance(a: Mapping[str, bool], b: Mapping[str, bool]) -> tuple[float, int]:
@@ -433,8 +464,9 @@ def endpoint_of(pred: Mapping[str, Any]) -> str:
     return f"{pred['family']}/{pred['variant']}"
 
 
-def correctness(preds: Iterable[Mapping[str, Any]], arm: str, endpoint: str, value: str = "correct"
-                ) -> dict[int, dict[str, float]]:  # fmt: skip
+def correctness(
+    preds: Iterable[Mapping[str, Any]], arm: str, endpoint: str, value: str = "correct"
+) -> dict[int, dict[str, float]]:
     """{replicate: {item_id: value}} for one arm and endpoint, skipped items left out."""
     out: dict[int, dict[str, float]] = defaultdict(dict)
     for p in preds:
@@ -460,10 +492,22 @@ def replicate_diffs(preds, treatment: str, control: str, endpoint: str, value: s
 HYPOTHESES = {
     "H_A": {"treatment": "B9-II", "control": "B4-II", "endpoint": "E3ctx/cross", "value": "correct"},
     "H_B": {"treatment": "B8", "control": "B9-II", "endpoint": "E3ctx/cross", "value": "correct"},
-    "H_C": {"treatment": "T2", "control": "T1'", "endpoint": "E4/translate", "value": "slot_acc",
-            "noninferior": [{"treatment": "T2", "control": "T0", "endpoint": "E1/qa", "value": "correct",
-                             "margin": NONINFERIORITY["E1"]}]},
-}  # fmt: skip
+    "H_C": {
+        "treatment": "T2",
+        "control": "T1'",
+        "endpoint": "E4/translate",
+        "value": "slot_acc",
+        "noninferior": [
+            {
+                "treatment": "T2",
+                "control": "T0",
+                "endpoint": "E1/qa",
+                "value": "correct",
+                "margin": NONINFERIORITY["E1"],
+            }
+        ],
+    },
+}
 
 
 def confirmatory(preds, dev_preds=None, sesoi: Mapping[str, float] = SESOI, graph: Graph = MS_GRAPH) -> dict:
@@ -472,8 +516,11 @@ def confirmatory(preds, dev_preds=None, sesoi: Mapping[str, float] = SESOI, grap
     pvalues = {}
     for h, spec in HYPOTHESES.items():
         diffs = replicate_diffs(preds, spec["treatment"], spec["control"], spec["endpoint"], spec["value"])
-        entry: dict[str, Any] = {**{k: v for k, v in spec.items() if k != "noninferior"}, "sesoi": sesoi[h],
-                                 "replicates": {str(r): d for r, d in diffs.items()}}  # fmt: skip
+        entry: dict[str, Any] = {
+            **{k: v for k, v in spec.items() if k != "noninferior"},
+            "sesoi": sesoi[h],
+            "replicates": {str(r): d for r, d in diffs.items()},
+        }
         if len(diffs) < 2:
             entry["status"] = f"not testable: {len(diffs)} replicate(s) with both arms"
             pvalues[h] = 1.0
@@ -489,8 +536,11 @@ def confirmatory(preds, dev_preds=None, sesoi: Mapping[str, float] = SESOI, grap
                 b = correctness(dev_preds, spec["control"], spec["endpoint"])
                 rates = [discordance(a[k], b[k])[0] for k in sorted(set(a) & set(b))]
                 pre = float(np.nanmean(rates)) if rates else None
-            entry["precondition"] = {"discordance_dev": pre, "required": sesoi["H_B"],
-                                     "met": pre is not None and pre >= sesoi["H_B"]}  # fmt: skip
+            entry["precondition"] = {
+                "discordance_dev": pre,
+                "required": sesoi["H_B"],
+                "met": pre is not None and pre >= sesoi["H_B"],
+            }
             if not entry["precondition"]["met"]:
                 entry["status"] = "untestable at this divergence level (MS §9.3)"
                 p = 1.0
@@ -573,25 +623,33 @@ def main(argv: Sequence[str]) -> int:
         elif args.cmd == "pilot":
             preds = read_predictions(args.pred)
             acc = _arm_accuracy(preds, args.arms.split(","), args.endpoint)
-            doc = {"format": STATS_FORMAT, "kind": "pilot", "endpoint": args.endpoint,
-                   "gate": pilot_gate(acc) if acc else None, "nuisance": {}}  # fmt: skip
+            doc = {
+                "format": STATS_FORMAT,
+                "kind": "pilot",
+                "endpoint": args.endpoint,
+                "gate": pilot_gate(acc) if acc else None,
+                "nuisance": {},
+            }
             for pair in filter(None, args.pairs.split(",")):
                 t, c = pair.split(":")
                 diffs = replicate_diffs(preds, t, c, args.endpoint)
                 a, b = correctness(preds, t, args.endpoint), correctness(preds, c, args.endpoint)
                 disc = [discordance(a[r], b[r])[0] for r in sorted(set(a) & set(b))]
                 sd = float(np.std(list(diffs.values()), ddof=1)) if len(diffs) >= 2 else None
-                doc["nuisance"][pair] = {"per_replicate_diff": {str(k): v for k, v in diffs.items()},
-                                         "between_replicate_sd": sd,
-                                         "discordance": float(np.mean(disc)) if disc else None,
-                                         "replicate_rule": replicate_rule(sd, SESOI["H_A"]) if sd else None}  # fmt: skip
+                doc["nuisance"][pair] = {
+                    "per_replicate_diff": {str(k): v for k, v in diffs.items()},
+                    "between_replicate_sd": sd,
+                    "discordance": float(np.mean(disc)) if disc else None,
+                    "replicate_rule": replicate_rule(sd, SESOI["H_A"]) if sd else None,
+                }
         elif args.cmd == "futility":
             preds = read_predictions(args.pred)
             d12 = replicate_diffs(preds, "B12a", "B4", args.endpoint).get(args.replicate)
             d6 = replicate_diffs(preds, "B6", "B4", args.endpoint).get(args.replicate)
             if d12 is None or d6 is None:
-                raise ValueError(f"futility needs B12a, B6 and B4 predictions of replicate {args.replicate} on "
-                                 f"{args.endpoint}")  # fmt: skip
+                raise ValueError(
+                    f"futility needs B12a, B6 and B4 predictions of replicate {args.replicate} on {args.endpoint}"
+                )
             doc = {"format": STATS_FORMAT, "kind": "futility", "replicate": args.replicate, **futility(d12, d6)}
         else:
             preds = read_predictions(args.pred)

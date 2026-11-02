@@ -116,8 +116,9 @@ def assign_splits(docs: Iterable[Doc], fractions: Mapping[str, Any], seed: int) 
         allowed = {s for s, f in table[kind].items() if f > 0}
         for other in kinds - {kind}:
             if not allowed <= {s for s, f in table[other].items() if f > 0}:
-                raise SplitError(f"a cluster mixes kinds {sorted(kinds)} whose allowed splits differ: "
-                                 f"{[docs[i].key for i in group]}")  # fmt: skip
+                raise SplitError(
+                    f"a cluster mixes kinds {sorted(kinds)} whose allowed splits differ: {[docs[i].key for i in group]}"
+                )
         by_kind[kind].append(group)
     out: dict[str, list[str]] = {s: [] for s in SPLITS}
     for kind, groups in sorted(by_kind.items()):

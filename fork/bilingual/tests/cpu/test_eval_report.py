@@ -76,9 +76,21 @@ def test_i6_e8_the_matrix_has_every_ms7_row_with_its_status_and_unrun_results(ca
 
 
 def test_i6_e8_the_matrix_shows_recorded_results(tmp_path, capsys):
-    doc = {"format": "bilingual-result/1", "results": [
-        {"row": "B4", "arm": "B4", "metric": "E3ctx/cross/acc", "replicate": 0, "value": 0.25, "n_items": 10,
-         "ci": None, "status": "done"}]}  # fmt: skip
+    doc = {
+        "format": "bilingual-result/1",
+        "results": [
+            {
+                "row": "B4",
+                "arm": "B4",
+                "metric": "E3ctx/cross/acc",
+                "replicate": 0,
+                "value": 0.25,
+                "n_items": 10,
+                "ci": None,
+                "status": "done",
+            }
+        ],
+    }
     (tmp_path / "results.json").write_text(json.dumps(doc))
     entries = {e["id"]: e["result"] for e in matrix.table(matrix.read_results([tmp_path]))}
     assert entries["B4"] == "E3ctx/cross/acc r0 = 0.2500" and entries["B6"] == "未运行"
@@ -117,8 +129,26 @@ def test_memory_accounting_and_the_cpu_bench():
 
 def test_bench_command_refuses_without_cuda_and_runs_on_an_explicit_cpu(tmp_path, capsys):
     out = tmp_path / "g05.jsonl"
-    grid = ["--family", "swiglu", "--recipe", "seed", "--seq", "8", "--microbatch", "1,2", "--checkpointing", "off",
-            "--warmup", "1", "--steps", "1", "--profile", "tiny", "--out", str(out)]  # fmt: skip
+    grid = [
+        "--family",
+        "swiglu",
+        "--recipe",
+        "seed",
+        "--seq",
+        "8",
+        "--microbatch",
+        "1,2",
+        "--checkpointing",
+        "off",
+        "--warmup",
+        "1",
+        "--steps",
+        "1",
+        "--profile",
+        "tiny",
+        "--out",
+        str(out),
+    ]
     assert bench.main([*grid, "--dry-run"]) == 0 and not out.exists()
     if not torch.cuda.is_available():
         assert bench.main(grid) == 1 and "no CUDA" in capsys.readouterr().err
@@ -131,9 +161,21 @@ def test_bench_command_refuses_without_cuda_and_runs_on_an_explicit_cpu(tmp_path
 
 def _preds(arm, rep, correct, endpoint=("E3ctx", "cross"), value="correct"):
     fam, var = endpoint
-    return [{"format": "bilingual-pred/1", "arm": arm, "replicate": rep, "family": fam, "variant": var,
-             "direction": "zh>en>zh", "item_id": f"i{k}", "skip_reason": None, value: bool(c), "correct": bool(c)}
-            for k, c in enumerate(correct)]  # fmt: skip
+    return [
+        {
+            "format": "bilingual-pred/1",
+            "arm": arm,
+            "replicate": rep,
+            "family": fam,
+            "variant": var,
+            "direction": "zh>en>zh",
+            "item_id": f"i{k}",
+            "skip_reason": None,
+            value: bool(c),
+            "correct": bool(c),
+        }
+        for k, c in enumerate(correct)
+    ]
 
 
 def _write(path, preds):

@@ -112,18 +112,34 @@ def qa_items(
         gold = person.attrs[attr]
         others = [int(j) for j in rng.choice([j for j in range(len(lex)) if j != gold], size=K - 1, replace=False)]
         question, tid = r.qa(person, attr, question_lang, split, rng)
-        candidates, gi, di = place(lex.surface(gold, question_lang), [lex.surface(j, question_lang) for j in others],
-                                   positions[i], lex.surface(gold, OTHER[question_lang]), rng)  # fmt: skip
-        items.append(_item(
-            family, "qa", direction, split, i, generator,
-            template_ids={"question": tid},
-            segments=[{"lang": question_lang, "role": "question", "text": question}],
-            answer_lang=question_lang, answer_sep=ANSWER_SEP[question_lang],
-            candidates=candidates, gold_index=gi, distractor_index=di, chance=1 / (K + 1),
-            knowledge_source=knowledge,
-            structured={"person": person.id, "attribute": attr, "value": lex.surface(gold, "en")},
-            difficulty={"attribute": attr},
-        ))  # fmt: skip
+        candidates, gi, di = place(
+            lex.surface(gold, question_lang),
+            [lex.surface(j, question_lang) for j in others],
+            positions[i],
+            lex.surface(gold, OTHER[question_lang]),
+            rng,
+        )
+        items.append(
+            _item(
+                family,
+                "qa",
+                direction,
+                split,
+                i,
+                generator,
+                template_ids={"question": tid},
+                segments=[{"lang": question_lang, "role": "question", "text": question}],
+                answer_lang=question_lang,
+                answer_sep=ANSWER_SEP[question_lang],
+                candidates=candidates,
+                gold_index=gi,
+                distractor_index=di,
+                chance=1 / (K + 1),
+                knowledge_source=knowledge,
+                structured={"person": person.id, "attribute": attr, "value": lex.surface(gold, "en")},
+                difficulty={"attribute": attr},
+            )
+        )
     return items
 
 
@@ -164,8 +180,12 @@ def month_sum_pairs(a_side, b_side, n, rng) -> list[tuple[Person, Person, int]]:
     labels = balanced_positions(n, 12, rng)
     out = []
     for label in labels:
-        pairs = [(ma, mb) for ma in sorted(a_by) for mb in sorted(b_by)
-                 if (month_number(ma) + month_number(mb)) % 12 == label]  # fmt: skip
+        pairs = [
+            (ma, mb)
+            for ma in sorted(a_by)
+            for mb in sorted(b_by)
+            if (month_number(ma) + month_number(mb)) % 12 == label
+        ]
         if not pairs:
             raise ValueError(f"E3-par month_sum: no month pair gives residue {label}")
         ma, mb = pairs[int(rng.integers(len(pairs)))]
@@ -186,17 +206,33 @@ def par_items(variant, a_side, b_side, question_lang, split, n, r: Renderer, rng
         others = [lex.surface(j, question_lang) for j in range(len(lex)) if j != label]
         candidates, gi, _ = place(lex.surface(label, question_lang), others, positions[i], None, rng)
         attr = "city" if variant == "same_city" else "month"
-        items.append(_item(
-            "E3par", variant, direction, split, i, generator,
-            template_ids={"question": tid},
-            segments=[{"lang": question_lang, "role": "question", "text": question}],
-            answer_lang=question_lang, answer_sep=ANSWER_SEP[question_lang],
-            candidates=candidates, gold_index=gi, chance=1 / len(lex),
-            knowledge_sources={"a": a.partition, "b": b.partition},
-            structured={"variant": variant, "a": a.id, "b": b.id, "order": "ab" if first_a[i] == 0 else "ba",
-                        "label": label, "facts": [[a.id, attr], [b.id, attr]]},
-            difficulty={},
-        ))  # fmt: skip
+        items.append(
+            _item(
+                "E3par",
+                variant,
+                direction,
+                split,
+                i,
+                generator,
+                template_ids={"question": tid},
+                segments=[{"lang": question_lang, "role": "question", "text": question}],
+                answer_lang=question_lang,
+                answer_sep=ANSWER_SEP[question_lang],
+                candidates=candidates,
+                gold_index=gi,
+                chance=1 / len(lex),
+                knowledge_sources={"a": a.partition, "b": b.partition},
+                structured={
+                    "variant": variant,
+                    "a": a.id,
+                    "b": b.id,
+                    "order": "ab" if first_a[i] == 0 else "ba",
+                    "label": label,
+                    "facts": [[a.id, attr], [b.id, attr]],
+                },
+                difficulty={},
+            )
+        )
     return items
 
 
@@ -214,8 +250,16 @@ def ctx_instance(rng, n_colors: int, distractors: tuple[int, int], codes: CodeAl
     facts = [(entity_codes[0], target_color)] + [(code, colors[int(rng.integers(K))]) for code in entity_codes[1:]]
     fact_order = [facts[j] for j in rng.permutation(len(facts))]
     rule_order = [(c, rule[c]) for c in (colors[j] for j in rng.permutation(K))]
-    return {"colors": colors, "target": entity_codes[0], "target_color": target_color, "gold": gold_weekday,
-            "rule": rule, "facts": fact_order, "rules": rule_order, "n_distractors": n_dis}  # fmt: skip
+    return {
+        "colors": colors,
+        "target": entity_codes[0],
+        "target_color": target_color,
+        "gold": gold_weekday,
+        "rule": rule,
+        "facts": fact_order,
+        "rules": rule_order,
+        "n_distractors": n_dis,
+    }
 
 
 def ctx_segments(inst: Mapping, langs: Sequence[str], order: str, split: str, r: Renderer, rng):
@@ -244,8 +288,19 @@ def ctx_structured(inst: Mapping, r: Renderer) -> dict:
     }
 
 
-def ctx_items(variant, langs, split, n, r: Renderer, codes: CodeAllocator, rng, generator, *, n_colors: int,
-              distractors: tuple[int, int]) -> list[dict]:  # fmt: skip
+def ctx_items(
+    variant,
+    langs,
+    split,
+    n,
+    r: Renderer,
+    codes: CodeAllocator,
+    rng,
+    generator,
+    *,
+    n_colors: int,
+    distractors: tuple[int, int],
+) -> list[dict]:
     days = r.lexicons["weekday"]
     golds = balanced_positions(n, K, rng)
     positions = balanced_positions(n, K + 1, rng)
@@ -258,17 +313,35 @@ def ctx_items(variant, langs, split, n, r: Renderer, codes: CodeAllocator, rng, 
         order = ("fact_rule", "rule_fact")[orders[i]]
         segments, tids = ctx_segments(inst, langs, order, split, r, rng)
         others = [days.surface(d, l_q) for d in range(K) if d != inst["gold"]]
-        candidates, gi, di = place(days.surface(inst["gold"], l_q), others, positions[i],
-                                   days.surface(inst["gold"], OTHER[l_q]), rng)  # fmt: skip
+        candidates, gi, di = place(
+            days.surface(inst["gold"], l_q), others, positions[i], days.surface(inst["gold"], OTHER[l_q]), rng
+        )
         target_pos = [code for code, _ in inst["facts"]].index(inst["target"])
-        items.append(_item(
-            "E3ctx", variant, direction, split, i, generator,
-            template_ids=tids, segments=segments, answer_lang=l_q, answer_sep=ANSWER_SEP[l_q],
-            candidates=candidates, gold_index=gi, distractor_index=di, chance=1 / (K + 1),
-            structured=ctx_structured(inst, r),
-            difficulty={"n_rules": K, "n_distractor_entities": inst["n_distractors"], "order": order,
-                        "target_position": target_pos},
-        ))  # fmt: skip
+        items.append(
+            _item(
+                "E3ctx",
+                variant,
+                direction,
+                split,
+                i,
+                generator,
+                template_ids=tids,
+                segments=segments,
+                answer_lang=l_q,
+                answer_sep=ANSWER_SEP[l_q],
+                candidates=candidates,
+                gold_index=gi,
+                distractor_index=di,
+                chance=1 / (K + 1),
+                structured=ctx_structured(inst, r),
+                difficulty={
+                    "n_rules": K,
+                    "n_distractor_entities": inst["n_distractors"],
+                    "order": order,
+                    "target_position": target_pos,
+                },
+            )
+        )
     return items
 
 
@@ -277,8 +350,9 @@ def e4_slots(person: Person, attrs: Sequence[str], lang: str, r: Renderer) -> di
     return {"name": person.name, **{a: r.value(a, person.attrs[a], lang) for a in attrs}}
 
 
-def e4_items(variant, langs, group: Sequence[Person], split, n, r: Renderer, rng, generator, *,
-             attributes: tuple[int, int]) -> list[dict]:  # fmt: skip
+def e4_items(
+    variant, langs, group: Sequence[Person], split, n, r: Renderer, rng, generator, *, attributes: tuple[int, int]
+) -> list[dict]:
     src, tgt = langs
     direction = direction_label("E4", variant, langs)
     people = [group[int(j)] for j in rng.permutation(len(group))]
@@ -298,27 +372,50 @@ def e4_items(variant, langs, group: Sequence[Person], split, n, r: Renderer, rng
             }
         ]
         texts = join_segments([JOIN[src].join(s for s, _ in source), instr.text])
-        segments = [{"lang": src, "role": "source", "text": texts[0]},
-                    {"lang": tgt, "role": "instruction", "text": texts[1]},
-                    {"lang": tgt, "role": "answer", "text": None}]  # fmt: skip
-        tids = {"source": "+".join(t.id for _, t in source), "instruction": instr.id,
-                "reference": "+".join(t.id for _, t in reference)}  # fmt: skip
+        segments = [
+            {"lang": src, "role": "source", "text": texts[0]},
+            {"lang": tgt, "role": "instruction", "text": texts[1]},
+            {"lang": tgt, "role": "answer", "text": None},
+        ]
+        tids = {
+            "source": "+".join(t.id for _, t in source),
+            "instruction": instr.id,
+            "reference": "+".join(t.id for _, t in reference),
+        }
         if variant == "switchback":
             back = r.instruction("e4_back", src, split, rng)
             back_ref = r.bio_sentences(person, src, split, rng, attrs)
-            stages.append({"answer_lang": src, "slots": e4_slots(person, attrs, src, r),
-                           "reference": JOIN[src].join(s for s, _ in back_ref)})  # fmt: skip
-            segments += [{"lang": src, "role": "instruction", "text": back.text},
-                         {"lang": src, "role": "answer", "text": None}]  # fmt: skip
+            stages.append(
+                {
+                    "answer_lang": src,
+                    "slots": e4_slots(person, attrs, src, r),
+                    "reference": JOIN[src].join(s for s, _ in back_ref),
+                }
+            )
+            segments += [
+                {"lang": src, "role": "instruction", "text": back.text},
+                {"lang": src, "role": "answer", "text": None},
+            ]
             tids["instruction_back"] = back.id
             tids["reference_back"] = "+".join(t.id for _, t in back_ref)
         final = stages[-1]
-        items.append(_item(
-            "E4", variant, direction, split, i, generator,
-            template_ids=tids, segments=segments, answer_lang=final["answer_lang"],
-            answer_sep=ANSWER_SEP[final["answer_lang"]], slots=final["slots"], reference=final["reference"],
-            stages=stages,
-            structured={"person": person.id, "attributes": attrs, "source_lang": src},
-            difficulty={"n_facts": k},
-        ))  # fmt: skip
+        items.append(
+            _item(
+                "E4",
+                variant,
+                direction,
+                split,
+                i,
+                generator,
+                template_ids=tids,
+                segments=segments,
+                answer_lang=final["answer_lang"],
+                answer_sep=ANSWER_SEP[final["answer_lang"]],
+                slots=final["slots"],
+                reference=final["reference"],
+                stages=stages,
+                structured={"person": person.id, "attributes": attrs, "source_lang": src},
+                difficulty={"n_facts": k},
+            )
+        )
     return items

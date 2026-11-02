@@ -121,6 +121,7 @@ def greedy_batch(
     out = []
     for i, prompt in enumerate(prompts):
         plan = plan_fn(i, histories[i])
-        out.append(Generation(list(map(int, prompt)), new[i], stop[i], trace_of(plan),
-                              logits_kept[i] if keep_logits else None))  # fmt: skip
+        out.append(
+            Generation(list(map(int, prompt)), new[i], stop[i], trace_of(plan), logits_kept[i] if keep_logits else None)
+        )
     return out

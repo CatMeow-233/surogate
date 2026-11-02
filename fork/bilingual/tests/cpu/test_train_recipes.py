@@ -36,8 +36,12 @@ def _frozen_hashes(model, names):
 
 def test_i5_t6_an_expert_run_changes_only_its_expert(tiny_trained, tiny_stage, tmp_path):
     """EN trains while the frozen ZH pack runs on the zh tokens of a mixed shard (routes from the shard)."""
-    run = tiny_stage("tiny-en", 'run.shard="shards/d_zh_en"', 'run.packs={zh = "data/runs/tiny-zh/packs/zh"}',
-                     'run.routes={zh = "zh", en = "en"}')  # fmt: skip
+    run = tiny_stage(
+        "tiny-en",
+        'run.shard="shards/d_zh_en"',
+        'run.packs={zh = "data/runs/tiny-zh/packs/zh"}',
+        'run.routes={zh = "zh", en = "en"}',
+    )
     result = train(run, root=tiny_trained["root"], runs=tmp_path / "runs")
     model = result.model
     assert model.expert_names == ("zh", "en") and result.step == 20
@@ -108,15 +112,22 @@ def test_i5_t9_the_width_2f_expert_built_from_the_seed_reproduces_the_seed(tiny_
     recipe = JointWideRecipe()
     cfg = recipe.model_config(seed.config)
     assert cfg.ffn_width == 2 * seed.config.ffn_width
-    wide = recipe.build(cfg, Inputs(seed=seed, seed_path=tiny_trained["seed"]), fusion="output", gqa="sdpa_gqa",
-                        init_seed=0, anchor_kl=0.0).model.eval()  # fmt: skip
+    wide = recipe.build(
+        cfg,
+        Inputs(seed=seed, seed_path=tiny_trained["seed"]),
+        fusion="output",
+        gqa="sdpa_gqa",
+        init_seed=0,
+        anchor_kl=0.0,
+    ).model.eval()
     tokens = torch.randint(5, cfg.vocab_size, (2, cfg.max_seq), generator=torch.Generator().manual_seed(0))
     with torch.no_grad():
         diff = float((wide(tokens) - seed_model(tokens)).abs().max())
     assert diff <= 1e-6
     stacked = stacked_seed_ffn(seed.seed_ffn_state())
-    assert torch.equal(stacked["ffn.0.down.weight"][:, : seed.config.ffn_width] * 2, seed.seed_ffn_state()[
-        "ffn.0.down.weight"])  # fmt: skip
+    assert torch.equal(
+        stacked["ffn.0.down.weight"][:, : seed.config.ffn_width] * 2, seed.seed_ffn_state()["ffn.0.down.weight"]
+    )
     with pytest.raises(ValueError, match="family-I"):
         recipe.model_config(profile("tiny", "slot"))
     # B12a updates two paths: over the 100M update budget by design, recorded as such
@@ -160,7 +171,8 @@ def test_i5_t10_only_loss_mask_positions_contribute(tiny_trained, tiny_stage):
 def test_i5_t10_variant_c_routes_the_prefix_to_the_frozen_source_expert(tiny_trained, tiny_stage):
     p = _bridge(tiny_trained, tiny_stage)
     assert p.model.expert_names == ("zh", "en", "bridge") and p.plan.trainable_names == tuple(
-        sorted(n for n, _ in p.model.named_parameters() if n.startswith("bank.experts.bridge.")))  # fmt: skip
+        sorted(n for n, _ in p.model.named_parameters() if n.startswith("bank.experts.bridge."))
+    )
     reader = p.resolved.shard
     window = reader.windows(np.arange(0, len(reader) - 17, 16)[:12], 16)  # windows spanning many pairs
     plan = p.trainer.plan_for(window["routes"])
@@ -181,12 +193,19 @@ def test_i5_t10_variant_c_records_the_zh_en_hashes(tiny_trained, tiny_stage, tmp
     meta = json.loads((result.packs["bridge"] / "pack.json").read_text())
     zh, en = read_pack(tiny_trained["zh"]), read_pack(tiny_trained["en"])
     assert [(d["name"], d["expert_hash"], d["role"]) for d in meta["depends_on"]] == [
-        ("zh", zh.expert_hash, "source"), ("en", en.expert_hash, "source")]  # fmt: skip
-    assert all((result.packs["bridge"] / d["path"]).resolve() == tiny_trained[d["name"]].resolve()
-               for d in meta["depends_on"])  # fmt: skip
+        ("zh", zh.expert_hash, "source"),
+        ("en", en.expert_hash, "source"),
+    ]
+    assert all(
+        (result.packs["bridge"] / d["path"]).resolve() == tiny_trained[d["name"]].resolve() for d in meta["depends_on"]
+    )
     assert meta["train"]["bridge_variant"] == "c" and meta["train"]["recipe"] == "bridge"
-    manifest = asm.assemble(tiny_trained["seed"], {"zh": tiny_trained["zh"], "en": tiny_trained["en"],
-                                                   "bridge": result.packs["bridge"]}, None, tmp_path / "a.json")  # fmt: skip
+    manifest = asm.assemble(
+        tiny_trained["seed"],
+        {"zh": tiny_trained["zh"], "en": tiny_trained["en"], "bridge": result.packs["bridge"]},
+        None,
+        tmp_path / "a.json",
+    )
     assert asm.verify_fidelity(manifest).passed
 
 
@@ -194,8 +213,9 @@ def test_i5_t10_variant_c_records_the_zh_en_hashes(tiny_trained, tiny_stage, tmp
 def test_bridge_variants_a_and_b_train(tiny_trained, tiny_stage, tmp_path, variant):
     run = tiny_stage("tiny-bridge", f'train.bridge_variant="{variant}"', "run.steps=2", "run.packs={}")
     result = train(run, root=tiny_trained["root"], runs=tmp_path / "runs")
-    assert result.status == "done" and json.loads((result.packs["bridge"] / "pack.json").read_text())[
-        "depends_on"] == []  # fmt: skip
+    assert (
+        result.status == "done" and json.loads((result.packs["bridge"] / "pack.json").read_text())["depends_on"] == []
+    )
 
 
 def test_i5_t10_target_copy_trains_a_copy_and_leaves_the_original(tiny_trained, tiny_stage, tmp_path):
@@ -229,8 +249,20 @@ def test_i5_t15_the_router_recipe_is_deferred(tiny_trained, tmp_path, capsys):
     from pathlib import Path
 
     tiny = Path(__file__).resolve().parents[2] / "examples" / "tiny.toml"
-    args = ["train", str(tiny), "--stage", "tiny-zh", "--root", str(tiny_trained["root"]), "--runs", str(tmp_path),
-            "--set", 'run.recipe="router"', "--set", "registry.allow_dirty=true"]  # fmt: skip
+    args = [
+        "train",
+        str(tiny),
+        "--stage",
+        "tiny-zh",
+        "--root",
+        str(tiny_trained["root"]),
+        "--runs",
+        str(tmp_path),
+        "--set",
+        'run.recipe="router"',
+        "--set",
+        "registry.allow_dirty=true",
+    ]
     assert cli(args) == 1 and "Section 8" in capsys.readouterr().err
     assert not any(tmp_path.iterdir())
 
@@ -238,8 +270,11 @@ def test_i5_t15_the_router_recipe_is_deferred(tiny_trained, tmp_path, capsys):
 def test_lp_k_expert_keeps_the_seed_ffn_on_the_other_layers(tiny_trained, tiny_stage, tmp_path):
     result = train(tiny_stage("tiny-lp-zh"), root=tiny_trained["root"], runs=tmp_path / "runs")
     seed = read_pack(tiny_trained["seed"])
-    layer0 = {k.removeprefix("backbone.layers.0.ffn."): v for k, v in result.model.backbone_state().items()
-              if k.startswith("backbone.layers.0.ffn.")}  # fmt: skip
+    layer0 = {
+        k.removeprefix("backbone.layers.0.ffn."): v
+        for k, v in result.model.backbone_state().items()
+        if k.startswith("backbone.layers.0.ffn.")
+    }
     assert layer0 and all(torch.equal(v, seed.seed_ffn_state()[f"ffn.0.{k}"]) for k, v in layer0.items())
     assert read_pack(result.packs["zh"]).config.expert_layers == (1,)
 
@@ -248,9 +283,11 @@ def test_lp_k_expert_keeps_the_seed_ffn_on_the_other_layers(tiny_trained, tiny_s
 
 PILOT_ROWS = Path(__file__).resolve().parents[2] / "examples" / "pilot_rows.toml"
 P_UPDATE = {  # MS §5.1 / I2-A12: what one run of each kind may update at its geometry
-    ("pilot", "swiglu", "expert"): PATH, ("pilot", "swiglu", "lp4"): 21_233_664,
-    ("pilot", "slot", "expert"): 42_416_640, ("pilot", "swiglu", "joint_wide"): 2 * PATH,
-}  # fmt: skip
+    ("pilot", "swiglu", "expert"): PATH,
+    ("pilot", "swiglu", "lp4"): 21_233_664,
+    ("pilot", "slot", "expert"): 42_416_640,
+    ("pilot", "swiglu", "joint_wide"): 2 * PATH,
+}
 
 
 def test_pilot_rows_are_consistent_with_the_minimal_set():
@@ -267,8 +304,13 @@ def test_pilot_rows_are_consistent_with_the_minimal_set():
     for name, run in runs.items():
         spec, recipe = run.run, recipe_from_spec(run.run, run.train)
         assert run.train.global_batch_tokens == 65536 and run.train.lr in (6e-4, 2e-4)
-        block = "g1p" if name.startswith("g1p") else "II" if run.model.family == "slot" else (
-            "bridge" if spec.matrix_row.startswith("T") else "I")  # fmt: skip
+        block = (
+            "g1p"
+            if name.startswith("g1p")
+            else "II"
+            if run.model.family == "slot"
+            else ("bridge" if spec.matrix_row.startswith("T") else "I")
+        )
         tokens[(block, spec.replicate)] += spec.tokens
         if recipe.kind == "seed":
             assert spec.seed_pack is None and run.model.expert_layers is None
@@ -282,7 +324,11 @@ def test_pilot_rows_are_consistent_with_the_minimal_set():
             assert source.run.seed_pack == spec.seed_pack
     for r in (0, 1, 2):
         assert (tokens[("g1p", r)], tokens[("I", r)], tokens[("II", r)], tokens[("bridge", r)]) == (
-            900_000_000, 2_400_000_000, 1_200_000_000, 400_000_000)  # fmt: skip
+            900_000_000,
+            2_400_000_000,
+            1_200_000_000,
+            400_000_000,
+        )
 
 
 def test_pilot_rows_update_what_ms_5_1_budgets():
@@ -332,9 +378,20 @@ def test_bridge_layout_unpair_and_direction_on_track_s_pairs(track_s_ci):
 def test_shard_bridge_command_writes_the_layout_the_recipes_read(data_pipeline, track_s_ci, tmp_path):
     from surogate_bilingual.data.shards import ShardReader
 
-    base = ["shard", "--manifest", str(data_pipeline["base"] / "splits" / "manifest.json"), "--split", "parallel_train", "--tokenizer",
-            str(data_pipeline["tokenizer_path"]), "--add", str(track_s_ci[0] / "parallel" / "track_s.jsonl"),
-            "--seq", "64", "--bridge"]  # fmt: skip
+    base = [
+        "shard",
+        "--manifest",
+        str(data_pipeline["base"] / "splits" / "manifest.json"),
+        "--split",
+        "parallel_train",
+        "--tokenizer",
+        str(data_pipeline["tokenizer_path"]),
+        "--add",
+        str(track_s_ci[0] / "parallel" / "track_s.jsonl"),
+        "--seq",
+        "64",
+        "--bridge",
+    ]
     assert cli([*base, "--out", str(tmp_path / "both")]) == 0
     assert cli([*base, "--direction", "zh>en", "--out", str(tmp_path / "zh_en")]) == 0
     assert cli([*base, "--unpair-seed", "3", "--out", str(tmp_path / "unpaired")]) == 0
@@ -344,8 +401,15 @@ def test_shard_bridge_command_writes_the_layout_the_recipes_read(data_pipeline, 
         loss = np.asarray(reader.loss_mask)
         assert set(names) == ({"zh", "bridge"} if name == "zh_en" else {"zh", "en", "bridge"})
         assert (loss[names == "bridge"] == 1).all() and (loss[names != "bridge"] == 0).all()
-    both = ["shard", "--manifest", str(data_pipeline["base"] / "splits" / "manifest.json"), "--tokenizer",
-            str(data_pipeline["tokenizer_path"]), "--seq", "64"]  # fmt: skip
+    both = [
+        "shard",
+        "--manifest",
+        str(data_pipeline["base"] / "splits" / "manifest.json"),
+        "--tokenizer",
+        str(data_pipeline["tokenizer_path"]),
+        "--seq",
+        "64",
+    ]
     assert cli([*both, "--split", "zh_train,en_train", "--out", str(tmp_path / "mono")]) == 0  # B2, B12a, T3''
     header = json.loads((tmp_path / "mono" / "shard.json").read_text())
     assert header["split"] == "zh_train+en_train" and len(header["inputs"]) >= 2

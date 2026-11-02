@@ -116,8 +116,9 @@ def resolve_inputs(run: RunConfig, recipe: Recipe, root: Path) -> Resolved:
             raise TrainError("run.tokenizer differs from the seed pack's tokenizer")
     wanted = set(expected_packs(recipe))
     if set(spec.packs) != wanted:
-        raise TrainError(f"the {recipe.kind} recipe reads the packs {sorted(wanted)}; run.packs names "
-                         f"{sorted(spec.packs)}")  # fmt: skip
+        raise TrainError(
+            f"the {recipe.kind} recipe reads the packs {sorted(wanted)}; run.packs names {sorted(spec.packs)}"
+        )
     packs = {}
     for name, rel in sorted(spec.packs.items()):
         pack = read_pack(root / rel)
@@ -168,8 +169,9 @@ class Trainer:
         self.route_map = recipe.route_map()
         self.params = plan.parameters()
         lr0 = run.train.lr if run.train.lr is not None else 1.0
-        self.optimizer = schedule.adamw(recipe.param_groups(model, plan, run.train), lr0, run.train.adam_betas,
-                                        run.train.adam_eps)  # fmt: skip
+        self.optimizer = schedule.adamw(
+            recipe.param_groups(model, plan, run.train), lr0, run.train.adam_betas, run.train.adam_eps
+        )
         plan.check_optimizer(self.optimizer)
         self.decay = None
         if not isinstance(recipe, SeedRecipe) and run.train.expert_decay == "to_seed":
@@ -177,8 +179,9 @@ class Trainer:
             missing = [n for n in plan.trainable_names if n not in anchors]
             if missing:
                 raise TrainError(f"decay to the seed needs an anchor for every trained tensor; missing {missing[:3]}")
-            self.decay = schedule.DecayToSeed(self.params, [anchors[n] for n in plan.trainable_names],
-                                              run.train.expert_decay_lambda)  # fmt: skip
+            self.decay = schedule.DecayToSeed(
+                self.params, [anchors[n] for n in plan.trainable_names], run.train.expert_decay_lambda
+            )
 
     def plan_for(self, routes: np.ndarray) -> RoutePlan | None:
         if self.route_map is None:
@@ -220,8 +223,12 @@ class Trainer:
             (loss / n).backward()
             ce_total += float(ce.detach())
         kl_mean = kl_total / n if anchor > 0 else None
-        return {"targets": n, "ce": ce_total / n, "kl": kl_mean,
-                "loss": (ce_total + (anchor * kl_total if anchor > 0 else 0.0)) / n}  # fmt: skip
+        return {
+            "targets": n,
+            "ce": ce_total / n,
+            "kl": kl_mean,
+            "loss": (ce_total + (anchor * kl_total if anchor > 0 else 0.0)) / n,
+        }
 
     def step(self, windows: Sequence[Mapping[str, np.ndarray]], lr: float) -> dict[str, Any]:
         stats = self.gradients(windows)
@@ -279,8 +286,9 @@ def run_document(run: RunConfig, recipe: Recipe, resolved: Resolved, total: int,
     }
 
 
-def prepare(run: RunConfig, recipe: Recipe | None = None, *, root: Path | None = None, device: str | None = None
-            ) -> Prepared:  # fmt: skip
+def prepare(
+    run: RunConfig, recipe: Recipe | None = None, *, root: Path | None = None, device: str | None = None
+) -> Prepared:
     spec = run.run
     if spec is None:
         raise TrainError("the config has no [run] table")
@@ -288,21 +296,33 @@ def prepare(run: RunConfig, recipe: Recipe | None = None, *, root: Path | None =
     if run.train.lr is None:
         raise TrainError("train.lr must be set by the row config (MS §8 grid)")
     if getattr(recipe, "anchor_kl", run.train.anchor_kl) != run.train.anchor_kl:
-        raise TrainError(f"the recipe's anchor_kl {recipe.anchor_kl} differs from train.anchor_kl "
-                         f"{run.train.anchor_kl}; the run config is what the run id records")  # fmt: skip
+        raise TrainError(
+            f"the recipe's anchor_kl {recipe.anchor_kl} differs from train.anchor_kl "
+            f"{run.train.anchor_kl}; the run config is what the run id records"
+        )
     root = Path.cwd() if root is None else Path(root)
     total = spec.total_steps(run.train)
     dev = resolve_device(device or spec.device)
     prec = precision(run.train.dtype, dev)
     resolved = resolve_inputs(run, recipe, root)
     cfg = recipe.model_config(run.model)
-    built = recipe.build(cfg, resolved.inputs, fusion=run.fusion, gqa=run.gqa, init_seed=spec.init_seed,
-                         anchor_kl=run.train.anchor_kl)  # fmt: skip
+    built = recipe.build(
+        cfg, resolved.inputs, fusion=run.fusion, gqa=run.gqa, init_seed=spec.init_seed, anchor_kl=run.train.anchor_kl
+    )
     model = built.model.to(dev).train()
     reference = built.reference.to(dev) if built.reference is not None else None
     plan = recipe.freeze_plan(model).apply()
-    trainer = Trainer(model, plan, recipe, run, device=dev, precision=prec, route_names=resolved.shard.route_names,
-                      reference=reference, anchors=built.anchors)  # fmt: skip
+    trainer = Trainer(
+        model,
+        plan,
+        recipe,
+        run,
+        device=dev,
+        precision=prec,
+        route_names=resolved.shard.route_names,
+        reference=reference,
+        anchors=built.anchors,
+    )
     trainable = dict(zip(plan.trainable_names, plan.parameters(), strict=True))
     config_doc = run_document(run, recipe, resolved, total, prec)
     seed = resolved.inputs.seed
@@ -333,8 +353,9 @@ def prepare(run: RunConfig, recipe: Recipe | None = None, *, root: Path | None =
         "experts": list(model.expert_names),
     }
     sched = schedule.Schedule(total, run.train.lr, run.train.warmup_frac, run.train.min_lr_frac)
-    return Prepared(run, recipe, resolved, model, plan, trainer, sched, config_doc, identity, fields,
-                    plan.frozen_hashes(), dev)  # fmt: skip
+    return Prepared(
+        run, recipe, resolved, model, plan, trainer, sched, config_doc, identity, fields, plan.frozen_hashes(), dev
+    )
 
 
 # --- the run --------------------------------------------------------------------------------------------------------
@@ -397,10 +418,16 @@ def _resume(p: Prepared, run_dir: Path, run_id: str, sampler: EpochChunkSampler,
 
 def _save(p: Prepared, run_dir: Path, run_id: str, step: int, tokens: int, sampler: EpochChunkSampler) -> None:
     trainable = dict(zip(p.plan.trainable_names, p.plan.parameters(), strict=True))
-    extra = {"run_id": run_id, "tokens": tokens, "frozen_hashes": p.frozen_hashes,
-             "scheduler": p.schedule.state_dict(step), "sampler": sampler.state_dict()}  # fmt: skip
-    state.save_state(run_dir, step, trainable=trainable, optimizer=p.trainer.optimizer, extra=extra,
-                     keep_every=p.run.run.keep_every)  # fmt: skip
+    extra = {
+        "run_id": run_id,
+        "tokens": tokens,
+        "frozen_hashes": p.frozen_hashes,
+        "scheduler": p.schedule.state_dict(step),
+        "sampler": sampler.state_dict(),
+    }
+    state.save_state(
+        run_dir, step, trainable=trainable, optimizer=p.trainer.optimizer, extra=extra, keep_every=p.run.run.keep_every
+    )
 
 
 def _packs(p: Prepared, run_dir: Path, doc: Mapping[str, Any], step: int, tokens: int) -> dict[str, Path]:
@@ -417,13 +444,22 @@ def _packs(p: Prepared, run_dir: Path, doc: Mapping[str, Any], step: int, tokens
         return {trained: existing}
     t = p.run.train
     meta = {
-        "run_name": doc["run_name"], "run_id": doc["run_id"], "recipe": p.recipe.kind, "recipe_args": p.recipe.args(),
-        "matrix_row": doc.get("matrix_row"), "replicate": doc.get("replicate"), "step": step, "tokens": tokens,
-        "data_manifest_sha256": doc["data_manifest_sha256"], "expert_decay": t.expert_decay,
-        "expert_decay_lambda": t.expert_decay_lambda, "anchor_kl": t.anchor_kl,
+        "run_name": doc["run_name"],
+        "run_id": doc["run_id"],
+        "recipe": p.recipe.kind,
+        "recipe_args": p.recipe.args(),
+        "matrix_row": doc.get("matrix_row"),
+        "replicate": doc.get("replicate"),
+        "step": step,
+        "tokens": tokens,
+        "data_manifest_sha256": doc["data_manifest_sha256"],
+        "expert_decay": t.expert_decay,
+        "expert_decay_lambda": t.expert_decay_lambda,
+        "anchor_kl": t.anchor_kl,
         "bridge_variant": p.run.train.bridge_variant if p.recipe.kind == "bridge" else None,
-        "code_commit": doc["code_commit"], "code_dirty": doc["code_dirty"],
-    }  # fmt: skip
+        "code_commit": doc["code_commit"],
+        "code_dirty": doc["code_dirty"],
+    }
     return p.recipe.write_packs(p.model, run_dir, p.resolved.inputs, meta)
 
 
@@ -441,8 +477,9 @@ def train(
     p = prepare(run, recipe, root=root, device=device)
     spec = run.run
     runs = Path(runs) if runs is not None else p.resolved.root / registry.RUNS_DIR
-    run_dir, doc, _ = registry.open_run(runs, spec.name, p.identity, p.fields,
-                                        allow_dirty=bool(run.registry["allow_dirty"]))  # fmt: skip
+    run_dir, doc, _ = registry.open_run(
+        runs, spec.name, p.identity, p.fields, allow_dirty=bool(run.registry["allow_dirty"])
+    )
     run_id = doc["run_id"]
     t = run.train
     sampler = EpochChunkSampler(len(p.resolved.shard), t.seq, spec.data_seed)
@@ -452,9 +489,19 @@ def train(
         start, tokens = _resume(p, run_dir, run_id, sampler, resume)
         metrics.truncate(metrics_path, start)
         _environment(run_dir, start)
-        result = RunResult(spec.name, run_id, run_dir, "running", start, total, tokens,
-                           resumed_from=start if start else None, model=p.model, optimizer=p.trainer.optimizer,
-                           sampler=sampler)  # fmt: skip
+        result = RunResult(
+            spec.name,
+            run_id,
+            run_dir,
+            "running",
+            start,
+            total,
+            tokens,
+            resumed_from=start if start else None,
+            model=p.model,
+            optimizer=p.trainer.optimizer,
+            sampler=sampler,
+        )
         registry.update_run(run_dir, status="running", failure=None)
         if p.device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(p.device)
@@ -473,18 +520,35 @@ def train(
             result.losses.append(stats["loss"])
             if step % spec.log_every == 0 or step == total:
                 alloc, reserved = _cuda_peaks(p.device)
-                metrics.append(metrics_path, metrics.line(
-                    step=step, tokens=tokens, targets=stats["targets"], loss=stats["loss"], kl=stats["kl"], lr=lr,
-                    grad_norm=stats["grad_norm"], tokens_per_s=t.global_batch_tokens / max(elapsed, 1e-9),
-                    step_s=elapsed, peak_alloc_gib=alloc, peak_reserved_gib=reserved))  # fmt: skip
+                metrics.append(
+                    metrics_path,
+                    metrics.line(
+                        step=step,
+                        tokens=tokens,
+                        targets=stats["targets"],
+                        loss=stats["loss"],
+                        kl=stats["kl"],
+                        lr=lr,
+                        grad_norm=stats["grad_norm"],
+                        tokens_per_s=t.global_batch_tokens / max(elapsed, 1e-9),
+                        step_s=elapsed,
+                        peak_alloc_gib=alloc,
+                        peak_reserved_gib=reserved,
+                    ),
+                )
             if step == total or step == stop_after or (spec.save_every and step % spec.save_every == 0):
                 _save(p, run_dir, run_id, step, tokens, sampler)
         result.packs = _packs(p, run_dir, doc, result.step, result.tokens)
     except BaseException as exc:
         registry.update_run(run_dir, status="failed", failure=f"{type(exc).__name__}: {exc}")
         raise
-    registry.update_run(run_dir, status="done", failure=None, finished_step=result.step,
-                        packs={k: str(v.relative_to(run_dir)) for k, v in result.packs.items()})  # fmt: skip
+    registry.update_run(
+        run_dir,
+        status="done",
+        failure=None,
+        finished_step=result.step,
+        packs={k: str(v.relative_to(run_dir)) for k, v in result.packs.items()},
+    )
     result.status = "done"
     return result
 
@@ -512,7 +576,7 @@ def _dry_run(p: Prepared) -> dict[str, Any]:
             "path": str(p.resolved.shard_path),
             "split": p.resolved.shard.header["split"],
             "n_tokens": len(p.resolved.shard),
-        },  # fmt: skip
+        },
         "code_commit": commit,
         "code_dirty": dirty,
         "allow_dirty": bool(p.run.registry["allow_dirty"]),
@@ -530,13 +594,21 @@ def main(argv: Sequence[str]) -> int:
     ap.add_argument("--root", type=Path, help="where the row file's relative paths start (default: the cwd)")
     ap.add_argument("--runs", type=Path, help="the runs directory (default: ROOT/data/runs)")
     ap.add_argument("--device", choices=["auto", "cpu", "cuda"], help="overrides run.device")
-    ap.add_argument("--set", action="append", default=[], metavar="SECTION.KEY=VALUE",
-                    help="override one config value (TOML syntax), e.g. train.lr=3e-4")  # fmt: skip
+    ap.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="SECTION.KEY=VALUE",
+        help="override one config value (TOML syntax), e.g. train.lr=3e-4",
+    )
     ap.add_argument("--name", help="the run name (e.g. one lr trial of a row)")
     ap.add_argument("--stop-after", type=int, help="return after this many completed steps (a state is saved)")
     ap.add_argument("--no-resume", action="store_true", help="refuse to continue a run that already has states")
-    ap.add_argument("--dry-run", action="store_true",
-                    help="resolve the config, read and verify every input, build the model; write nothing")  # fmt: skip
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="resolve the config, read and verify every input, build the model; write nothing",
+    )
     args = ap.parse_args(list(argv))
     try:
         if args.list:
@@ -547,15 +619,33 @@ def main(argv: Sequence[str]) -> int:
         if args.dry_run:
             print(json.dumps(_dry_run(prepare(run, root=args.root, device=args.device)), indent=1, sort_keys=True))
             return 0
-        result = train(run, resume=not args.no_resume, root=args.root, runs=args.runs, device=args.device,
-                       stop_after=args.stop_after)  # fmt: skip
+        result = train(
+            run,
+            resume=not args.no_resume,
+            root=args.root,
+            runs=args.runs,
+            device=args.device,
+            stop_after=args.stop_after,
+        )
     except (ValueError, TrainError, RecipeError, AssemblyError, FreezeError, OSError) as exc:
         print(f"train: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     except NotImplementedError as exc:
         print(f"train: {exc}", file=sys.stderr)
         return 1
-    print(json.dumps({"run_name": result.run_name, "run_id": result.run_id, "status": result.status,
-                      "step": result.step, "total_steps": result.total_steps, "tokens": result.tokens,
-                      "packs": {k: str(v) for k, v in result.packs.items()}}, indent=1, sort_keys=True))  # fmt: skip
+    print(
+        json.dumps(
+            {
+                "run_name": result.run_name,
+                "run_id": result.run_id,
+                "status": result.status,
+                "step": result.step,
+                "total_steps": result.total_steps,
+                "tokens": result.tokens,
+                "packs": {k: str(v) for k, v in result.packs.items()},
+            },
+            indent=1,
+            sort_keys=True,
+        )
+    )
     return 0

@@ -36,8 +36,10 @@ def test_i2_a12_pilot_budgets_are_exact(pilot):
     assert rows["ZH+EN+Bridge"]["P_total"] == 223_633_920
     assert rows["31-paths"]["P_total"] == 2_007_261_696
     assert (rows["II-single"]["P_active"], rows["II-dual"]["P_active"], rows["II-dual"]["P_update"]) == (
-        96_222_720, 138_639_360, 42_416_640,
-    )  # fmt: skip
+        96_222_720,
+        138_639_360,
+        42_416_640,
+    )
     assert (rows["B10-II-dual"]["P_active"], rows["B10-II-dual"]["standalone_P_total"]) == (96_276_480, 75_041_280)
     assert (rows["B10-I"]["P_active"], rows["B10-I"]["standalone_P_total"]) == (96_231_936, 64_381_440)
     assert rows["B10-ch"]["P_active"] == 96_340_608

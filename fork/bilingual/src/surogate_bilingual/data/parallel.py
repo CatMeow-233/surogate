@@ -39,10 +39,13 @@ def direction(doc: Doc) -> str:
 
 def bridge_layout(doc: Doc) -> Doc:
     source, target = _texts(doc)
-    return doc.replace(segments=(
-        Segment(text=source.text, lang=source.lang, role="source", route=source.lang, loss=False),
-        Segment(text=target.text, lang=target.lang, role="target", route=BRIDGE_ROUTE, loss=True),
-    ), route=None)  # fmt: skip
+    return doc.replace(
+        segments=(
+            Segment(text=source.text, lang=source.lang, role="source", route=source.lang, loss=False),
+            Segment(text=target.text, lang=target.lang, role="target", route=BRIDGE_ROUTE, loss=True),
+        ),
+        route=None,
+    )
 
 
 def select_direction(docs: Iterable[Doc], wanted: str) -> list[Doc]:
@@ -68,6 +71,10 @@ def unpair(docs: Sequence[Doc], seed: int) -> list[Doc]:
         targets = {perm[(k + 1) % len(perm)]: _texts(out[perm[k]])[1] for k in range(len(perm))}
         for i in idx:
             source, _ = _texts(out[i])
-            out[i] = out[i].replace(key=f"{out[i].key}#unpaired", pair_id=None, segments=(source, targets[i]),
-                                    meta={**out[i].meta, "unpaired_seed": int(seed)})  # fmt: skip
+            out[i] = out[i].replace(
+                key=f"{out[i].key}#unpaired",
+                pair_id=None,
+                segments=(source, targets[i]),
+                meta={**out[i].meta, "unpaired_seed": int(seed)},
+            )
     return out

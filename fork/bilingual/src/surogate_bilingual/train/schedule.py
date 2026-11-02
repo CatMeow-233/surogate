@@ -92,16 +92,25 @@ def seed_groups(named: Sequence[tuple[str, torch.nn.Parameter]], weight_decay: f
     decay = [(n, p) for n, p in named if p.dim() >= 2 and n not in NO_DECAY_NAMES]
     keep = [(n, p) for n, p in named if not (p.dim() >= 2 and n not in NO_DECAY_NAMES)]
     groups = [("decay", decay, weight_decay), ("no_decay", keep, 0.0)]
-    return [{"params": [p for _, p in items], "names": [n for n, _ in items], "group": label, "weight_decay": wd}
-            for label, items, wd in groups if items]  # fmt: skip
+    return [
+        {"params": [p for _, p in items], "names": [n for n, _ in items], "group": label, "weight_decay": wd}
+        for label, items, wd in groups
+        if items
+    ]
 
 
 def expert_groups(
     named: Sequence[tuple[str, torch.nn.Parameter]], expert_decay: str, lam: float
 ) -> list[dict[str, Any]]:
     wd = lam if expert_decay == "to_zero" else 0.0
-    return [{"params": [p for _, p in named], "names": [n for n, _ in named], "group": f"expert:{expert_decay}",
-             "weight_decay": wd}]  # fmt: skip
+    return [
+        {
+            "params": [p for _, p in named],
+            "names": [n for n, _ in named],
+            "group": f"expert:{expert_decay}",
+            "weight_decay": wd,
+        }
+    ]
 
 
 def adamw(groups: list[dict[str, Any]], lr: float, betas: tuple[float, float], eps: float) -> torch.optim.AdamW:
@@ -118,8 +127,9 @@ class DecayToSeed:
             if p.shape != a.shape:
                 raise ValueError(f"anchor shape {list(a.shape)} differs from parameter {list(p.shape)}")
         self.params = list(params)
-        self.anchors = [a.detach().to(device=p.device, dtype=p.dtype).clone() for p, a in zip(params, anchors,
-                                                                                              strict=True)]  # fmt: skip
+        self.anchors = [
+            a.detach().to(device=p.device, dtype=p.dtype).clone() for p, a in zip(params, anchors, strict=True)
+        ]
         self.lam = float(lam)
 
     @torch.no_grad()

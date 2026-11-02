@@ -130,7 +130,10 @@ def test_i6_e2_slot_scoring_is_exact_and_language_aware():
     en = {"name": "Alda Brightford", "year": "1987", "occupation": "photographer"}
     assert score.score_slots("Alda Brightford, born 1987, is a photographer.", en, "en") == dict.fromkeys(en, True)
     assert score.score_slots("Alda Brightford, born 19870, photographers", en, "en") == {
-        "name": True, "year": False, "occupation": False}  # fmt: skip
+        "name": True,
+        "year": False,
+        "occupation": False,
+    }
     # the language check: names are Latin script in both languages and are left out
     assert score.lang_ok(text, "zh", ignore=["Alda Brightford"])
     assert not score.lang_ok("Alda Brightford was born in Beijing.", "zh", ignore=["Alda Brightford"])
@@ -150,20 +153,38 @@ def _ctx(model, tok, routing, items, arm="B4"):
 def test_i6_e2_a_missing_expert_produces_a_skip_record_with_its_reason(stand_in_tok, item_maker):
     model = RoutedLM(profile("tiny", "swiglu"), ["zh", "bridge"]).eval()
     items = [
-        item_maker(0, "E1", [("en", "question", "e1 e2 e3")], ["e4", "e5"], 0, direction="en>en",
-                   knowledge_source="en"),
-        item_maker(1, "E1", [("zh", "question", "z1 z2 z3")], ["z4", "z5"], 1, direction="zh>zh",
-                   knowledge_source="zh"),
-        item_maker(2, "E3ctx", [("zh", "fact", "z1\n"), ("en", "rule", "e1\n"), ("zh", "question", "z2")],
-                   ["z3", "e3"], 0, variant="cross", direction="zh>en>zh", distractor=1),
-    ]  # fmt: skip
+        item_maker(
+            0, "E1", [("en", "question", "e1 e2 e3")], ["e4", "e5"], 0, direction="en>en", knowledge_source="en"
+        ),
+        item_maker(
+            1, "E1", [("zh", "question", "z1 z2 z3")], ["z4", "z5"], 1, direction="zh>zh", knowledge_source="zh"
+        ),
+        item_maker(
+            2,
+            "E3ctx",
+            [("zh", "fact", "z1\n"), ("en", "rule", "e1\n"), ("zh", "question", "z2")],
+            ["z3", "e3"],
+            0,
+            variant="cross",
+            direction="zh>en>zh",
+            distractor=1,
+        ),
+    ]
     preds = score.evaluate(_ctx(model, stand_in_tok, it.Routing("R_out"), items), items)
     assert "missing expert ['en']" in preds[0]["skip_reason"] and preds[0]["correct"] is None
     assert preds[1]["skip_reason"] is None and preds[1]["correct"] in (True, False)
     assert "missing expert ['en']" in preds[2]["skip_reason"]  # its rule segment is English
     # R_src: E3-ctx has no knowledge source, E3-par two of them; both are skipped with the reason
-    par = item_maker(3, "E3par", [("zh", "question", "z1 z2")], ["z3", "z4"], 0, variant="same_city",
-                     direction="zh+en>zh", knowledge_sources={"a": "zh", "b": "en"})  # fmt: skip
+    par = item_maker(
+        3,
+        "E3par",
+        [("zh", "question", "z1 z2")],
+        ["z3", "z4"],
+        0,
+        variant="same_city",
+        direction="zh+en>zh",
+        knowledge_sources={"a": "zh", "b": "en"},
+    )
     model2 = RoutedLM(profile("tiny", "swiglu"), ["zh", "en"]).eval()
     src = score.evaluate(_ctx(model2, stand_in_tok, it.Routing("R_src"), items[1:] + [par]), items[1:] + [par])
     assert src[0]["skip_reason"] is None
@@ -192,15 +213,35 @@ def _write_items(path, items):
 
 
 def test_i6_e2_eval_tasks_command_writes_predictions_and_results(tiny_assemblies, item_maker, tmp_path, capsys):
-    items = [item_maker(i, "E3ctx", [("zh", "fact", f"z{i} z2\n"), ("en", "rule", "e1 e2\n"),
-                                     ("zh", "question", f"z{i + 3}")], ["z5", "z6", "z7", "e5"], i % 3,
-                        variant="cross", direction="zh>en>zh", distractor=3, question_template=f"q{i % 4}")
-             for i in range(12)]  # fmt: skip
+    items = [
+        item_maker(
+            i,
+            "E3ctx",
+            [("zh", "fact", f"z{i} z2\n"), ("en", "rule", "e1 e2\n"), ("zh", "question", f"z{i + 3}")],
+            ["z5", "z6", "z7", "e5"],
+            i % 3,
+            variant="cross",
+            direction="zh>en>zh",
+            distractor=3,
+            question_template=f"q{i % 4}",
+        )
+        for i in range(12)
+    ]
     test_item = item_maker(99, "E1", [("zh", "question", "z1")], ["z2", "z3"], 0, split="test")
     path = _write_items(tmp_path / "items.jsonl", [*items, test_item])
     out = tmp_path / "eval" / "B6"
-    argv = ["--model", str(tiny_assemblies["zh_en"]), "--arm", "B6", "--items", str(path), "--out", str(out),
-            "--n-boot", "200"]  # fmt: skip
+    argv = [
+        "--model",
+        str(tiny_assemblies["zh_en"]),
+        "--arm",
+        "B6",
+        "--items",
+        str(path),
+        "--out",
+        str(out),
+        "--n-boot",
+        "200",
+    ]
     assert score.main([*argv, "--dry-run"]) == 0 and not out.exists()
     assert score.main(argv) == 0
     preds = [json.loads(line) for line in (out / "predictions.jsonl").read_text().splitlines()]

@@ -35,9 +35,25 @@ REFERENCE_FILES = {
 
 # The command-line surface of docs/spec.md, in its order.
 PLANNED_COMMANDS = [
-    "env", "tokenizer", "manifest", "split", "decontam", "shard", "synth", "train", "assemble", "verify",
-    "eval-tasks", "eval-nll", "switch", "audit", "stats", "bench", "matrix", "registry",
-]  # fmt: skip
+    "env",
+    "tokenizer",
+    "manifest",
+    "split",
+    "decontam",
+    "shard",
+    "synth",
+    "train",
+    "assemble",
+    "verify",
+    "eval-tasks",
+    "eval-nll",
+    "switch",
+    "audit",
+    "stats",
+    "bench",
+    "matrix",
+    "registry",
+]
 
 
 def _pyproject(path: Path) -> dict:

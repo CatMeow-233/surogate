@@ -40,8 +40,10 @@ def _prompts(tok):
         [("zh", " ".join(f"z{k}" for k in range(12))), ("en", "e0 e1 e2 e3 e4 e5 e6 e7 e8")],  # 21 > max_seq 16
         [("en", "e9"), ("zh", "z9 z10")],
     ]
-    return [[Seg(lang, "question" if j == len(r) - 1 else "fact", ids(text)) for j, (lang, text) in enumerate(r)]
-            for r in raw]  # fmt: skip
+    return [
+        [Seg(lang, "question" if j == len(r) - 1 else "fact", ids(text)) for j, (lang, text) in enumerate(r)]
+        for r in raw
+    ]
 
 
 @pytest.mark.parametrize("gate", ["one_hot", "dual_const"])
@@ -53,8 +55,9 @@ def test_i6_e3_batched_greedy_equals_per_item_greedy(zh_en, gate):
     eos = tok.token_to_id("<eos>")
     batched = greedy_batch(zh_en.model, prompts, fn, max_new=8, eos=eos, keep_logits=True, batch_size=4)
     for i, prompt in enumerate(prompts):
-        single = greedy_batch(zh_en.model, [prompt], lambda _j, ids, i=i: fn(i, ids), max_new=8, eos=eos,
-                              keep_logits=True)[0]  # fmt: skip
+        single = greedy_batch(
+            zh_en.model, [prompt], lambda _j, ids, i=i: fn(i, ids), max_new=8, eos=eos, keep_logits=True
+        )[0]
         assert batched[i].tokens == single.tokens and batched[i].stop == single.stop
         diffs = [float((a - b).abs().max()) for a, b in zip(batched[i].step_logits, single.step_logits, strict=True)]
         assert max(diffs) <= 1e-6
