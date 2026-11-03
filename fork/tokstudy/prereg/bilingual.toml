@@ -1,0 +1,60 @@
+# Preregistration of the tokstudy table bilingual-B (B0-B3 BBPE variants, B4 H-Net, B5 flat bytes), all on the
+# real bilingual trunk. Every value is a proposal (TOKENIZER_CORPUS_STUDY §7, §9.1, §9.2, §10) until the owner signs.
+format = "tokstudy-prereg/1"
+table = "bilingual-B"
+notes = "Screening runs use F_target = F_dec and stop at the stable checkpoint of 0.5; the decision continues them."
+
+[budget]
+convention = "matmul"
+# F_dec: B0 (the pilot seed geometry, T = 1024) at 0.8B tokens: 6 x macs_per_token = 652,738,560 x 8e8.
+F_target = 522_190_848_000_000_000
+points = [0.25, 0.5, 1.0]
+
+[context]
+K_train = 4096
+K_eval = 4096
+
+[schedule]
+warmup = 0.02
+decay_start = 0.9
+floor = 0.1
+shape = "linear"
+
+[stages.screen]
+stop_after = 0.5
+
+[stages.decision]
+
+[mixture]  # D_seed's natural zh/en balance, counted in B0 tokens (M9; stream --measure arms/bilingual.toml:B0)
+zh = 0.5
+en = 0.5
+
+[stream]
+measure = "B0"
+
+[seeds]
+B0 = 3
+B1 = 2
+B2 = 2
+B3 = 2
+B4 = 2
+B5 = 1
+
+[thresholds]  # read by the verdict (step S16); STUDY §9.2
+noninferior_abs = 0.005          # Delta <= +max(0.005 bit/byte, 0.5 % relative) in both languages
+noninferior_rel = 0.005
+superior_rel_gain = 0.01         # at least one language better by >= 1 % relative and > 2 sigma
+sigma_multiple = 2.0
+track_s_sigma = 1.0              # Track S dev answer log-prob not below B0 - 1 sigma (length unit: bytes)
+screen_eliminate_rel = 0.02      # screening: worse by > 2 % relative and > 2 sigma
+decision_max_survivors = 2       # B0 plus at most two; B4 enters unless eliminated
+b4_throughput_ratio = 0.5
+owner_integration_signoff = true
+tie_goes_to = "B0"
+narrowing_fraction = 0.5
+bootstrap_resamples = 10000
+bootstrap_seed = 0
+
+[signature]
+signed_by = ""
+date = ""

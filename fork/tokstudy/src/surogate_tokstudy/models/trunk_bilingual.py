@@ -24,6 +24,16 @@ SEED_EXPERT = "seed"
 FAMILY = "swiglu"  # the seed of family I; the study's dense trunk (STUDY §9.1)
 
 
+def trunk_config(profile_name: str, overrides: Mapping[str, Any] | None = None, *, vocab_size: int | None = None):
+    """The trunk's ModelConfig: a bilingual size profile with overrides (vocab_size is the arm's; None for an H-Net
+    main network, which keeps the smallest vocabulary ModelConfig allows)."""
+    overrides = dict(overrides or {})
+    refused = sorted({"vocab_size", "family", "expert_layers"} & set(overrides))
+    if refused:
+        raise ValueError(f"trunk overrides may not set {refused}: the vocabulary is the arm's, the trunk dense")
+    return profile(profile_name, FAMILY, vocab_size=vocab_size or N_SPECIAL + 1, **overrides)
+
+
 class BilingualTrunk(nn.Module):
     def __init__(
         self,
@@ -35,11 +45,7 @@ class BilingualTrunk(nn.Module):
         checkpointing: bool = False,
     ):
         super().__init__()
-        overrides = dict(overrides or {})
-        refused = sorted({"vocab_size", "family", "expert_layers"} & set(overrides))
-        if refused:
-            raise ValueError(f"trunk overrides may not set {refused}: the vocabulary is the arm's, the trunk dense")
-        cfg = profile(profile_name, FAMILY, vocab_size=vocab_size or N_SPECIAL + 1, **overrides)
+        cfg = trunk_config(profile_name, overrides, vocab_size=vocab_size)
         self.lm = RoutedLM(cfg, (SEED_EXPERT,), init_seed=init_seed)
         self.cfg, self.d_model, self.vocab_size = cfg, cfg.d_model, vocab_size
         self.checkpointing = checkpointing

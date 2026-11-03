@@ -28,6 +28,7 @@ COMMANDS: dict[str, Command] = {
     "arms": Command("arms", "load and check an arm registry (sha256 of every tokenizer)", "S8"),
     "intrinsic": Command("intrinsic", "intrinsic metrics per arm and domain (CPU screen)", "S10"),
     "align": Command("align", "student/teacher token alignment rates (CPU screen)", "S10"),
+    "stream": Command("stream", "a table's training stream: document order, byte mixture, parts", "S9"),
     "train": Command("train", "one run of one arm at the table's F_target; resumes", "S14"),
     "branch": Command("train", "decay branch from a stable checkpoint", "S14", "branch_main"),
     "eval": Command("evaluate", "per-document NLL and BPB on the common byte prefix", "S15"),

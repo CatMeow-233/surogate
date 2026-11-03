@@ -1,0 +1,53 @@
+# Preregistration of the tokstudy table tlc-N (N0 twin of the native leader, N1 H-Net, N2 flat bytes).
+# Every value is a proposal (TOKENIZER_CORPUS_STUDY §7, §8.2, §8.4(e), §10) until the owner signs [signature].
+# The sha256 of this file enters every run record and verdict; after the first run of the table a change needs
+# `train --amend "<reason>"` (fork/tokstudy/README.md, 运行登记).
+format = "tokstudy-prereg/1"
+table = "tlc-N"
+notes = "N0 uses the native TOK-AB leader at the time; a result is relative to that leader (STUDY §12)."
+
+[budget]
+convention = "matmul"
+# A0 at 0.8B tokens: 3 x surogate_tlc.ir.flops_per_token(A0, 512) x 8e8 = 205,258,752 x 8e8 (tests/cpu/test_train.py).
+F_target = 164_207_001_600_000_000
+points = [0.25, 0.5, 1.0]
+
+[context]
+K_train = 2048  # byte positions per training row (M4)
+K_eval = 2048   # text bytes per evaluation document, before the common-prefix cut (M4)
+
+[schedule]
+warmup = 0.02
+decay_start = 0.9
+floor = 0.1
+shape = "linear"
+
+[stages.decision]
+
+[mixture]  # by bytes of the stream (M9: the native 70/30)
+py = 0.7
+en = 0.3
+
+[stream]
+measure = "bytes"
+
+[seeds]  # per arm, as the arm registry lists them
+N0 = 3
+N1 = 3
+N2 = 1
+
+[thresholds]  # read by the verdict (step S16); STUDY §8.4(e)
+n1_python_rel_gain = 0.02       # N1 Python BPB at least 2 % better than N0 on 3 seeds, equal FLOPs
+n1_english_rel_max_loss = 0.005 # English not worse than +0.5 % relative
+n1_trend_no_narrowing = true    # the lead does not shrink between the last two budget points
+n1_throughput_ratio = 0.5       # measured training bytes/s at least 0.5 x N0's on the same backend
+owner_integration_signoff = true  # §8.5 checklist accepted by the owner
+n2_floor_only = true
+sigma_multiple = 2.0
+narrowing_fraction = 0.5        # a lead that shrinks by more than half between the last two points: extend or tie
+bootstrap_resamples = 10000
+bootstrap_seed = 0
+
+[signature]
+signed_by = ""
+date = ""

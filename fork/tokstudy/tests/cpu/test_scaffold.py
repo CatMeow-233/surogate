@@ -21,7 +21,19 @@ REPO = TOKSTUDY.parents[1]
 SRC = TOKSTUDY / "src"
 PACKAGE = SRC / "surogate_tokstudy"
 
-PLANNED_COMMANDS = ["arms", "intrinsic", "align", "train", "branch", "eval", "probe", "verdict", "flops", "bench"]
+PLANNED_COMMANDS = [
+    "arms",
+    "intrinsic",
+    "align",
+    "stream",
+    "train",
+    "branch",
+    "eval",
+    "probe",
+    "verdict",
+    "flops",
+    "bench",
+]
 STEPS = {f"S{n}" for n in range(8, 18)}
 
 
