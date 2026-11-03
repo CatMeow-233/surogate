@@ -112,8 +112,8 @@ GRPO 补丁（T6–T8、T11、T12、T28）和 T10 的 dispatch-PP 拒绝调用�
 - [docs/upstream-errata.md](docs/upstream-errata.md)：上游已知的失效引用、过时配置和测试缺陷；fork 不修改这些上游文件，只记录绕行方法。
 - [tlc/README.md](tlc/README.md)：TLC 包的目录、环境、命令行与 P0 的行；[tlc/docs/](tlc/docs/) 中是模型目录与 checkpoint 契约、初始化与 Mamba-2 数值参照（model.md），语料、去污染、合成绑定任务、tokenizer 与数据 shard（data.md），训练驱动与评测（training.md），RTX 5090 运行手册与 GPU 预算（runbook.md），以及实测记录（measurements.md）。
 - [bilingual/README.md](bilingual/README.md)：双语独立专家包的目录、环境、命令行与实现步骤；[bilingual/docs/](bilingual/docs/) 中是决定记录与数据契约（spec.md）、RTX 5090 运行手册（runbook.md）和实测记录（measurements.md）。
-- [corpora/README.md](corpora/README.md)：语料适配器包的目录、环境、命令行、固定来源与 profile、导出格式，以及不提交真实数据的规则。
-- [tokstudy/README.md](tokstudy/README.md)：分词器研究包的目录、环境、导入边界与实现步骤的状态。
+- [corpora/README.md](corpora/README.md)：语料适配器包的目录、环境、命令行、固定来源与 profile、导出格式、由几个导出合成项目语料 spec 的 `compose`，以及不提交真实数据的规则。
+- [tokstudy/README.md](tokstudy/README.md)：分词器研究包的目录、环境、导入边界、tokenizer 交接（两张表的臂登记在 [tokstudy/arms/](tokstudy/arms/)）与实现步骤的状态；[tokstudy/docs/runbook.md](tokstudy/docs/runbook.md) 是备料、交接与 RTX 5090 上分词器比较的运行手册，[tokstudy/docs/measurements.md](tokstudy/docs/measurements.md) 是实测记录。
 - [experimental/README.md](experimental/README.md) 与 [experimental/docs/training.md](experimental/docs/training.md)：实验训练器的安装、配置和发布产物。
 
 ## 规则

@@ -266,3 +266,30 @@ def test_evaluation_accepts_a_run_of_another_commit_and_continuing_it_does_not(t
     header, rows = E.read_nll(out["nll"])
     assert header["run_id"] == result["run_id"] and header["eval_code"]["commit"] == "f" * 40
     assert header["run_code"] == result["code"] and len(rows) == 5
+
+
+def test_tlc_native_writer_of_tokstudy_nll_has_the_same_fields_and_domains(tmp_path):
+    """TLC's `eval --dump-nll` (surogate_tlc.eval.loss, the native table's writer) and this package agree on the
+    neutral format without importing each other: the TLC source is read as text, its DocNLL fields, format name and
+    domains (those of docs.tlc_documents: code sources "py", text sources "en") compared with this package's; a line
+    in TLC's layout reads back through read_nll."""
+    import ast
+    import dataclasses
+
+    loss_py = Path(__file__).resolve().parents[3] / "tlc" / "src" / "surogate_tlc" / "eval" / "loss.py"
+    tree = ast.parse(loss_py.read_text(encoding="utf-8"))
+    constants = {n.targets[0].id: ast.literal_eval(n.value) for n in tree.body
+                 if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)
+                 and n.targets[0].id in ("NLL_FORMAT", "BACKEND", "DOMAINS")}  # fmt: skip
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "DocNLL")
+    fields = [n.target.id for n in cls.body if isinstance(n, ast.AnnAssign)]
+    assert fields == [f.name for f in dataclasses.fields(E.DocNLL)]
+    assert constants["NLL_FORMAT"] == E.NLL_FORMAT and constants["BACKEND"] == "native"
+    assert constants["DOMAINS"] == {"code": "py", "text": "en"}
+    line = {"key": "val-00000.bin:0", "domain": "py", "bytes": 10, "nll_nats": 1.5, "n_targets": 4, "eos_nats": 0.1,
+            "n_eos": 1, "special_nats": 0.2, "n_special": 2}  # fmt: skip
+    header = {"format": E.NLL_FORMAT, "table": "tlc-T", "backend": "native", "arm": "T0"}
+    path = tmp_path / "T0.nll"
+    path.write_text(json.dumps(header) + "\n" + json.dumps(line, sort_keys=True) + "\n", encoding="utf-8")
+    read_header, rows = E.read_nll(path)
+    assert read_header["backend"] == "native" and rows == [E.DocNLL(**line)]

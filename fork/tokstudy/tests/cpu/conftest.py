@@ -15,6 +15,7 @@ repository's Python `surogate` package (no native extension), which this process
 import importlib
 import json
 import os
+import random
 import subprocess
 import sys
 from pathlib import Path
@@ -165,3 +166,75 @@ def tlc_model_dir(tmp_path_factory):
 def tlc_default_config(tmp_path_factory) -> dict:
     """TLC's config.json for row A0 at its default geometry (surogate_tlc.hf.row_config("A0"))."""
     return json.loads(run_tlc(tmp_path_factory.mktemp("tlc-config"), {}, "config"))
+
+
+# --- a SYNTHETIC TLC corpus ------------------------------------------------------------------------------------------
+
+TEXTS = (
+    "Intro line.\n```python\nx = 1\r\ny = 'é'\n```\nAfter the block.\n",
+    "Open fence never closed:\n```\nprint('<|eos|> stays text')\n",
+    "No code at all, just prose about 变量 and 🙂.\r\n",
+    "  ```js\nlet a = 2;\n```\n```\nsecond block\n```\ntail\n",
+)
+
+
+def write_tlc_corpus(root: Path, n_code: int = 60) -> Path:
+    """A TLC corpus spec with a code source (groups of 3) and a text source with fences: SYNTHETIC FIXTURE."""
+    root.mkdir(parents=True, exist_ok=True)
+    code = [{"text": f"def f{i}(x):\n    return x * {i}  # <|code_end|>\n", "group": f"repo{i // 3}"}
+            for i in range(n_code)]  # fmt: skip
+    (root / "code.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in code) + "\n", "utf-8")
+    text = [{"text": TEXTS[i % len(TEXTS)] + f"doc {i}\n"} for i in range(24)]
+    (root / "text.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in text) + "\n", "utf-8")
+    source = ('[[source]]\nname = "{0}"\nkind = "{1}"\nfiles = ["{0}.jsonl"]\nurl = "SYNTHETIC FIXTURE"\n'
+              'license = "SYNTHETIC FIXTURE"\ndownloaded = "2026-11-03"\nfilters = []\n')  # fmt: skip
+    (root / "spec.toml").write_text("seed = 5\nval_fraction = 0.25\n" + source.format("code", "code")
+                                    + source.format("text", "text"), encoding="utf-8")  # fmt: skip
+    return root / "spec.toml"
+
+
+@pytest.fixture(scope="session")
+def tlc_corpus_writer():
+    return write_tlc_corpus
+
+
+# --- a SYNTHETIC bilingual corpus through the project's own pipeline -------------------------------------------------
+
+
+def _han(rng, n):
+    return "".join(chr(0x4E00 + rng.randrange(0, 2000)) for _ in range(n))
+
+
+def _words(rng, n):
+    return " ".join(rng.choice(["alpha", "beta", "gamma", "delta", "x1", "2026"]) for _ in range(n))
+
+
+@pytest.fixture(scope="session")
+def bilingual_built(tmp_path_factory):
+    """manifest -> split -> materialize -> tokenizer with the bilingual project's own code, on a SYNTHETIC corpus."""
+    from surogate_bilingual.data import manifest, split, tokenizer
+
+    rng = random.Random(7)
+    base = tmp_path_factory.mktemp("bilingual")
+    corpus = base / "corpus"
+    corpus.mkdir()
+    zh = [{"id": f"z{i}", "text": _han(rng, 20) + "，" + _han(rng, 8) + "。"} for i in range(60)]
+    en = [{"id": f"e{i}", "text": _words(rng, 15) + ", <|en|> stays text."} for i in range(60)]
+    cs = [{"id": f"c{i}", "segments": [{"lang": "zh", "text": _han(rng, 6)}, {"tag": "<|en|>"},
+                                       {"lang": "en", "text": _words(rng, 4)}]} for i in range(10)]  # fmt: skip
+    for name, rows in (("zh", zh), ("en", en), ("cs", cs)):
+        (corpus / f"{name}.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
+                                             encoding="utf-8")  # fmt: skip
+    (corpus / "spec.toml").write_text(
+        '[[source]]\nname = "zh-fix"\nkind = "zh"\nfiles = ["zh.jsonl"]\nlicence = "CC0-1.0"\n'
+        '[[source]]\nname = "en-fix"\nkind = "en"\nfiles = ["en.jsonl"]\nlicence = "CC0-1.0"\n'
+        '[[source]]\nname = "cs-fix"\nkind = "codeswitch"\nfiles = ["cs.jsonl"]\nlicence = "CC0-1.0"\n',
+        encoding="utf-8",
+    )
+    m = manifest.load_manifest(manifest.build_manifest(corpus / "spec.toml", corpus, base / "manifest.json"))
+    s = split.split_doc(m.iter_docs(), split.default_fractions(), seed=1, manifest_sha256=m.sha256)
+    derived_path = split.write_split_corpora(m, s, base / "splits")
+    derived = manifest.load_manifest(derived_path)
+    files = [derived.root / e["path"] for e in derived.files(split="seed_train")]
+    tok_path = tokenizer.train_tokenizer(files, 400, base / "tok" / "tokenizer.json", derived)
+    return derived_path, derived, tok_path

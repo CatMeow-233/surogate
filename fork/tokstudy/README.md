@@ -11,8 +11,8 @@
 | 步骤 | 内容 | 命令 | 状态 |
 |---|---|---|---|
 | S0 | 包骨架、`fork/dev test tokstudy`、CI、导入边界测试 | — | 已落地 |
-| S6、S7（构建器部分） | 项目内的生产 tokenizer 构建器：TLC 的 freqtrim 与 `python-digit`（[fork/tlc/docs/data.md 的“freqtrim”](../tlc/docs/data.md#freqtrim)），双语的 `tokenizer.pretokenizer`（[fork/bilingual/docs/spec.md](../bilingual/docs/spec.md)） | 各项目的 `tokenizer` 命令 | 已落地；双语的 `RoutedLM.forward_hidden`/`logits` 随 S11–S12 落地；TLC 的按字节 BPB 与双语的 `length_unit` 未落地 |
-| S8 | 臂登记与编解码器 | `arms` | 已落地 |
+| S6、S7 | 项目内的改动：TLC 的 freqtrim 与 `python-digit`（[fork/tlc/docs/data.md 的“freqtrim”](../tlc/docs/data.md#freqtrim)）、原生的按字节 BPB 与 `eval --dump-nll`（[fork/tlc/docs/training.md 的“评测”](../tlc/docs/training.md#评测)）；双语的 `tokenizer.pretokenizer`、`RoutedLM.forward_hidden`/`logits` 与 `eval.length_unit`（[fork/bilingual/docs/spec.md](../bilingual/docs/spec.md)） | 各项目的 `tokenizer`、`eval`、`eval-tasks` 命令 | 已落地 |
+| S8 | 臂登记与编解码器 | `arms` | 已落地；提交进仓库的两张表的登记 [arms/tlc.toml](arms/tlc.toml) 与 [arms/bilingual.toml](arms/bilingual.toml) 等 tokenizer 建好后 `--pin`（见下文“tokenizer 交接”） |
 | S9 | 文档、分帧、训练流 | `stream` | 已落地（见下文“文档与训练流”）；TLC 的 `force_lexeme_starts` 消融未落地 |
 | S10 | 内在指标与教师对齐（只作 CPU 初筛，不作判定依据） | `intrinsic`、`align` | 已落地 |
 | S11–S12 | SSD/EMA/卷积 kernel、Mamba-2、A0 孪生（TW-1）、H-Net、LM 包装、双语 trunk 适配器、由臂构建模型 | — | CPU 上已落地（见下文“模型与内核”）；`triton` 路线与 G0-ts 未在 GPU 上运行 |
@@ -20,11 +20,14 @@
 | S14 | 训练循环（按 FLOP 进度的 WSD 与衰减分支） | `train`、`branch` | CPU 上已落地（见下文“训练”）；GPU 上未运行 |
 | S15 | 评测（公共字节前缀上的 BPB）与探针 | `eval`、`probe` | BPB 部分已落地（见下文“评测”）；探针 `probe` 与分段带状态打分未落地 |
 | S16 | 统计、预注册与判定 | `verdict` | 运行登记、预注册文件的读取与锁定已落地（见下文“运行登记与预注册”）；统计与判定 `verdict` 未落地 |
-| S17 | GPU：G0-ts、G0.5-ts、kernel 一致性、孪生门 | `bench` | 未运行 |
+| S17 | GPU：G0-ts、G0.5-ts、kernel 一致性、孪生门 | `bench` | 未运行；步骤见 [运行手册](docs/runbook.md) |
+| 接线（工作流 S5） | 导出 → 项目语料 spec（[fork/corpora](../corpora/README.md) 的 `compose`）、tokenizer 交接（`arms --pin`）、运行手册与实测记录、各项目文档中的 owner 决定 | `arms --pin`、`arms --tlc/--bilingual` | 已落地；备料与 GPU 步骤未运行 |
 
 未落地的命令以退出码 2 报出所属步骤（`python -m surogate_tokstudy` 列出全部命令）。
 
 工作流的 S2（“tokenizer 构建器与内在指标”）对应实现规格的 S6、S7 中的 tokenizer 构建器部分，以及 S8、S10；S9 当时只落地了 S10 需要的文档类型。工作流的 S3（“字节级动态分块模型与子词 LM，同一后端，CPU 验证”）对应实现规格的 S11、S12，以及 S7 中双语的 `forward_hidden`/`logits`；臂到模型的构建（`models.build`）是规格未单列、训练步骤（S14）要用的入口。工作流的 S4（“pilot 训练器、BPB 评测、运行登记”）对应实现规格 S9 的其余部分（按项目分帧、截断、训练流）、S13、S14、S15 中的 BPB 部分，以及 S16 中的运行登记与预注册的读取、锁定；S15 的探针、S16 的统计与判定、S6 中 TLC 原生的按字节 BPB、S7 中双语的 `eval.length_unit` 不在其中。
+
+工作流的 S5（“按项目接线：导出到两个项目的语料格式与 tokenizer 交接；文档、运行手册与各项目文档中的 owner 决定”）对应实现规格 S6 中 TLC 原生的按字节 BPB（`surogate_tlc.eval.loss`）、S7 中双语的 `eval.length_unit` 与研究期间的去污染规则（文档），§1.3 的 tokenizer 交接（`handoff.py`、两张表的登记），§10 的运行手册（[docs/runbook.md](docs/runbook.md)）与 [docs/measurements.md](docs/measurements.md)；另加规格没有的 `surogate_corpora compose`。S15 的探针、S16 的统计与判定仍未落地。
 
 ## 测量契约
 
@@ -66,6 +69,8 @@ CPU 上的验证（`tests/cpu/test_kernels.py`、`tests/cpu/test_models.py`，fp
 
 ```bash
 python -m surogate_tokstudy arms arms/tlc.toml
+python -m surogate_tokstudy arms arms/tlc.toml --pin --tlc CORPUS/spec.toml --record handoff.json
+python -m surogate_tokstudy arms arms/bilingual.toml --bilingual SPLITS/manifest.json
 python -m surogate_tokstudy intrinsic --arms arms/tlc.toml --docs py=PY.jsonl --docs en=EN.jsonl --out intrinsic.json
 python -m surogate_tokstudy intrinsic --tokenizer qwen=DIR/tokenizer.json@SHA256 --drop-normalizer --bytes bytes \
     --docs en=rows_en.json --docs zh=rows_zh.json --docs py=rows_py.json --out intrinsic.json
@@ -81,10 +86,19 @@ python -m surogate_tokstudy eval prefix --arms arms/tlc.toml --prereg prereg/tlc
 python -m surogate_tokstudy eval score RUNS/tlc-N/N1-s0-<run id> --point 0.5 --evalset EVALSET --out N1-s0-E0.5.nll
 ```
 
-- **`arms`**：读取臂登记 `tokstudy-arms/1`（格式见 `surogate_tokstudy.arms` 的模块说明）：一个文件只放一张表（`tlc-N` 或 `bilingual-B`），表决定项目的特殊 id 与主网络（`twin_a0`、`bilingual_trunk`）；逐个核对 tokenizer 的 sha256 与特殊 id，拒绝重复的 id、第二张表、未知的键与种类、字节臂或 H-Net 臂带 tokenizer。`arm_sha256` 取臂的规范 JSON，其中 tokenizer 只记 sha256，所以移动文件不改变臂，改变文件内容才改变。真实的 `arms/tlc.toml` 与 `arms/bilingual.toml` 要等各臂的 tokenizer 在 owner 主机上建好、有了 sha256 之后再写，现在还没有。
+- **`arms`**：读取臂登记 `tokstudy-arms/1`（格式见 `surogate_tokstudy.arms` 的模块说明）：一个文件只放一张表（`tlc-N` 或 `bilingual-B`），表决定项目的特殊 id 与主网络（`twin_a0`、`bilingual_trunk`）；逐个核对 tokenizer 的 sha256 与特殊 id，拒绝重复的 id、第二张表、未知的键与种类、字节臂或 H-Net 臂带 tokenizer。`arm_sha256` 取臂的规范 JSON，其中 tokenizer 只记 sha256，所以移动文件不改变臂，改变文件内容才改变。两张表的登记已提交（[arms/tlc.toml](arms/tlc.toml)、[arms/bilingual.toml](arms/bilingual.toml)），子词臂的 sha256 等 tokenizer 在 owner 主机上建好后由 `arms --pin` 写入（见下文“tokenizer 交接”）。
 - **`--docs 领域=路径`**：`.jsonl`（每行一个 JSON 对象，正文在 `text`；fork/corpora 的导出分片与 TLC 的语料 JSONL 都是这种）或 datasets-server 的 rows 响应 `.json`（正文在 `content`）；`--field` 改字段名，`--limit` 限制每个文件的文档数。正文原样使用，不做任何规范化或换行转换。按项目 spec 与划分读取 train 划分（S9）之前，初筛用这两种样本文件。
 - **`intrinsic`**（`tokstudy-intrinsic/1`）：每个臂、每个领域的字节、字符、token 数与比值；汉字数（Unicode Script=Han）与每 token 汉字数；词数（`str.split()`，只在 `--word-domain`，默认 `en`）与每 token 词数；Rényi 效率 H₂.₅(p)/ln|V|；出现过的 token 数与词表利用率；单独看不是合法 UTF-8 的 token 数；数字串（Unicode 十进制数字的极大串）、其字符数与覆盖它们的 token 数；至少有 512（2048）个 token 的文档中前 512（2048）个 token 覆盖的字节数的上中位数；在 `--python-domain`（默认 `py`）上，能被 `ast.parse` 与 stdlib `tokenize` 接受、且词素位置自检无误的段的跨词素率（与两个及以上词素重叠的 token 占比；词素为 NAME、OP、NUMBER、STRING、COMMENT 与 f-string 各部分，空白、换行与缩进不算，同实验笔记的词素口径）与每个标识符的片数。记录所用的 Python 版本，因为 3.12 起 f-string 的切分方式不同。所有计数都是精确整数，比值由它们算出。H-Net 臂没有 token 级的内在指标，列在 `skipped_hnet_arms` 中。
 - **`align`**（`tokstudy-align/1`）：学生 tokenizer 对教师 `tokenizer.json` 的规范切分（教师的 normalizer 去掉，并统计它本会改变的文档数），按实验笔记的对齐原型逐个学生 token 分类：`one_to_one`（与教师 token 重合）、`head`（从教师 token 的开头开始、在其内部结束，即 BPM 的 1:N 头）、`interior`（从教师 token 内部开始，即 1:N 内部）、`cross_boundary`（首字节与末字节落在不同的教师 token 中，BPM 屏蔽这些位置；一个学生 token 盖住几个完整的教师 token 也属于这一类）。另计只由空格与 tab 组成、又不是 `one_to_one` 的学生 token（非恒等全空白行）：研究建议在冻结的 tokenizer 上它占代码领域学生 token 的 0.5% 以上时默认开启全空白行屏蔽 [建议]。这些是初筛读数；权威的 BPM 检查仍是 TLC 的 G-BPM。
+
+## tokenizer 交接
+
+生产用的 tokenizer 都由项目自己建、自己拥有（规格 §1.3）；本包只按路径与 sha256 读取 `tokenizer.json`，并核对它训练于哪份语料（`surogate_tokstudy.handoff`）。
+
+- **登记。** 两张表的臂登记提交在 [arms/](arms/) 中：[arms/tlc.toml](arms/tlc.toml)（N0、N1、N2）与 [arms/bilingual.toml](arms/bilingual.toml)（B0–B5），臂、种子、阶段与模型配置和 prereg 一致（测试检查）。子词臂的 tokenizer 路径相对登记文件，指向检出目录中被 git 忽略的 `data/tokstudy/<项目>/tok/<臂>/tokenizer.json`；sha256 先写成占位符 `unpinned`，`load_arms` 遇到它就拒绝并指出 `--pin`，所以 tokenizer 建好之前任何运行都开始不了。H-Net 臂的 `[arm.model.hnet]` 是按假设的字节/token 匹配的 [估计]，第一次运行之前用实测值重新匹配（[运行手册第 4 步](docs/runbook.md#4-交接项目的-tokenizer-进入臂登记)）。
+- **核对与写入**（`arms REGISTRY --tlc SPEC | --bilingual MANIFEST [--pin] [--record FILE]`）。对每个子词臂读项目自己写在 `tokenizer.json` 旁边的记录：TLC 的 `tokenizer_manifest.json`（`train` 与 `freqtrim` 都写）必须记着该文件的 sha256、给出的 corpus spec 的 sha256 与去污染记录、训练于 train 划分，且没有 normalizer；双语的 `tokenizer.meta.json`（`bilingual-tokenizer/1`）必须记着该文件的 sha256、给出的派生 manifest 的 `manifest_sha256`、训练于 `seed_train`、normalization 为 `none`。表的项目决定要给哪一个参数，给错的、缺记录的、记录对不上的都拒绝。不带 `--pin` 时登记中的 sha256 必须已经等于文件的；带 `--pin` 时只改写每个子词臂那一行 `tokenizer = {path = "...", sha256 = "..."}` 中的 sha256（注释与排版不变；不是这种一行写法就拒绝，文件不动），再按 `load_arms` 重新核对。`--record` 写 `tokstudy-handoff/1`：登记的 sha256、语料身份，以及每个子词臂的 tokenizer sha256 与项目的配方（种类、预分词或正则、词表大小，freqtrim 另记教师的仓库、revision 与文件 sha256）。
+- **反方向（冻结）。** 本包从不写进项目。判定选出的臂的 tokenizer 本来就是项目建的文件，冻结是项目自己的步骤；`handoff.json` 记下冻结的文件必须有的 sha256（[运行手册第 7 步](docs/runbook.md#7-判定与冻结)）。
+- **原生的表。** TLC 子词之间的比较在原生训练器上做；`python -m surogate_tlc eval … --dump-nll` 写同一种 `tokstudy-nll/1`（后端 `native`、表 `tlc-T`），字段与本包的 `DocNLL` 相同（测试按文本读 TLC 的源码比对，两个包互不导入），所以以后的统计（S16）可以读它，但永不与 `tlc-N` 同表。
 
 ## 文档与训练流
 
@@ -138,9 +152,17 @@ H-Net 一行的 FLOPs = 外层（编码器、路由、残差投影、解码器�
 - **行的长度**：规格写“子词行携带 t_arm 个 token”，同时要求两臂的行覆盖同样的字节区间；两者只能择一。这里取后者：行是所有臂共用的 K_train 位置字节窗口，t_arm 作为名义平均长度记录（显存规划用它的上界 K_train）。
 - **FLOPs 口径**：规格的 652,889,088（双语种子每 token）是 `params` 口径；默认的 `matmul` 口径（与 TLC 原生的 `ir.flops_per_token` 一致、F_target 用它）给出 652,738,560，差的是 norm 参数。prereg 记录所用口径。
 - **`stop_after`** 停在该预算点的稳定检查点（0.9·e），即规格所说初筛花费 0.525 F_dec 的读法；分支与“F_target = E 的运行”逐位相同的前提是绝对预热相同。
-- **未落地**：S15 的探针与“分段带状态打分与一次打分相同”（每篇评测文档都在 K_eval 内一次打分，现在没有需要它的路径）；S16 的统计与判定；TLC 的 `force_lexeme_starts` 消融；S6 中 TLC 原生的按字节 BPB 与 `--dump-nll`；S7 中双语的 `eval.length_unit`。
+- **未落地**：S15 的探针与“分段带状态打分与一次打分相同”（每篇评测文档都在 K_eval 内一次打分，现在没有需要它的路径）；S16 的统计与判定；TLC 的 `force_lexeme_starts` 消融。S6 中 TLC 原生的按字节 BPB 与 `--dump-nll`、S7 中双语的 `eval.length_unit` 随工作流的 S5 落地。
 - **双语的 D_seed**：双语项目的 D_seed 混合（Track S、带标签文档等，`surogate_bilingual.data.mixture`）只在写 shard 时生成，不输出文档清单；本包的双语流目前读 `seed_train` 的文档并按中英平衡混合，要与 D_seed 完全一致，需要项目先导出该混合的文档清单 [待定]。
 - **新增**：`stream` 命令（规格的文件树里有 `stream.py` 但命令表中没有）、评测集格式 `tokstudy-evalset/1`、prereg 锁 `tokstudy-prereg-lock/1`、prereg 的 `[stream] measure`。
+
+## 与实现规格的出入（S5）
+
+- **原生 BPB 的键。** 规格只说“每篇文档的 UTF-8 字节”。原生 shard 不记文档键，所以 `--dump-nll` 的键默认是 `<shard 文件>:<序号>`（同一份语料 spec 与去污染报告下各臂的文档顺序相同，同一个键在任何 tokenizer 下字节数都相同），给出 `--corpus` 时改用语料的文档键并逐篇核对字节数。被 `--max-rows` 截断的文档不进 BPB。原生的评测按 512 token 的窗口给整篇文档打分，本包按公共字节前缀一次打分：两张表本来就不混，但 TW-2 两边的上下文因此不同 [待定，运行手册第 5 步]。
+- **`eval.length_unit = byte` 的长度**取候选的 token 所代表的 UTF-8 字节（解码后的文本），在没有 normalizer 时就是“分隔符 + 候选”的字节；每条预测另记 `candidate_bytes`，两种单位的读数都可以事后重算。
+- **交接**：规格只写“按路径与 sha256 读取”；本包另核对项目自己的训练记录（语料身份、划分、无 normalizer），并提供 `--pin` 与 `tokstudy-handoff/1`。两张表的登记现在就提交，sha256 用占位符 `unpinned`。
+- **登记中的取值**：双语各臂的 trunk 设 `max_seq = 4096`（每行 K_train = 4096 个字节位置，H-Net 每字节至多一个 chunk，所以每个臂都要放得下 4096；参数不变，只有位置表变大）；子词臂与 H-Net 臂的种子列出可能用到的全部（M6：|Δ| < 3σ 时补第 3 个），prereg 的 `[seeds]` 记计划的个数。N1 取 2+2 层、d₀ 192（在假设的 3.8 字节/token 下 −0.8%），B4 取 4+4 层、d₀ 256（3.5 字节/token 下 +0.1%）：研究的默认（2+2、d₀ 256；3+3、d₀ 256）在这些假设下超出 ±3%。
+- **新增**：`surogate_corpora compose`（规格只说“把 spec 片段贴进项目 spec”）；`tokstudy-handoff/1`。
 
 ## 实测记录（本地，不进 CI）
 

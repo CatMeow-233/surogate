@@ -1,0 +1,39 @@
+# Arm registry of the tokstudy table tlc-N (fork/tokstudy/docs/runbook.md): N0 is the PyTorch twin of TLC's A0 with the
+# native TOK-AB leader's tokenizer; N1 the H-Net 1-stage on bytes, its main network N0's 12-layer stack; N2 flat bytes
+# on the same stack (a floor, never promoted). The twin of the native runner-up (N0b) and the 4+4 H-Net (N1-4) are
+# conditional arms: adding one changes the table's arm set, so its evalset is rebuilt (runbook, 臂的增减).
+#
+# Tokenizer paths are relative to this file: data/tokstudy/ of the checkout on the owner host (ignored by git). Before
+# the first run of the table: copy the leader's TLC tokenizer directory (tokenizer.json with tokenizer_manifest.json)
+# to data/tokstudy/tlc/tok/leader, run `python -m surogate_tokstudy arms fork/tokstudy/arms/tlc.toml --pin --tlc
+# CORPUS.toml`, re-match [arm.model.hnet] of N1 with `flops --match N1 --reference N0 --bytes-per-token N0=<measured>`,
+# and commit this file. Every value below is a proposal until then.
+format = "tokstudy-arms/1"
+table = "tlc-N"
+
+[[arm]]
+id = "N0"
+kind = "subword"
+tokenizer = {path = "../../../data/tokstudy/tlc/tok/leader/tokenizer.json", sha256 = "unpinned"}
+model = {profile = "a0"}
+seeds = [0, 1, 2]
+stages = ["decision"]
+
+[[arm]]
+id = "N1"
+kind = "hnet"
+seeds = [0, 1, 2]
+stages = ["decision"]
+
+[arm.model]
+profile = "a0"
+# [估计] within +-3 % of N0's FLOPs per byte at an assumed 3.8 bytes/token (README, FLOPs: -0.8 %); ratio is N0's
+# bytes/token. Both are rewritten from the measured value before the first run.
+hnet = {d0 = 192, encoder_layers = 2, decoder_layers = 2, ratio = 3.8}
+
+[[arm]]
+id = "N2"
+kind = "bytes"
+model = {profile = "a0"}
+seeds = [0]
+stages = ["decision"]

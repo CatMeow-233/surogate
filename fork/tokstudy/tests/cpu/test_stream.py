@@ -23,31 +23,6 @@ from surogate_tokstudy.codecs import BILINGUAL_SPECIALS, TLC_SPECIALS, ByteCodec
 
 REPO = Path(__file__).resolve().parents[4]
 
-# --- a SYNTHETIC TLC corpus ------------------------------------------------------------------------------------------
-
-TEXTS = (
-    "Intro line.\n```python\nx = 1\r\ny = 'é'\n```\nAfter the block.\n",
-    "Open fence never closed:\n```\nprint('<|eos|> stays text')\n",
-    "No code at all, just prose about 变量 and 🙂.\r\n",
-    "  ```js\nlet a = 2;\n```\n```\nsecond block\n```\ntail\n",
-)
-
-
-def write_tlc_corpus(root: Path, n_code: int = 60) -> Path:
-    """A TLC corpus spec with a code source (groups of 3) and a text source with fences: SYNTHETIC FIXTURE."""
-    root.mkdir(parents=True, exist_ok=True)
-    code = [{"text": f"def f{i}(x):\n    return x * {i}  # <|code_end|>\n", "group": f"repo{i // 3}"}
-            for i in range(n_code)]  # fmt: skip
-    (root / "code.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in code) + "\n", "utf-8")
-    text = [{"text": TEXTS[i % len(TEXTS)] + f"doc {i}\n"} for i in range(24)]
-    (root / "text.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in text) + "\n", "utf-8")
-    source = ('[[source]]\nname = "{0}"\nkind = "{1}"\nfiles = ["{0}.jsonl"]\nurl = "SYNTHETIC FIXTURE"\n'
-              'license = "SYNTHETIC FIXTURE"\ndownloaded = "2026-11-03"\nfilters = []\n')  # fmt: skip
-    (root / "spec.toml").write_text("seed = 5\nval_fraction = 0.25\n" + source.format("code", "code")
-                                    + source.format("text", "text"), encoding="utf-8")  # fmt: skip
-    return root / "spec.toml"
-
-
 # argv: REPO, spec, out. Trains a TLC tokenizer (300 ids) on the spec's train split with TLC's own recipe, builds
 # TLC's shards and prints, per split, the document keys and the token ids of every served row.
 TLC_SHARDS_SCRIPT = """
@@ -77,9 +52,9 @@ print(json.dumps(result))
 
 
 @pytest.fixture(scope="module")
-def tlc_built(tmp_path_factory):
+def tlc_built(tmp_path_factory, tlc_corpus_writer):
     root = tmp_path_factory.mktemp("tlc-corpus")
-    spec = write_tlc_corpus(root)
+    spec = tlc_corpus_writer(root)
     out = tmp_path_factory.mktemp("tlc-shards")
     command = [sys.executable, "-I", "-B", "-c", TLC_SHARDS_SCRIPT, str(REPO), str(spec), str(out)]
     result = subprocess.run(command, capture_output=True, text=True, timeout=300)
@@ -116,45 +91,6 @@ def test_tlc_documents_refuse_an_unknown_split(tlc_built):
 
 
 # --- the bilingual pipeline ------------------------------------------------------------------------------------------
-
-
-def _han(rng, n):
-    return "".join(chr(0x4E00 + rng.randrange(0, 2000)) for _ in range(n))
-
-
-def _words(rng, n):
-    return " ".join(rng.choice(["alpha", "beta", "gamma", "delta", "x1", "2026"]) for _ in range(n))
-
-
-@pytest.fixture(scope="module")
-def bilingual_built(tmp_path_factory):
-    """manifest -> split -> materialize -> tokenizer with the bilingual project's own code, on a SYNTHETIC corpus."""
-    from surogate_bilingual.data import manifest, split, tokenizer
-
-    rng = random.Random(7)
-    base = tmp_path_factory.mktemp("bilingual")
-    corpus = base / "corpus"
-    corpus.mkdir()
-    zh = [{"id": f"z{i}", "text": _han(rng, 20) + "，" + _han(rng, 8) + "。"} for i in range(60)]
-    en = [{"id": f"e{i}", "text": _words(rng, 15) + ", <|en|> stays text."} for i in range(60)]
-    cs = [{"id": f"c{i}", "segments": [{"lang": "zh", "text": _han(rng, 6)}, {"tag": "<|en|>"},
-                                       {"lang": "en", "text": _words(rng, 4)}]} for i in range(10)]  # fmt: skip
-    for name, rows in (("zh", zh), ("en", en), ("cs", cs)):
-        (corpus / f"{name}.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
-                                             encoding="utf-8")  # fmt: skip
-    (corpus / "spec.toml").write_text(
-        '[[source]]\nname = "zh-fix"\nkind = "zh"\nfiles = ["zh.jsonl"]\nlicence = "CC0-1.0"\n'
-        '[[source]]\nname = "en-fix"\nkind = "en"\nfiles = ["en.jsonl"]\nlicence = "CC0-1.0"\n'
-        '[[source]]\nname = "cs-fix"\nkind = "codeswitch"\nfiles = ["cs.jsonl"]\nlicence = "CC0-1.0"\n',
-        encoding="utf-8",
-    )
-    m = manifest.load_manifest(manifest.build_manifest(corpus / "spec.toml", corpus, base / "manifest.json"))
-    s = split.split_doc(m.iter_docs(), split.default_fractions(), seed=1, manifest_sha256=m.sha256)
-    derived_path = split.write_split_corpora(m, s, base / "splits")
-    derived = manifest.load_manifest(derived_path)
-    files = [derived.root / e["path"] for e in derived.files(split="seed_train")]
-    tok_path = tokenizer.train_tokenizer(files, 400, base / "tok" / "tokenizer.json", derived)
-    return derived_path, derived, tok_path
 
 
 def test_bilingual_documents_match_the_shard_writer_and_the_split(bilingual_built):
@@ -349,8 +285,8 @@ def test_rows_of_two_arms_cover_the_same_byte_spans_in_the_same_order(tmp_path, 
     assert c > 1 and S.t_arm(48, c) % 8 == 0
 
 
-def test_stream_command_line(tmp_path):
-    spec = write_tlc_corpus(tmp_path / "corpus")
+def test_stream_command_line(tmp_path, tlc_corpus_writer):
+    spec = tlc_corpus_writer(tmp_path / "corpus")
     prereg = tmp_path / "prereg.toml"
     prereg.write_text('format = "tokstudy-prereg/1"\ntable = "tlc-N"\n[budget]\nF_target = 1e9\n'
                       '[context]\nK_train = 64\nK_eval = 64\n[mixture]\npy = 0.7\nen = 0.3\n', encoding="utf-8")  # fmt: skip

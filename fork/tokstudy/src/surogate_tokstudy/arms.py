@@ -34,6 +34,7 @@ from .canonical import TokstudyError, check_format, check_sha256_value, sha256_f
 from .codecs import PROJECT_SPECIALS, ByteCodec, Codec, SubwordCodec
 
 TABLES = {"tlc-N": ("tlc", "twin_a0"), "bilingual-B": ("bilingual", "bilingual_trunk")}
+PLACEHOLDER = "unpinned"  # the sha256 of a committed registry's tokenizer before `arms --pin` writes it (handoff.py)
 KINDS = ("subword", "bytes", "hnet")
 ARM_KEYS = {"id", "kind", "tokenizer", "specials", "model", "main", "seeds", "stages"}
 
@@ -89,6 +90,10 @@ def _arm(table: str, entry: Mapping[str, Any], base: Path) -> ArmSpec:
     if tokenizer is not None:
         if not isinstance(tokenizer, Mapping) or set(tokenizer) != {"path", "sha256"}:
             raise TokstudyError(f"{where}: tokenizer = {{path, sha256}}")
+        if tokenizer["sha256"] == PLACEHOLDER:
+            raise TokstudyError(f"{where}: its tokenizer is not pinned yet: build it with the project's tokenizer "
+                                "command, then `python -m surogate_tokstudy arms REGISTRY --pin --tlc SPEC` (or "
+                                "--bilingual MANIFEST) writes its sha256")  # fmt: skip
         ref = TokRef((base / tokenizer["path"]).resolve(), check_sha256_value(tokenizer["sha256"], where))
         if not ref.path.is_file():
             raise TokstudyError(f"{where}: {ref.path} does not exist")
@@ -151,8 +156,21 @@ def codec_for(arm: ArmSpec, *, check: bool = False) -> Codec | None:
 def main(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(prog="python -m surogate_tokstudy arms", description="load and check a registry")
     parser.add_argument("registry", type=Path)
+    parser.add_argument("--tlc", type=Path, help="hand-off check: the TLC corpus spec the table's stream reads")
+    parser.add_argument("--bilingual", type=Path, help="hand-off check: the bilingual derived manifest it reads")
+    parser.add_argument("--pin", action="store_true", help="write every subword arm's tokenizer sha256")
+    parser.add_argument("--record", type=Path, help="also write the tokstudy-handoff/1 record to this file")
     args = parser.parse_args(list(argv))
     try:
+        if args.tlc or args.bilingual or args.pin or args.record:
+            from .handoff import handoff
+
+            doc = handoff(args.registry, tlc=args.tlc, bilingual=args.bilingual, pin=args.pin, record=args.record)
+            for arm in doc["arms"]:
+                p = arm["provenance"]
+                recipe = p.get("regex") or p.get("pretokenizer")
+                print(f"{arm['id']}\t{arm['tokenizer']['sha256']}\t{p['kind']} {recipe} vocab {p['vocab_size']}"
+                      + ("\tpinned" if arm["id"] in doc["pinned"] else ""))  # fmt: skip
         arms = load_arms(args.registry)
         for arm in arms:
             codec = codec_for(arm)

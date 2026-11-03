@@ -1,0 +1,66 @@
+# Arm registry of the tokstudy table bilingual-B (fork/tokstudy/docs/runbook.md), every arm on the real bilingual
+# trunk (pilot geometry, no expert) with rows of K_train = 4096 byte positions, hence max_seq 4096:
+#   B0  BBPE 32,768, bytelevel (today's tokenizer default; the reference)   B1  BBPE 16,384, bytelevel
+#   B2  BBPE 32,768, qwen2-digits                                           B3  BBPE 32,768, han-isolate
+#   B4  H-Net 1-stage on bytes, the trunk as its main network               B5  flat bytes (a floor, screening only)
+# B0-B3 are trained by the bilingual project on seed_train of the study's derived manifest:
+#   python -m surogate_bilingual tokenizer train --manifest data/splits/manifest.json --vocab V --pretokenizer P \
+#     --out data/tokstudy/bilingual/tok/Bk/tokenizer.json
+# Tokenizer paths are relative to this file (data/ of the checkout, ignored by git). Before the first run: train the
+# four tokenizers, run `python -m surogate_tokstudy arms fork/tokstudy/arms/bilingual.toml --pin --bilingual
+# data/splits/manifest.json`, re-match B4's [arm.model.hnet] from B0's measured bytes/token, and commit this file.
+# Seeds list every seed an arm may get (M6: a third when |delta| < 3 sigma); the prereg's [seeds] counts the planned.
+format = "tokstudy-arms/1"
+table = "bilingual-B"
+
+[[arm]]
+id = "B0"
+kind = "subword"
+tokenizer = {path = "../../../data/tokstudy/bilingual/tok/B0/tokenizer.json", sha256 = "unpinned"}
+model = {profile = "pilot", overrides = {max_seq = 4096}}
+seeds = [0, 1, 2]
+stages = ["screen", "decision"]
+
+[[arm]]
+id = "B1"
+kind = "subword"
+tokenizer = {path = "../../../data/tokstudy/bilingual/tok/B1/tokenizer.json", sha256 = "unpinned"}
+model = {profile = "pilot", overrides = {max_seq = 4096}}
+seeds = [0, 1, 2]
+stages = ["screen", "decision"]
+
+[[arm]]
+id = "B2"
+kind = "subword"
+tokenizer = {path = "../../../data/tokstudy/bilingual/tok/B2/tokenizer.json", sha256 = "unpinned"}
+model = {profile = "pilot", overrides = {max_seq = 4096}}
+seeds = [0, 1, 2]
+stages = ["screen", "decision"]
+
+[[arm]]
+id = "B3"
+kind = "subword"
+tokenizer = {path = "../../../data/tokstudy/bilingual/tok/B3/tokenizer.json", sha256 = "unpinned"}
+model = {profile = "pilot", overrides = {max_seq = 4096}}
+seeds = [0, 1, 2]
+stages = ["screen", "decision"]
+
+[[arm]]
+id = "B4"
+kind = "hnet"
+seeds = [0, 1, 2]
+stages = ["screen", "decision"]
+
+[arm.model]
+profile = "pilot"
+overrides = {max_seq = 4096}
+# [估计] within +-3 % of B0's FLOPs per byte at an assumed 3.5 bytes/token (README, FLOPs: +0.1 %); rewritten from the
+# measured value before the first run.
+hnet = {d0 = 256, encoder_layers = 4, decoder_layers = 4, ratio = 3.5}
+
+[[arm]]
+id = "B5"
+kind = "bytes"
+model = {profile = "pilot", overrides = {max_seq = 4096}}
+seeds = [0]
+stages = ["screen"]

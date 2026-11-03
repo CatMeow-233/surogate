@@ -17,7 +17,7 @@
 | S4 | 导出与 provenance `export`、检查 `verify` | 已落地 |
 | S5 | 可续跑的抓取循环 `run`、命令行、样本校验 | 已落地 |
 | 接线（工作流 S5） | `compose`：把几个导出目录合成一份项目语料 spec（路径改写、逐个 `verify`、按字节的配比） | 已落地 |
-| 备料 | 在 owner 主机上按各 profile 的预算 `plan` → `fetch` → `verify` → `compose`，再走各项目自己的去污染与划分 | 未运行 |
+| 备料 | 在 owner 主机上按各 profile 的预算 `plan` → `fetch` → `verify` → `compose`，再走各项目自己的去污染与划分（[fork/tokstudy/docs/runbook.md](../tokstudy/docs/runbook.md) 第 1–2 步） | 未运行 |
 
 工作流的 S1（“骨架加语料适配器”）对应实现规格的 S0 到 S5：S0 单独一个提交，S1–S5 一个提交。
 工作流的 S5（“按项目接线”）加了 `compose`：实现规格只说“把 spec 片段贴进项目 spec”，片段里的路径相对各自的导出目录，几个导出合成一份 spec 时要逐个改写，`compose` 把这一步做成可检查的命令。
