@@ -170,6 +170,7 @@ $K -m surogate_tokstudy eval prefix --arms fork/tokstudy/arms/bilingual.toml --p
     --bilingual data/splits/manifest.json --out data/tokstudy/bilingual/evalset
 ```
 
+- **评测集只用自然文本。** `eval prefix` 默认去掉生成来源的留出文档：TLC spec 中 `generated = true` 的合成绑定程序，双语 kind 为 `synthetic` 的 Track S 成分（研究 §3.5：评测是同分布的 Stack-v3 留出仓库与自然文本）；训练流照常包含它们。清单的 `source.generated_excluded` 记下被排除的来源名；`--include-generated` 只用于另作的读数，不进判定。
 - **LR 扫描（M10）。** 每个结构族（子词、平坦字节、H-Net）3 个学习率 × 10% 的 F_target × 1 个种子，之后固定；H-Net 另扫 `--lambda-outer` ∈ {1, 2, 3}。扫描的运行是另一个运行 id（`--lr` 进入配置哈希），计入判定的试过的配置数。挑战臂与参照相差 < 2% 时各补 3 点再判。
 - **tlc-N。** N0 × 3、N1 × 3、N2 × 1，F_target 为 A0 在 0.8B token 处（1.642e17），每个运行取 0.25、0.5 两个衰减分支。
 - **bilingual-B。** 初筛：B0 × 3、B1–B4 × 2、B5 × 1，`--stage screen`（F_target = F_dec，停在 0.5 的稳定检查点，取 0.25、0.5 两个分支）。判定：B0 与至多两个入围臂（B4 只要不被淘汰就入围），以 `--stage decision` 继续同一个运行到 F_target。
@@ -186,7 +187,7 @@ $K -m surogate_tokstudy train --arms fork/tokstudy/arms/bilingual.toml --arm B2 
 ```
 
 - 原生 TOK-AB 的每个检查点用 `python -m surogate_tlc eval MODEL DATA --dump-nll FILE --arm T1 --corpus "$TLC_RUNS/corpus/corpus.toml"` 写同一种 `tokstudy-nll/1`（表 `tlc-T`、后端 `native`）；按笔记规则 11，它永不与 `tlc-N` 同表。
-- **臂的增减。** N0b（原生第二名的孪生）与 N1-4（4+4 的 H-Net）是条件臂：加进登记会改变表的臂集合，评测集要重建（公共前缀随臂集合变），已有运行的 NLL 文件被拒绝重用，要重新打分（训练不必重跑：臂的 sha256 不因别的臂改变）。
+- **臂的增减。** N0b（原生第二名的孪生）与 N1-4（4+4 的 H-Net）是条件臂：加进登记会改变表的臂集合，评测集要重建（公共前缀随臂集合变）：`eval score` 拒绝臂集合（id 与 `arm_sha256`）与运行当前登记不同的评测集，所以每个运行都要在新评测集上重新打分（训练不必重跑：臂的 sha256 不因别的臂改变）；`verdict` 拒绝同一张表里来自不同评测集（`evalset_sha256` 不同）的 NLL 文件。
 
 ## 7. 判定与冻结
 

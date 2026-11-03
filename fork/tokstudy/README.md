@@ -138,7 +138,7 @@ H-Net 一行的 FLOPs = 外层（编码器、路由、残差投影、解码器�
 
 ## 评测
 
-`eval prefix` 建一张表的评测集（`tokstudy-evalset/1`）：留出文档（TLC 的 val、双语的 dev，或按项目分帧的样本文件）各自截到公共字节前缀，即不超过 K_eval、在字符边界上、表中每个臂都能一次放下的最大前缀（双语 trunk 的 `max_seq` 约束其 token、字节与 H-Net 臂，H-Net 按每字节一个 chunk 的最坏情况计；Mamba 孪生没有限制）；token 数不一定随前缀单调，所以从上往下逐个字符边界检查，第一个可行的就是最大值。前缀与文档一起存入 `docs.jsonl`，清单记下所用的臂及其 `arm_sha256`；评测集未列出的臂（或 sha256 不同的臂）的运行被拒绝，所以评测上下文不会因臂集不同而改变。双语混语文档不进评测集；`--max-docs` 在每个领域按秩键取前若干篇。
+`eval prefix` 建一张表的评测集（`tokstudy-evalset/1`）：留出文档（TLC 的 val、双语的 dev，或按项目分帧的样本文件）各自截到公共字节前缀，即不超过 K_eval、在字符边界上、表中每个臂都能一次放下的最大前缀（双语 trunk 的 `max_seq` 约束其 token、字节与 H-Net 臂，H-Net 按每字节一个 chunk 的最坏情况计；Mamba 孪生没有限制）；token 数不一定随前缀单调，所以从上往下逐个字符边界检查，第一个可行的就是最大值。前缀与文档一起存入 `docs.jsonl`，清单记下所用的臂及其 `arm_sha256`；`eval score` 拒绝两种情形：评测集未列出该运行的臂（或其 sha256 不同），以及评测集的臂集合（id 与 `arm_sha256`）与该运行当前的登记不同（臂增删之后要用 `eval prefix` 重建评测集、重新打分）；同一张表里来自不同评测集的 NLL 文件由 `verdict` 拒绝。双语混语文档不进评测集；生成的来源（TLC 的 `generated = true`、双语 kind 为 `synthetic` 的 Track S）默认不进评测集，`--include-generated` 才保留，清单的 `source.generated_excluded` 记下被排除的来源名；`--max-docs` 在每个领域按秩键取前若干篇。
 
 `eval score` 给一个运行的一个预算点打分（1 为 `final.pt`，其余为对应分支的 `final.pt`），写 `tokstudy-nll/1`：首行为表头（表、后端 `tokstudy-torch`、臂与其 sha256、运行 id、种子、预算点、检查点及其 sha256、步数、F、π、K_eval、评测集 sha256、精度），之后每篇文档一行：文本字节、来自文本段的目标的 NLL 之和（nats）与个数，另列 `<eos>` 目标（敏感性变体）与其他特殊 token 目标的 NLL。每篇文档一次前向（按长度分批、右侧补齐；因果，补齐不影响真实位置）；要求第一个位置是特殊 token，并核对文本 token 的字节之和等于文档的文本字节。BPB(领域) = Σ nll_nats /(ln 2 × Σ 字节)，按字节加权；双语只在同一语言内比较。评测不要求与训练时相同的代码 commit：运行 id 用记录中的 commit 重算（其余输入照样核对），表头另记评测时的 commit；续训与衰减分支则要求同一 commit。测试：均匀 logits 的模型在两张表的六种模型上都给出 n_text_targets · ln V /(ln 2 · 字节)；零合并 BPE 上的 `SubwordLM` 与权重相同（行按 BPE 的 id 重排）的 `ByteLM` 给出相同的逐文档 NLL；分批与单篇结果相同；公共前缀等于暴力枚举的最大可行边界。
 
@@ -191,7 +191,7 @@ CPU 测试 `fork/dev test tokstudy` 用 `FORK_PY`（默认根目录 `.venv`）�
 |---|---|---|
 | 全部模块 | 标准库、numpy、torch、tokenizers、safetensors | `surogate`、`surogate._fork`、`surogate_corpora` |
 | `surogate_tokstudy.kernels` | 另加 `mamba_ssm`，只能在 `try/except ImportError` 中 | — |
-| `surogate_tokstudy.docs` | 另加 `surogate_tlc.data.corpus`、`surogate_bilingual.data.docs` | 项目的其他模块 |
+| `surogate_tokstudy.docs` | 另加 `surogate_tlc.data.corpus`、`surogate_bilingual.data.docs`、`surogate_bilingual.data.manifest`（派生 manifest 用项目自己的 `load_manifest` 读，按内容重算 `manifest_sha256`） | 项目的其他模块 |
 | `surogate_tokstudy.models.trunk_bilingual` | 另加 `surogate_bilingual.model.lm`、`surogate_bilingual.config` | 项目的其他模块 |
 | 测试 | 另可按路径加载 `fork/tlc/prototypes/ref_mamba2.py`，并导入 `surogate_tlc.ir`、两个项目的 tokenizer 与 shard 模块；TLC 模型目录由 TLC 自己的代码在独立的解释器中写出（它的初始化要用仓库里的 Python `surogate` 包编译 IR，本进程从不导入该包） | — |
 

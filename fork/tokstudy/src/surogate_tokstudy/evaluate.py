@@ -4,10 +4,14 @@
 sample files), each cut to `common_prefix_bytes`: the largest k <= K_eval text bytes, at a character boundary, such
 that every arm of the table's registry can hold truncate(doc, k) in one pass (the bilingual trunk's max_seq for its
 token, byte and H-Net arms, the H-Net bounded at one chunk per byte; the Mamba twin has no limit). The prefix is
-computed once from the registry and stored with the documents (`docs.jsonl`) and the arms it was computed for; a
-run of an arm the evalset does not list (another arm sha256) is refused, so a different evaluation context can never
-enter through a different arm set. Bilingual documents that mix languages are left out: BPB is compared within one
-language. `--max-docs` takes, per domain, the documents of lowest rank sha256("<seed>\\0<key>").
+computed once from the registry and stored with the documents (`docs.jsonl`) and the arms it was computed for
+(id and arm sha256 of every arm). `eval score` refuses an evalset whose arm set differs from the run's current
+registry (an arm added, dropped or changed: the prefix depends on every arm's codec and positional limit, so the
+prefix is recomputed with `eval prefix` and the older NLL files are not mixed with the new ones; the verdict refuses
+NLL files of different evalsets in one table). Bilingual documents that mix languages are left out: BPB is
+compared within one language. Documents of generated sources (TLC `generated = true`, bilingual kind "synthetic")
+are left out unless `--include-generated` is given; the evalset's source records which sources were excluded.
+`--max-docs` takes, per domain, the documents of lowest rank sha256("<seed>\\0<key>").
 
 **Scoring** (`eval score`, `tokstudy-nll/1`). One forward pass per document (batched with right padding; causal, so
 padding never reaches a real position). A document is its segments encoded one by one (specials as their ids); the
@@ -345,6 +349,15 @@ def evaluate_point(
             f"arm {s.arm.id} (sha256 {arm_sha256(s.arm)}) is not an arm the evalset's common prefix "
             "was computed for; rebuild the evalset for the table's current arms"
         )
+    current = {a.id: arm_sha256(a) for a in load_arms(Path(s.record["arm"]["registry"]["path"]))}
+    if listed != current:
+        changed = sorted(
+            set(listed) ^ set(current) | {i for i in set(listed) & set(current) if listed[i] != current[i]}
+        )
+        raise TokstudyError(
+            f"the evalset's common prefix was computed for another arm set than the table's registry now holds "
+            f"(differs in {changed}); rebuild it with `eval prefix` and rescore every arm on the new evalset"
+        )
     if manifest["k_eval"] != s.prereg.k_eval:
         raise TokstudyError(f"the evalset has K_eval {manifest['k_eval']}, the prereg {s.prereg.k_eval}")
     path = train.point_checkpoint(run_dir, endpoint)
@@ -381,12 +394,14 @@ def _docs(args) -> tuple[list[EvalDoc], dict[str, Any]]:
     given = [x for x in (args.tlc, args.bilingual) if x is not None] + (["plain"] if args.docs else [])
     if len(given) != 1:
         raise TokstudyError("give exactly one of --tlc SPEC, --bilingual MANIFEST or --docs DOMAIN=PATH")
+    gen = args.include_generated
     if args.tlc is not None:
         split = args.split or "val"
-        return list(tlc_documents(args.tlc, split)), tlc_source(args.tlc, split)
+        return list(tlc_documents(args.tlc, split, generated=gen)), tlc_source(args.tlc, split, generated=gen)
     if args.bilingual is not None:
         split = args.split or "dev"
-        return list(bilingual_documents(args.bilingual, split)), bilingual_source(args.bilingual, split)
+        docs = list(bilingual_documents(args.bilingual, split, generated=gen))
+        return docs, bilingual_source(args.bilingual, split, generated=gen)
     docs, files = [], []
     for arg in args.docs:
         domain, path = parse_docs_arg(arg)
@@ -408,6 +423,11 @@ def main(argv: Sequence[str]) -> int:
     p.add_argument("--split")
     p.add_argument("--max-docs", type=int, help="per domain, lowest rank first")
     p.add_argument("--seed", type=int, default=0, help="rank seed of --max-docs")
+    p.add_argument(
+        "--include-generated",
+        action="store_true",
+        help="keep the documents of generated sources (TLC generated = true, bilingual synthetic); default: left out",
+    )
     p.add_argument("--out", type=Path, required=True)
     s = sub.add_parser("score", help="score one budget point of a run on an evalset (tokstudy-nll/1)")
     s.add_argument("run_dir", type=Path)

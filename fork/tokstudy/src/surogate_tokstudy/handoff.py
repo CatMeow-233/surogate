@@ -9,7 +9,7 @@ held-out split:
 | project | record next to the file | checks |
 |---|---|---|
 | TLC | `tokenizer_manifest.json` (data.tokenizer / data.freqtrim) | `tokenizer_sha256` is the file's; `corpus.spec_sha256` and `corpus.decontam` are the given spec's (the stream's `--tlc`); `corpus.trained_on` is the train split; no normalizer |
-| bilingual | `<stem>.meta.json` (`bilingual-tokenizer/1`) | `tokenizer_sha256` is the file's; `split` is `seed_train`; `manifest_sha256` is the given derived manifest's (the stream's `--bilingual`); normalization `none` |
+| bilingual | `<stem>.meta.json` (`bilingual-tokenizer/1`) | `tokenizer_sha256` is the file's; `split` is `seed_train`; `manifest_sha256` is the given derived manifest's content hash (Manifest.sha256, the `manifest_sha256` the stream records for its `--bilingual`); normalization `none` |
 
 `--pin` writes each subword arm's sha256 into the registry (a placeholder "unpinned", or an older value) by
 rewriting the one line `tokenizer = {path = "...", sha256 = "..."}` of that arm, then re-loads the registry with
@@ -33,7 +33,7 @@ from typing import Any
 
 from .arms import PLACEHOLDER, TABLES, load_arms
 from .canonical import TokstudyError, atomic_write_bytes, atomic_write_json, check_format, sha256_file
-from .docs import _derived_manifest, tlc_source
+from .docs import derived_manifest, tlc_source
 
 HANDOFF_FORMAT = "tokstudy-handoff/1"
 TLC_RECORD = "tokenizer_manifest.json"
@@ -102,13 +102,13 @@ def bilingual_provenance(path: Path, manifest: Path) -> dict[str, Any]:
         raise TokstudyError(
             f"{record_path}: records tokenizer sha256 {record.get('tokenizer_sha256')}, the file has {found}"
         )
-    derived = _derived_manifest(manifest)
+    derived = derived_manifest(manifest).sha256
     if record.get("split") != "seed_train":
         raise TokstudyError(f"{path}: trained on split {record.get('split')!r}, not seed_train (B-O11)")
-    if record.get("manifest_sha256") != derived.get("manifest_sha256"):
+    if record.get("manifest_sha256") != derived:
         raise TokstudyError(
             f"{path}: trained on the manifest {record.get('manifest_sha256')}, not on {manifest} "
-            f"({derived.get('manifest_sha256')}): the stream reads another corpus"
+            f"({derived}): the stream reads another corpus"
         )
     if record.get("normalization") != "none":
         raise TokstudyError(f"{path}: normalization {record.get('normalization')!r}; the study scores raw bytes")
@@ -119,7 +119,7 @@ def bilingual_provenance(path: Path, manifest: Path) -> dict[str, Any]:
         "vocab_size": record.get("vocab_size"),
         "record": record_path.name,
         "record_sha256": sha256_file(record_path),
-        "corpus": {"manifest_sha256": derived["manifest_sha256"], "split": "seed_train"},
+        "corpus": {"manifest_sha256": derived, "split": "seed_train"},
     }
 
 
@@ -195,7 +195,7 @@ def handoff(
     if project == "tlc":
         source = tlc_source(tlc, "train")
     else:
-        source = {"manifest_sha256": _derived_manifest(bilingual)["manifest_sha256"], "split": "seed_train"}
+        source = {"manifest_sha256": derived_manifest(bilingual).sha256, "split": "seed_train"}
     doc = {
         "format": HANDOFF_FORMAT,
         "table": table,

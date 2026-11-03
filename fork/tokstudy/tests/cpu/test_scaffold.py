@@ -107,7 +107,7 @@ def test_tokstudy_tree_is_outside_every_shipped_wheel_root():
 
 DEPENDENCIES = {"numpy", "torch", "tokenizers", "safetensors"}
 PROJECT_ALLOWED = {
-    "docs": {"surogate_tlc.data.corpus", "surogate_bilingual.data.docs"},
+    "docs": {"surogate_tlc.data.corpus", "surogate_bilingual.data.docs", "surogate_bilingual.data.manifest"},
     "models.trunk_bilingual": {"surogate_bilingual.model.lm", "surogate_bilingual.config"},
 }
 GUARDED = {"kernels": {"mamba_ssm"}}

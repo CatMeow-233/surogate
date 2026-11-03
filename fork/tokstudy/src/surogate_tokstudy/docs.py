@@ -10,11 +10,17 @@ a document segment by segment, so tokens never merge across a special (README: æ
   code document is <|bos|> <|code_start|> text <|code_end|> <|eos|>; a text document is <|bos|> text <|eos|> with
   its fence lines replaced by <|code_start|> / <|code_end|> (a block still open at the end is closed there). Text is
   TLC's normalised text (universal newlines), the bytes TLC trains on. Domain "py" for code sources, "en" for text.
-- `bilingual_documents(manifest, split)`: the split-materialized files of a bilingual derived manifest (format
-  bilingual-manifest/1 with `derived_from`), each checked against its sha256 and read with
-  surogate_bilingual.data.docs.iter_file_docs, framed as one document of a bilingual shard: <eos> (the end of the
-  previous document) + the segments (tag segments as specials, text as text with its language) + <eos>. Keys are
-  the project's. A segment with `loss = false` is refused: the study trains and scores every text token.
+- `bilingual_documents(manifest, split)`: the split-materialized files of a bilingual derived manifest, loaded with
+  the project's own surogate_bilingual.data.manifest.load_manifest (format bilingual-manifest/1, `manifest_sha256`
+  recomputed from the content, so a hand-edited manifest is refused) and required to carry `derived_from`; each
+  file is checked against its sha256 and read with surogate_bilingual.data.docs.iter_file_docs, framed as one
+  document of a bilingual shard: <eos> (the end of the previous document) + the segments (tag segments as specials,
+  text as text with its language) + <eos>. Keys are the project's. A segment with `loss = false` is refused: the
+  study trains and scores every text token. The manifest's identity everywhere in this package is its content
+  hash `manifest_sha256` (Manifest.sha256); the file's own sha256 is recorded apart as `manifest_file_sha256`.
+- `generated = False` (both adapters; evaluation's default) leaves out the documents of sources a fork tool wrote:
+  TLC sources with `generated = true` (data.synth), bilingual sources of kind "synthetic" (Track S). Training
+  streams keep them, as the projects' shards do.
 - Plain sample files (`plain_documents`, for the CPU screens): `.jsonl` (the text in `field`, default "text";
   fork/corpora export parts and TLC corpus JSONL files) or a datasets-server rows `.json` (default "content"), one
   text segment per record; `frame_plain` gives them a project's framing for evaluation.
@@ -43,6 +49,7 @@ BILINGUAL_LANGS = ("zh", "en")
 MIXED = "mixed"
 TLC_SPLITS = ("train", "val")
 BILINGUAL_MANIFEST = "bilingual-manifest/1"
+BILINGUAL_SYNTHETIC = "synthetic"  # the manifest source kind of generated data (Track S)
 
 
 @dataclass(frozen=True)
@@ -124,8 +131,9 @@ def tlc_segments(text: str, kind: str) -> tuple[Seg, ...]:
     return tuple(out)
 
 
-def tlc_documents(spec: Path, split: str) -> Iterator[EvalDoc]:
-    """The `split` ("train" | "val") documents of a TLC corpus spec, in the corpus's order, framed as its shards."""
+def tlc_documents(spec: Path, split: str, *, generated: bool = True) -> Iterator[EvalDoc]:
+    """The `split` ("train" | "val") documents of a TLC corpus spec, in the corpus's order, framed as its shards;
+    without the `generated = true` sources' documents when `generated` is False."""
     from surogate_tlc.data.corpus import documents, load_corpus, split_of
 
     if split not in TLC_SPLITS:
@@ -133,6 +141,8 @@ def tlc_documents(spec: Path, split: str) -> Iterator[EvalDoc]:
     try:
         corpus = load_corpus(Path(spec))
         for doc in documents(corpus):
+            if not generated and doc.source.generated:
+                continue
             if split_of(corpus, doc) == split:
                 domain = "py" if doc.source.kind == "code" else "en"
                 yield EvalDoc(doc.key, domain, tlc_segments(doc.text, doc.source.kind))
@@ -142,16 +152,17 @@ def tlc_documents(spec: Path, split: str) -> Iterator[EvalDoc]:
         raise TokstudyError(f"{spec}: {err}") from None
 
 
-def tlc_source(spec: Path, split: str) -> dict[str, Any]:
+def tlc_source(spec: Path, split: str, *, generated: bool = True) -> dict[str, Any]:
     """What a stream or evalset records of a TLC corpus: the spec's file name and sha256, its decontamination record,
-    the split. No directory: moving the tree keeps the identity, changing a byte of the spec does not."""
+    the split, and (with generated=False) the generated sources left out. No directory: moving the tree keeps the
+    identity, changing a byte of the spec does not."""
     from surogate_tlc.data.corpus import decontam_record, load_corpus
 
     try:
         corpus = load_corpus(Path(spec))
     except (OSError, ValueError) as err:
         raise TokstudyError(f"{spec}: {err}") from None
-    return {
+    out = {
         "project": "tlc",
         "spec": Path(spec).name,
         "spec_sha256": sha256_file(Path(spec)),
@@ -160,45 +171,47 @@ def tlc_source(spec: Path, split: str) -> dict[str, Any]:
         "val_fraction": corpus.val_fraction,
         "decontam": decontam_record(corpus),
     }
+    if not generated:
+        out["generated_excluded"] = sorted(s.name for s in corpus.sources if s.generated)
+    return out
 
 
 # --- bilingual -------------------------------------------------------------------------------------------------------
 
 
-def _derived_manifest(path: Path) -> dict[str, Any]:
+def derived_manifest(path: Path):
+    """A bilingual derived manifest, loaded by the project's own loader (surogate_bilingual.data.manifest
+    .load_manifest: format, and `manifest_sha256` against the content); refuses a manifest without `derived_from`."""
+    from surogate_bilingual.data.manifest import load_manifest
+
     path = Path(path)
     try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as err:
-        raise TokstudyError(f"{path}: cannot read a bilingual manifest: {err}") from None
-    if not isinstance(doc, dict) or doc.get("format") != BILINGUAL_MANIFEST:
-        raise TokstudyError(f"{path}: not a {BILINGUAL_MANIFEST} document")
-    if not doc.get("derived_from"):
+        manifest = load_manifest(path)
+    except (OSError, ValueError, KeyError, TypeError) as err:
+        raise TokstudyError(f"{path}: not a usable {BILINGUAL_MANIFEST} document: {err}") from None
+    if not manifest.doc.get("derived_from"):
         raise TokstudyError(f"{path}: not a derived manifest (`split materialize`); its files carry no split")
-    return doc
+    return manifest
 
 
-def bilingual_documents(manifest: Path, split: str) -> Iterator[EvalDoc]:
+def bilingual_documents(manifest: Path, split: str, *, generated: bool = True) -> Iterator[EvalDoc]:
     """The documents of one split of a bilingual derived manifest, in the manifest's file order, framed as one
-    document of a bilingual shard (module docstring)."""
+    document of a bilingual shard (module docstring); without the synthetic sources when `generated` is False."""
     from surogate_bilingual.data.docs import iter_file_docs
 
-    manifest = Path(manifest)
-    doc = _derived_manifest(manifest)
-    sources = {s["name"]: s for s in doc.get("sources", [])}
-    root = manifest.parent / doc.get("root", ".")
-    entries = [f for f in doc.get("files", []) if f.get("split") == split]
+    path = Path(manifest)
+    m = derived_manifest(path)
+    entries = m.files(split=split)
     if not entries:
-        known = sorted({f.get("split") for f in doc.get("files", [])} - {None})
-        raise TokstudyError(f"{manifest}: no files of split {split!r} (splits present: {known})")
+        known = sorted({f.get("split") for f in m.files()} - {None})
+        raise TokstudyError(f"{path}: no files of split {split!r} (splits present: {known})")
     for entry in entries:
-        path = root / entry["path"]
-        found = sha256_file(path)
-        if found != entry["sha256"]:
-            raise TokstudyError(f"{path}: sha256 {found}, the manifest says {entry['sha256']}")
-        source = sources[entry["source"]]
+        source = m.sources[entry["source"]]
+        if not generated and source["kind"] == BILINGUAL_SYNTHETIC:
+            continue
         try:
-            for d in iter_file_docs(path, source=source["name"], kind=source["kind"], rel=entry["path"]):
+            file = m.verify_file(entry)
+            for d in iter_file_docs(file, source=source["name"], kind=source["kind"], rel=entry["path"]):
                 yield bilingual_doc(d)
         except ValueError as err:
             if isinstance(err, TokstudyError):
@@ -218,16 +231,23 @@ def bilingual_doc(doc) -> EvalDoc:
     return EvalDoc(doc.key, langs[0] if len(langs) == 1 else MIXED, tuple(segs))
 
 
-def bilingual_source(manifest: Path, split: str) -> dict[str, Any]:
-    manifest = Path(manifest)
-    doc = _derived_manifest(manifest)
-    return {
+def bilingual_source(manifest: Path, split: str, *, generated: bool = True) -> dict[str, Any]:
+    """What a stream or evalset records of a bilingual derived manifest: its content hash (the identity the
+    project's tokenizer record and the hand-off use), the file's sha256 apart, the split, `derived_from`, and (with
+    generated=False) the synthetic sources left out."""
+    path = Path(manifest)
+    m = derived_manifest(path)
+    out = {
         "project": "bilingual",
-        "manifest": manifest.name,
-        "manifest_sha256": sha256_file(manifest),
+        "manifest": path.name,
+        "manifest_sha256": m.sha256,
+        "manifest_file_sha256": sha256_file(path),
         "split": split,
-        "derived_from": doc["derived_from"],
+        "derived_from": m.doc["derived_from"],
     }
+    if not generated:
+        out["generated_excluded"] = sorted(n for n, s in m.sources.items() if s["kind"] == BILINGUAL_SYNTHETIC)
+    return out
 
 
 # --- plain sample files ----------------------------------------------------------------------------------------------

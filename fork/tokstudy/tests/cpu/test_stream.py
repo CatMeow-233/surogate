@@ -124,11 +124,72 @@ def test_bilingual_documents_check_files_and_refuse_loss_free_segments(bilingual
     doc = Doc("k", "en", (Segment(text="hidden", lang="en", loss=False),))
     with pytest.raises(TokstudyError, match="loss = false"):
         D.bilingual_doc(doc)
+    from surogate_bilingual.canonical import sha256_json
+
     raw = json.loads(Path(derived_path).read_text(encoding="utf-8"))
     raw["derived_from"] = None
+    raw["manifest_sha256"] = sha256_json({k: v for k, v in raw.items() if k not in ("manifest_sha256", "root")})
+    raw["root"] = str(Path(derived_path).parent / raw["root"])
     (tmp_path / "manifest.json").write_text(json.dumps(raw), encoding="utf-8")
     with pytest.raises(TokstudyError, match="not a derived manifest"):
         list(D.bilingual_documents(tmp_path / "manifest.json", "dev"))
+
+
+def test_a_hand_edited_bilingual_manifest_is_refused_and_its_identity_is_the_content_hash(bilingual_built, tmp_path):
+    """The project's loader recomputes manifest_sha256: a file moved from a held-out split to seed_train by hand
+    (hash not recomputed) is refused by the documents reader, the source record and the tokenizer hand-off."""
+    from surogate_tokstudy.handoff import bilingual_provenance
+
+    derived_path, derived, tok_path = bilingual_built
+    source = D.bilingual_source(derived_path, "seed_train")
+    assert source["manifest_sha256"] == derived.sha256 != source["manifest_file_sha256"]
+    assert source["manifest_file_sha256"] == sha256_file(derived_path)
+    raw = json.loads(Path(derived_path).read_text(encoding="utf-8"))
+    moved = next(f for f in raw["files"] if f["split"] not in ("seed_train", None))
+    moved["split"] = "seed_train"
+    raw["root"] = str(Path(derived_path).parent / raw["root"])
+    edited = tmp_path / "edited.json"
+    edited.write_text(json.dumps(raw), encoding="utf-8")
+    for read in (
+        lambda: list(D.bilingual_documents(edited, "seed_train")),
+        lambda: D.bilingual_source(edited, "seed_train"),
+        lambda: bilingual_provenance(tok_path, edited),
+    ):
+        with pytest.raises(TokstudyError, match="manifest_sha256 does not match"):
+            read()
+
+
+def test_evaluation_leaves_generated_sources_out_by_default(tlc_built, bilingual_built, tmp_path):
+    """TLC `generated = true` sources (data.synth) and bilingual synthetic sources (Track S) train, but their
+    held-out documents enter an evalset only on request; the source record names what was left out."""
+    spec = Path(tlc_built[0])
+    text = spec.read_text(encoding="utf-8")
+    gen = tmp_path / "tlc"
+    gen.mkdir()
+    for name in ("code.jsonl", "text.jsonl"):
+        (gen / name).write_bytes((spec.parent / name).read_bytes())
+    (gen / "spec.toml").write_text(
+        text.replace('name = "text"\nkind = "text"', 'name = "text"\nkind = "text"\ngenerated = true'), encoding="utf-8"
+    )
+    every = list(D.tlc_documents(gen / "spec.toml", "val"))
+    natural = list(D.tlc_documents(gen / "spec.toml", "val", generated=False))
+    assert {d.domain for d in every} == {"py", "en"} and {d.domain for d in natural} == {"py"}
+    assert natural == [d for d in every if d.domain == "py"]
+    assert D.tlc_source(gen / "spec.toml", "val", generated=False)["generated_excluded"] == ["text"]
+    assert "generated_excluded" not in D.tlc_source(gen / "spec.toml", "val")
+    from surogate_bilingual.canonical import sha256_json
+
+    derived_path = bilingual_built[0]
+    assert D.bilingual_source(derived_path, "dev", generated=False)["generated_excluded"] == []
+    raw = json.loads(Path(derived_path).read_text(encoding="utf-8"))
+    next(src for src in raw["sources"] if src["name"] == "en-fix")["kind"] = "synthetic"
+    raw["manifest_sha256"] = sha256_json({k: v for k, v in raw.items() if k not in ("manifest_sha256", "root")})
+    raw["root"] = str(Path(derived_path).parent / raw["root"])
+    (tmp_path / "synthetic.json").write_text(json.dumps(raw), encoding="utf-8")
+    kept = list(D.bilingual_documents(tmp_path / "synthetic.json", "dev", generated=False))
+    assert kept == [d for d in D.bilingual_documents(derived_path, "dev") if d.domain != "en"]
+    record = D.bilingual_source(tmp_path / "synthetic.json", "dev", generated=False)
+    assert record["generated_excluded"] == ["en-fix"]
 
 
 # --- truncation and windows ------------------------------------------------------------------------------------------

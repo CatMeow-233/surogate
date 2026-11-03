@@ -309,6 +309,13 @@ def test_evalset_scoring_and_nll_files_end_to_end(tmp_path, bpe_writer, capsys):
     n0 = next(Path(r) for r in (root / "runs" / "tlc-N").iterdir() if r.name.startswith("N0"))
     assert E.main(["score", str(n0), "--evalset", str(root / "evalset2"), "--out", str(root / "x.nll")]) == 1
     assert "not an arm the evalset's common prefix" in capsys.readouterr().err
+    # adding an arm to the table's registry (spec §6.2) re-computes the prefix: the old evalset is refused for every
+    # run, also for the arms it lists, so NLL files of two prefixes cannot be mixed
+    with (root / "arms.toml").open("a", encoding="utf-8") as f:
+        f.write('[[arm]]\nid = "N2b"\nkind = "bytes"\nmodel = {profile = "tiny"}\nseeds = [0]\nstages = ["decision"]\n')
+    assert E.main(["score", str(n0), "--evalset", str(root / "evalset"), "--out", str(root / "y.nll")]) == 1
+    err = capsys.readouterr().err
+    assert "another arm set" in err and "['N2b']" in err and not (root / "y.nll").exists()
     with pytest.raises(TokstudyError, match="not empty"):
         E.build_evalset(docs, list(arms.values()), root / "evalset", k_eval=24, source={})
     with pytest.raises(TokstudyError, match="one table"):
