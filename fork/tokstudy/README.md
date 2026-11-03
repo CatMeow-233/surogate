@@ -11,9 +11,10 @@
 | 步骤 | 内容 | 命令 | 状态 |
 |---|---|---|---|
 | S0 | 包骨架、`fork/dev test tokstudy`、CI、导入边界测试 | — | 已落地 |
-| S8 | 臂登记与编解码器 | `arms` | 未落地 |
-| S9 | 文档、分帧、训练流 | — | 未落地 |
-| S10 | 内在指标与教师对齐（只作 CPU 初筛，不作判定依据） | `intrinsic`、`align` | 未落地 |
+| S6、S7（构建器部分） | 项目内的生产 tokenizer 构建器：TLC 的 freqtrim 与 `python-digit`（[fork/tlc/docs/data.md 的“freqtrim”](../tlc/docs/data.md#freqtrim)），双语的 `tokenizer.pretokenizer`（[fork/bilingual/docs/spec.md](../bilingual/docs/spec.md)） | 各项目的 `tokenizer` 命令 | 已落地；TLC 的按字节 BPB、双语的 `forward_hidden` 与 `length_unit` 未落地 |
+| S8 | 臂登记与编解码器 | `arms` | 已落地 |
+| S9 | 文档、分帧、训练流 | — | 只落地文档类型 `EvalDoc` 与样本文件的读取；按项目分帧的 `tlc_documents`、`bilingual_documents` 与训练流未落地 |
+| S10 | 内在指标与教师对齐（只作 CPU 初筛，不作判定依据） | `intrinsic`、`align` | 已落地 |
 | S11–S12 | SSD/EMA/卷积 kernel、Mamba-2、A0 孪生、H-Net 与 LM 包装 | — | 未落地 |
 | S13 | FLOPs 与 H-Net 配置匹配 | `flops` | 未落地 |
 | S14 | 训练循环（按 FLOP 进度的 WSD 与衰减分支） | `train`、`branch` | 未落地 |
@@ -22,6 +23,40 @@
 | S17 | GPU：G0-ts、G0.5-ts、kernel 一致性、孪生门 | `bench` | 未运行 |
 
 未落地的命令以退出码 2 报出所属步骤（`python -m surogate_tokstudy` 列出全部命令）。
+
+工作流的 S2（“tokenizer 构建器与内在指标”）对应实现规格的 S6、S7 中的 tokenizer 构建器部分，以及 S8、S10；S9 只落地了 S10 需要的文档类型。
+
+## 测量契约
+
+- **字节完全相同。** 一张表的所有臂对同一段原始 UTF-8 字节打分：编解码器给出每个 token 的字节，`b"".join(token_bytes(i) for i in ids) == text.encode()`；任何臂都不带 normalizer（带 normalizer 的 `tokenizer.json` 被拒绝，参照或教师 tokenizer 以 `--drop-normalizer` 去掉它并记录）。孤立的代理码元不是 Unicode 标量值，没有 UTF-8 编码，被拒绝。
+- **按段编码。** 文档是若干段，每段是一个特殊 token 或一段文本；各段分别编码，token 永不跨过特殊 token 合并。
+- **特殊 id。** TLC 与双语各自的 id 0–4（`codecs.PROJECT_SPECIALS`，测试与两个项目的表比对）；字节编解码器为 5 个特殊 id 加 256 个字节 id（id = 5 + 字节），词表 261，`pad_to` 可补齐。
+- **内在指标不作判定依据**：它们只用于淘汰明显被支配的臂和解释结果；判定靠等 FLOPs 的训练运行（S14–S16）。
+
+## 命令行
+
+在 `fork/.venv-tokstudy` 中运行。每个 tokenizer 按 `名字=路径@sha256` 给出，sha256 不符即拒绝；所有拒绝都以退出码 1 结束并给出原因。
+
+```bash
+python -m surogate_tokstudy arms arms/tlc.toml
+python -m surogate_tokstudy intrinsic --arms arms/tlc.toml --docs py=PY.jsonl --docs en=EN.jsonl --out intrinsic.json
+python -m surogate_tokstudy intrinsic --tokenizer qwen=DIR/tokenizer.json@SHA256 --drop-normalizer --bytes bytes \
+    --docs en=rows_en.json --docs zh=rows_zh.json --docs py=rows_py.json --out intrinsic.json
+python -m surogate_tokstudy align --teacher QWEN/tokenizer.json@SHA256 --arms arms/tlc.toml --docs py=PY.jsonl --out align.json
+```
+
+- **`arms`**：读取臂登记 `tokstudy-arms/1`（格式见 `surogate_tokstudy.arms` 的模块说明）：一个文件只放一张表（`tlc-N` 或 `bilingual-B`），表决定项目的特殊 id 与主网络（`twin_a0`、`bilingual_trunk`）；逐个核对 tokenizer 的 sha256 与特殊 id，拒绝重复的 id、第二张表、未知的键与种类、字节臂或 H-Net 臂带 tokenizer。`arm_sha256` 取臂的规范 JSON，其中 tokenizer 只记 sha256，所以移动文件不改变臂，改变文件内容才改变。真实的 `arms/tlc.toml` 与 `arms/bilingual.toml` 要等各臂的 tokenizer 在 owner 主机上建好、有了 sha256 之后再写，现在还没有。
+- **`--docs 领域=路径`**：`.jsonl`（每行一个 JSON 对象，正文在 `text`；fork/corpora 的导出分片与 TLC 的语料 JSONL 都是这种）或 datasets-server 的 rows 响应 `.json`（正文在 `content`）；`--field` 改字段名，`--limit` 限制每个文件的文档数。正文原样使用，不做任何规范化或换行转换。按项目 spec 与划分读取 train 划分（S9）之前，初筛用这两种样本文件。
+- **`intrinsic`**（`tokstudy-intrinsic/1`）：每个臂、每个领域的字节、字符、token 数与比值；汉字数（Unicode Script=Han）与每 token 汉字数；词数（`str.split()`，只在 `--word-domain`，默认 `en`）与每 token 词数；Rényi 效率 H₂.₅(p)/ln|V|；出现过的 token 数与词表利用率；单独看不是合法 UTF-8 的 token 数；数字串（Unicode 十进制数字的极大串）、其字符数与覆盖它们的 token 数；至少有 512（2048）个 token 的文档中前 512（2048）个 token 覆盖的字节数的上中位数；在 `--python-domain`（默认 `py`）上，能被 `ast.parse` 与 stdlib `tokenize` 接受、且词素位置自检无误的段的跨词素率（与两个及以上词素重叠的 token 占比；词素为 NAME、OP、NUMBER、STRING、COMMENT 与 f-string 各部分，空白、换行与缩进不算，同实验笔记的词素口径）与每个标识符的片数。记录所用的 Python 版本，因为 3.12 起 f-string 的切分方式不同。所有计数都是精确整数，比值由它们算出。H-Net 臂没有 token 级的内在指标，列在 `skipped_hnet_arms` 中。
+- **`align`**（`tokstudy-align/1`）：学生 tokenizer 对教师 `tokenizer.json` 的规范切分（教师的 normalizer 去掉，并统计它本会改变的文档数），按实验笔记的对齐原型逐个学生 token 分类：`one_to_one`（与教师 token 重合）、`head`（从教师 token 的开头开始、在其内部结束，即 BPM 的 1:N 头）、`interior`（从教师 token 内部开始，即 1:N 内部）、`cross_boundary`（首字节与末字节落在不同的教师 token 中，BPM 屏蔽这些位置；一个学生 token 盖住几个完整的教师 token 也属于这一类）。另计只由空格与 tab 组成、又不是 `one_to_one` 的学生 token（非恒等全空白行）：研究建议在冻结的 tokenizer 上它占代码领域学生 token 的 0.5% 以上时默认开启全空白行屏蔽 [建议]。这些是初筛读数；权威的 BPM 检查仍是 TLC 的 G-BPM。
+
+## 实测记录（本地，不进 CI）
+
+2026-11-03，本机 CPU，`FORK_PY`（Python 3.12.3、tokenizers 0.23.3）：
+
+- `intrinsic` 在三个 20 行 datasets-server 样本（Ultra-FineWeb en、zh，UltraData-Code-L2 py）上，用 Qwen/Qwen2.5-Coder-1.5B-Instruct 的 `tokenizer.json`（revision `2e1fd397ee46e1388853d2af2c993145b0f1098a`，sha256 `c0382117…`，带 NFC，以 `--drop-normalizer` 去掉）与 openai-community/gpt2 的 `tokenizer.json`（revision `607a30d783dfa663caf39e06633721c8d4cfcd7e`，sha256 `8414cab9…`），`--check` 打开：字节/token 为 4.147 / 4.030 / 3.780（Qwen）与 4.306 / 1.415 / 2.084（GPT-2）；字节、字符、token 数、非法 UTF-8 占比、512 与 2048 token 覆盖字节的中位数共 42 项与此前的探针 `compress_probe.json` 逐项相同 [CPU实测]。约 2 秒。
+- 同一批样本上的 `align`（教师同上；NFC 在 60 篇文档中改变 0 篇）与用这 40 篇 en+py 文档、4,096 id 建的 freqtrim（`qwen` 与 `fine-a` 两种正则，用真实 Qwen 文件，`freqtrim-check` 通过）只用来确认真实文件能被读入和检查；子集在评测文档上建成、词表只有 4K，其比率不代表任何候选 [CPU实测，只作软件检查]。
+- 样本行与 tokenizer 文件都只在本地使用，用后删除，没有进入仓库。
 
 ## 环境
 
