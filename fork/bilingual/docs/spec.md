@@ -64,7 +64,7 @@
 | `model.backbone` | θ_S：嵌入兼 tied head、attention、norm、族 II 的读出、LP-k 非专家层上的种子 FFN | ops | 持有专家 |
 | `model.bank` | 按名字、按专家层存放的专家参数容器 | ops | 计算路由 |
 | `model.executor` | 单层内依赖路由的分发：one-hot gather/scatter、双路融合 | ops、routing.plan | 拥有参数；选择路由 |
-| `model.lm` | `RoutedLM` = backbone + bank + executor | model.*、routing.plan | 从 token 推出路由 |
+| `model.lm` | `RoutedLM` = backbone + bank + executor；`forward_hidden(h, plan)`（各层与最终 norm，输入为向量）与 `logits(h)`（tied 投影）供分词器研究把 trunk 当主网络使用，`logits(forward_hidden(backbone.emb(t), plan)) == forward(t, plan)` 逐位成立（`test_model.py` 的 `test_forward_hidden_and_logits_compose_to_forward`） | model.*、routing.plan | 从 token 推出路由 |
 | `routing.plan` | 值类型 `RoutePlan` 与其校验 | torch、config | 了解 tokenizer 或数据 |
 | `routing.policies`、`routing.tags` | 由段元数据、shard route id 或完整历史的标签构造 plan；门控策略（默认值读 `DEFAULTS["routing"]`） | routing.plan、config | 运行模型 |
 | `routing.router` | Router 接口与单调门控函数（训练推迟） | torch | 被 P0 的运行使用 |

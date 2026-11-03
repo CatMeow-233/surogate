@@ -19,6 +19,7 @@ from collections.abc import Mapping, Sequence
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
 from ..config import DEFAULT_FUSION, FUSIONS, ModelConfig
@@ -92,8 +93,11 @@ class RoutedLM(nn.Module):
     def dispatch_for(self, tokens: torch.Tensor, plan: RoutePlan | None) -> Dispatch:
         if tokens.dim() != 2:
             raise ValueError(f"tokens must be [B, T], got {list(tokens.shape)}")
-        if tokens.shape[1] > self.cfg.max_seq:
-            raise ValueError(f"T = {tokens.shape[1]} exceeds max_seq = {self.cfg.max_seq}")
+        return self._dispatch(tuple(tokens.shape), tokens.device, plan)
+
+    def _dispatch(self, shape: tuple[int, int], device: torch.device, plan: RoutePlan | None) -> Dispatch:
+        if shape[1] > self.cfg.max_seq:
+            raise ValueError(f"T = {shape[1]} exceeds max_seq = {self.cfg.max_seq}")
         if plan is None:
             if len(self.expert_names) != 1:
                 raise ValueError(
@@ -101,8 +105,8 @@ class RoutedLM(nn.Module):
                     " with exactly one expert (MA-14)"
                 )
             return Dispatch.single_expert(self.expert_names[0])
-        plan.validate(self.expert_names, tuple(tokens.shape))
-        return make_dispatch(plan, tokens.device)
+        plan.validate(self.expert_names, shape)
+        return make_dispatch(plan, device)
 
     def _block(self, index: int, h: torch.Tensor, dispatch: Dispatch, plan: RoutePlan | None) -> torch.Tensor:
         layer = self.backbone.layers[index]
@@ -114,18 +118,35 @@ class RoutedLM(nn.Module):
             y = self.executor(index, x, plan, self.bank, layer.readout, dispatch=dispatch)
         return u + y.to(u.dtype)
 
-    def forward(
-        self, tokens: torch.Tensor, plan: RoutePlan | None = None, *, checkpointing: bool = False
-    ) -> torch.Tensor:
-        """Logits [B, T, V] for tokens [B, T]."""
-        dispatch = self.dispatch_for(tokens, plan)
-        h = self.backbone.emb(tokens)
+    def _blocks(self, h: torch.Tensor, dispatch: Dispatch, plan: RoutePlan | None, checkpointing: bool) -> torch.Tensor:
         for index in range(self.cfg.n_layers):
             if checkpointing and torch.is_grad_enabled():
                 h = checkpoint(self._block, index, h, dispatch, plan, use_reentrant=False)
             else:
                 h = self._block(index, h, dispatch, plan)
-        return self.backbone.head(h)
+        return h
+
+    def forward(
+        self, tokens: torch.Tensor, plan: RoutePlan | None = None, *, checkpointing: bool = False
+    ) -> torch.Tensor:
+        """Logits [B, T, V] for tokens [B, T]."""
+        dispatch = self.dispatch_for(tokens, plan)
+        return self.backbone.head(self._blocks(self.backbone.emb(tokens), dispatch, plan, checkpointing))
+
+    def forward_hidden(
+        self, h: torch.Tensor, plan: RoutePlan | None = None, *, checkpointing: bool = False
+    ) -> torch.Tensor:
+        """The blocks and the final norm on input vectors h [B, T, d] (the tokenizer study's main-network entry: an
+        H-Net feeds chunk vectors here). `plan` as in forward, for the shape [B, T]. Together with `logits`:
+        logits(forward_hidden(backbone.emb(tokens), plan)) == forward(tokens, plan), bit for bit."""
+        if h.dim() != 3 or h.shape[-1] != self.cfg.d_model:
+            raise ValueError(f"h must be [B, T, {self.cfg.d_model}], got {list(h.shape)}")
+        dispatch = self._dispatch((int(h.shape[0]), int(h.shape[1])), h.device, plan)
+        return self.backbone.final_norm(self._blocks(h, dispatch, plan, checkpointing))
+
+    def logits(self, h: torch.Tensor) -> torch.Tensor:
+        """The tied projection of final-normed hidden states: h E^T (Backbone.head without its norm)."""
+        return F.linear(h, self.backbone.emb.weight)
 
     # --- state views -----------------------------------------------------------------------------------------------
 

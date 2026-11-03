@@ -209,6 +209,28 @@ def test_i2_a5_later_tokens_never_change_earlier_logits(family, fusion):
             assert float((window - reference[:, :t0]).abs().max()) <= 1e-12, t0
 
 
+# --- forward_hidden and logits (the tokenizer study's main-network entry, docs/spec.md "model.lm") ---------------
+
+
+@pytest.mark.parametrize("names,kind", [(("seed",), None), (("zh", "en"), "mixed")])
+def test_forward_hidden_and_logits_compose_to_forward(names, kind):
+    """fp64, CPU: logits(forward_hidden(emb(t), plan)) is forward(t, plan) bit for bit, for a seed model without a
+    plan and a two-expert model with a mixed plan; forward_hidden checks h's shape and the plan rule (MA-14)."""
+    model = model_for("tiny", "swiglu", "output", torch.float64, names=names, seed=3)
+    T = model.cfg.max_seq - 3
+    x = torch.randint(5, model.cfg.vocab_size, (2, T), generator=torch.Generator().manual_seed(4))
+    plan = None if kind is None else random_plan(names, 2, T, kind, seed=5, dtype=torch.float64)
+    with torch.no_grad():
+        hidden = model.forward_hidden(model.backbone.emb(x), plan)
+        assert hidden.shape == (2, T, model.cfg.d_model)
+        assert torch.equal(model.logits(hidden), model(x, plan))
+        with pytest.raises(ValueError, match="h must be"):
+            model.forward_hidden(model.backbone.emb(x)[..., :-1], plan)
+        if kind is not None:
+            with pytest.raises(ValueError, match="explicit RoutePlan"):
+                model.forward_hidden(model.backbone.emb(x))
+
+
 # --- I2-A7: activation checkpointing -----------------------------------------------------------------------------
 
 
