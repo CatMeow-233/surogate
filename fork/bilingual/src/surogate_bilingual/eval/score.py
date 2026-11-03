@@ -1,9 +1,11 @@
 """Candidate log-likelihood ranking, generation scoring and the `eval-tasks` command (MS §9.1; SCI-11, IMPL-15).
 
 Ranked families (E1, E2, E3-par, E3-ctx): the prompt is a shared prefix; for each candidate only its own tokens are
-scored, log p(c_j | prompt, c_<j) summed (`sum`) or averaged per token (`mean`). `auto` (the registered rule) is
-`sum` when every candidate has the same token length, else `mean`. The predicted index is the argmax (the lowest
-index on a tie). Candidate sets hold the other-language form of the gold, so ranking also measures language choice;
+scored, log p(c_j | prompt, c_<j) summed (`sum`) or averaged per unit of length (`mean`). `auto` (the registered
+rule) is `sum` when every candidate has the same length, else `mean`. The length unit (`eval.length_unit`) is the
+token (MS §9.1, the default) or the byte: the UTF-8 bytes the candidate's tokens stand for, the same for every
+tokenizer, which is how the tokenizer study (B-O11) compares arms whose tokenizers cut a candidate differently. The
+predicted index is the argmax (the lowest index on a tie). Candidate sets hold the other-language form of the gold, so ranking also measures language choice;
 `lang_ok` is False exactly when that distractor wins.
 
 Generated family (E4): batched greedy decoding (`eval.generate`), then exact slot scoring per stage: the name as a
@@ -57,6 +59,7 @@ from .items import (
 
 PRED_FORMAT = "bilingual-pred/1"
 NORMS = ("sum", "mean", "auto")
+LENGTH_UNITS = ("token", "byte")
 LANG_SHARE = DEFAULTS["eval"]["lang_share"]
 MERGE = DEFAULTS["eval"]["merge"]
 MAX_NEW = DEFAULTS["eval"]["max_new"]
@@ -72,6 +75,8 @@ class CandidateScores:
     norm: str  # the rule actually used: "sum" or "mean"
     scores: list[float]
     pred_index: int
+    unit: str = "token"  # the length unit of `mean` and `auto`
+    lengths: list[int] | None = None  # each candidate's length in `unit`
 
 
 def resolve_norm(norm: str, lengths: Sequence[int]) -> str:
@@ -124,13 +129,30 @@ def candidate_logprobs(
     return out
 
 
-def rank_candidates(model, prompt_ids, plan, candidates_ids, norm: str = "auto") -> CandidateScores:
-    lengths = [len(c) for c in candidates_ids]
+def candidate_bytes(tok, ids: Sequence[int]) -> int:
+    """The UTF-8 bytes a candidate's tokens stand for. candidate_ids gives whole characters (the candidate starts at
+    a token boundary of the joint encoding, or is encoded alone), so the decoded text is exact."""
+    return len(decode(tok, ids).encode("utf-8"))
+
+
+def rank_candidates(
+    model, prompt_ids, plan, candidates_ids, norm: str = "auto", *, unit: str = "token", n_bytes=None
+) -> CandidateScores:
+    """Rank candidates by summed or length-normalised log-likelihood; `unit` "byte" needs each candidate's bytes."""
+    if unit not in LENGTH_UNITS:
+        raise ValueError(f"the length unit must be one of {LENGTH_UNITS}, got {unit!r}")
+    n_tokens = [len(c) for c in candidates_ids]
+    if unit == "byte":
+        if n_bytes is None or len(n_bytes) != len(n_tokens) or any(int(b) <= 0 for b in n_bytes):
+            raise ValueError("unit 'byte' needs a positive byte length for every candidate")
+        lengths = [int(b) for b in n_bytes]
+    else:
+        lengths = n_tokens
     used = resolve_norm(norm, lengths)
     logprobs = candidate_logprobs(model, prompt_ids, plan, candidates_ids)
     scores = logprobs if used == "sum" else [lp / n for lp, n in zip(logprobs, lengths, strict=True)]
     best = max(range(len(scores)), key=lambda i: (scores[i], -i))
-    return CandidateScores(logprobs, lengths, used, scores, best)
+    return CandidateScores(logprobs, n_tokens, used, scores, best, unit, lengths)
 
 
 # --- generation scoring ------------------------------------------------------------------------------------------------
@@ -200,6 +222,7 @@ class EvalContext:
     norm: str = "auto"
     max_new: int = MAX_NEW
     autocast: bool = False
+    length_unit: str = DEFAULTS["eval"]["length_unit"]
 
     @property
     def eos(self) -> int:
@@ -224,8 +247,10 @@ def _record(ctx: EvalContext, item: Mapping[str, Any], **fields) -> dict[str, An
         "route_policy": route,
         "gate_policy": gate,
         "norm": None,
+        "length_unit": None,
         "candidate_logprobs": None,
         "candidate_tokens": None,
+        "candidate_bytes": None,
         "pred_index": None,
         "gold_index": item.get("gold_index"),
         "correct": None,
@@ -253,8 +278,9 @@ def rank_item(ctx: EvalContext, item: Mapping[str, Any]) -> dict[str, Any]:
         plan = item_plan(item, segs, max(len(c) for c in cands), item["answer_lang"], ctx.names, ctx.routing)
     except SkipItem as exc:
         return _record(ctx, item, skip_reason=str(exc))
+    n_bytes = [candidate_bytes(ctx.tok, c) for c in cands]
     with ctx.autocast_ctx():
-        result = rank_candidates(ctx.model, prompt, plan, cands, ctx.norm)
+        result = rank_candidates(ctx.model, prompt, plan, cands, ctx.norm, unit=ctx.length_unit, n_bytes=n_bytes)
     distractor = item.get("distractor_index")
     gold = item["gold_index"]
     margin = result.scores[gold] - max(x for i, x in enumerate(result.scores) if i != gold)  # MS §9.1 secondary
@@ -262,8 +288,10 @@ def rank_item(ctx: EvalContext, item: Mapping[str, Any]) -> dict[str, Any]:
         ctx,
         item,
         norm=result.norm,
+        length_unit=result.unit,
         candidate_logprobs=result.logprobs,
         candidate_tokens=result.n_tokens,
+        candidate_bytes=n_bytes,
         pred_index=result.pred_index,
         correct=result.pred_index == gold,
         margin=margin,
@@ -461,6 +489,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--density", type=float, default=MERGE["density"], help="TIES density")
     ap.add_argument("--merge-experts", default="zh,en")
     ap.add_argument("--norm", choices=NORMS)
+    ap.add_argument(
+        "--length-unit",
+        choices=LENGTH_UNITS,
+        default=DEFAULTS["eval"]["length_unit"],
+        help="the unit of mean and auto: token (MS §9.1) or byte (the tokenizer study)",
+    )
     ap.add_argument("--max-new", type=int, default=MAX_NEW)
     ap.add_argument("--limit", type=int, help="evaluate only the first N items after the filters")
     ap.add_argument("--rng-seed", type=int, default=0, help="R_random seed (per item: (seed, item id))")
@@ -540,6 +574,7 @@ def run(args) -> dict[str, Any]:
         norm,
         args.max_new,
         args.autocast == "bf16",
+        args.length_unit,
     )
     commit, dirty = code_identity()
     meta = {
@@ -553,6 +588,7 @@ def run(args) -> dict[str, Any]:
         "replicate": args.replicate,
         "routing": dict(zip(("route_policy", "gate_policy"), preset_routing.label(), strict=True)),
         "norm": norm,
+        "length_unit": args.length_unit,
         "max_new": args.max_new,
         "autocast": args.autocast,
         "split": args.split,

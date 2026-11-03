@@ -109,7 +109,10 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "special_tokens": list(SPECIAL_TOKENS),
     },
     "eval": {
-        "length_norm": "auto",  # MS §9.1: sum when every candidate has the same token length, else mean
+        "length_norm": "auto",  # MS §9.1: sum when every candidate has the same length, else mean
+        # [建议] the unit of that length: "token" (MS §9.1) or "byte" (the UTF-8 bytes of the candidate's tokens), the
+        # unit the tokenizer study (fork/tokstudy, B-O11) compares arms of different tokenizers in
+        "length_unit": "token",
         "autocast": "none",  # [建议] evaluation in fp32 (bf16 on request); training uses bf16 autocast on CUDA
         "max_new": 160,  # [建议] greedy tokens per E4 stage (the longest test reference is about 100 BPE tokens)
         "lang_share": 0.9,  # [建议] lang_ok: the answer language's share of Han + Latin letters, names removed

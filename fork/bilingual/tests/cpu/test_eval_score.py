@@ -103,6 +103,41 @@ def test_i6_e1_only_candidate_tokens_are_scored_and_the_prompt_is_a_shared_prefi
         score.rank_candidates(BigramStub(table, max_seq=3), prompt, None, [[1, 2, 3, 4]], "sum")
 
 
+def test_byte_length_unit_normalises_by_the_candidates_bytes():
+    """eval.length_unit = byte (the tokenizer study): mean and auto use each candidate's UTF-8 bytes, so two
+    candidates of one token each but 3 and 1 bytes are averaged, and the per-byte mean can reverse the token mean."""
+    e = math.exp
+    # A = [8] (1 token, 3 bytes) log p -2.4; B = [9, 10] (2 tokens, 2 bytes) log p -1.2 each
+    table = _table_with({7: {8: e(-2.4), 9: e(-1.2)}, 9: {10: e(-1.2)}})
+    cands = [[8], [9, 10]]
+    by_token = score.rank_candidates(BigramStub(table), [7], None, cands, "mean")
+    by_byte = score.rank_candidates(BigramStub(table), [7], None, cands, "mean", unit="byte", n_bytes=[3, 2])
+    assert by_token.unit == "token" and by_token.lengths == [1, 2] and by_token.pred_index == 1  # -2.4 < -1.2
+    assert by_byte.unit == "byte" and by_byte.lengths == [3, 2] and by_byte.n_tokens == [1, 2]
+    assert max(abs(a - b) for a, b in zip(by_byte.scores, [-0.8, -1.2], strict=True)) <= 1e-5
+    assert by_byte.pred_index == 0
+    # auto: the same token length is not the same byte length
+    same_tokens = [[8], [9]]
+    assert score.rank_candidates(BigramStub(table), [7], None, same_tokens, "auto").norm == "sum"
+    auto = score.rank_candidates(BigramStub(table), [7], None, same_tokens, "auto", unit="byte", n_bytes=[3, 1])
+    assert auto.norm == "mean"
+    assert score.rank_candidates(BigramStub(table), [7], None, cands, "auto", unit="byte", n_bytes=[2, 2]).norm == "sum"
+    with pytest.raises(ValueError, match="length unit"):
+        score.rank_candidates(BigramStub(table), [7], None, cands, "mean", unit="char")
+    with pytest.raises(ValueError, match="positive byte length"):
+        score.rank_candidates(BigramStub(table), [7], None, cands, "mean", unit="byte", n_bytes=[3])
+
+
+def test_candidate_bytes_are_the_utf8_bytes_of_the_candidate(data_pipeline):
+    """With the byte-level BPE (the project's tokenizer, trained on the fixture corpus) a candidate's tokens stand for
+    exactly the bytes of separator + candidate, whether or not a merge crosses the question boundary."""
+    tok = data_pipeline["tok"]
+    cases = (("Where is the city", " ", "Paris"), ("问题是", "", "北京市"), ("e1", ": ", "𠀀 e2"), ("x =", " ", "12"))
+    for question, sep, cand in cases:
+        ids, _ = it.candidate_ids(tok, question, sep, cand)
+        assert score.candidate_bytes(tok, ids) == len((sep + cand).encode("utf-8")), (question, cand)
+
+
 # --- I6-E2 ---------------------------------------------------------------------------------------------------------
 
 
@@ -259,6 +294,15 @@ def test_i6_e2_eval_tasks_command_writes_predictions_and_results(tiny_assemblies
         x for i, x in enumerate(lp) if i != p["gold_index"]
     )
     assert any(r["metric"] == "E3ctx/cross/margin" and r["status"] == "done" for r in doc["results"])
+    assert p["length_unit"] == "token" and doc["length_unit"] == "token"
+    assert len(p["candidate_bytes"]) == len(lp) and all(b > 0 for b in p["candidate_bytes"])
+    # eval.length_unit = byte: recorded in every prediction and in the results document
+    by_byte = tmp_path / "eval" / "B6-byte"
+    assert score.main([*argv[:-4], "--out", str(by_byte), "--n-boot", "200", "--length-unit", "byte"]) == 0
+    preds_b = [json.loads(line) for line in (by_byte / "predictions.jsonl").read_text().splitlines()]
+    assert {q["length_unit"] for q in preds_b} == {"byte"}
+    assert json.loads((by_byte / "results.json").read_text())["length_unit"] == "byte"
+    assert [q["candidate_logprobs"] for q in preds_b] == [q["candidate_logprobs"] for q in preds]
     assert score.main(argv) == 1  # no silent overwrite
     capsys.readouterr()
     assert score.main([*argv, "--split", "test", "--overwrite"]) == 1  # the test split needs the MS §9.7 lock
