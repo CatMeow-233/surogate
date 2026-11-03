@@ -107,6 +107,65 @@ def tokenizer_dir(tmp_path_factory, corpus_spec) -> Path:
     return tokenizer.train_tokenizer(c, tmp_path_factory.mktemp("tok-gpt2"), pretokenizer="gpt2", vocab_size=300)
 
 
+# The Qwen2 split pattern, except that the vocabulary is learned with up to three digits per piece (as cl100k does):
+# the SYNTHETIC teacher below then holds multi-digit tokens that Qwen2's own pattern can never produce.
+TEACHER_TEXTS = (
+    "def left_idx(x1, y2):\n    return x1 + 12345 * y2  # 2026 check\n",
+    "for index in range(100):\n        total_count += values[index] / 3.5\n",
+    "The 300 pages say it's fine; we'll see. (Note: x is small.)\n",
+    "class Pair:\n    def __init__(self, first, second):\n        self.first = first\n",
+)
+
+
+def write_teacher(path: Path, texts, vocab_size: int = 700) -> Path:
+    """A SYNTHETIC FIXTURE in the format of a Qwen2 tokenizer.json: byte-level BPE, Qwen2's split pattern verbatim,
+    an NFC normaliser and Qwen-style added tokens after the ordinary vocabulary. Not a real teacher."""
+    from surogate_tlc.data import tokenizer as tok
+    from tokenizers import Regex, Tokenizer, decoders, models, normalizers, pre_tokenizers, processors, trainers
+
+    learn = tok.PRETOKENIZERS["qwen2"].replace(r"\p{N}|", r"\p{N}{1,3}|")
+    teacher = Tokenizer(models.BPE())
+    teacher.pre_tokenizer = tok.split_pre_tokenizer(learn)
+    trainer = trainers.BpeTrainer(
+        vocab_size=vocab_size, initial_alphabet=pre_tokenizers.ByteLevel.alphabet(), show_progress=False
+    )
+    teacher.train_from_iterator(list(texts), trainer)
+    teacher.normalizer = normalizers.NFC()
+    split = pre_tokenizers.Split(Regex(tok.PRETOKENIZERS["qwen2"]), behavior="isolated")
+    teacher.pre_tokenizer = pre_tokenizers.Sequence(
+        [split, pre_tokenizers.ByteLevel(add_prefix_space=False, trim_offsets=False, use_regex=False)]
+    )
+    teacher.decoder = decoders.ByteLevel()
+    teacher.post_processor = processors.ByteLevel(trim_offsets=False)
+    teacher.add_special_tokens(["<|endoftext|>", "<|im_start|>", "<|im_end|>"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    teacher.save(str(path))
+    return path
+
+
+@pytest.fixture(scope="session")
+def qwen_teacher(tmp_path_factory, corpus_spec) -> Path:
+    """The SYNTHETIC Qwen-format teacher, learned from the fixture corpus and TEACHER_TEXTS."""
+    from surogate_tlc.data import corpus
+
+    texts = [*(d.text for d in corpus.documents(corpus.load_corpus(corpus_spec))), *TEACHER_TEXTS * 3]
+    return write_teacher(tmp_path_factory.mktemp("teacher") / "tokenizer.json", texts)
+
+
+TEACHER_REVISION = "0123456789abcdef0123456789abcdef01234567"
+
+
+@pytest.fixture(scope="session")
+def freqtrim_dirs(tmp_path_factory, corpus_spec, qwen_teacher) -> dict[str, Path]:
+    """freqtrim tokenizers of 300 ids built from the synthetic teacher on the fixture corpus, one per regex."""
+    from surogate_tlc.data import corpus, freqtrim
+
+    ref = freqtrim.TeacherRef("fixture/synthetic-qwen", TEACHER_REVISION, "apache-2.0")
+    root = tmp_path_factory.mktemp("freqtrim")
+    c = corpus.load_corpus(corpus_spec)
+    return {r: freqtrim.build(c, root / r, qwen_teacher, ref, regex=r, vocab_size=300) for r in freqtrim.REGEXES}
+
+
 @pytest.fixture
 def model_dir(tmp_path, tokenizer_dir) -> Path:
     """An A0 model directory as write_model_dir() leaves it: everything but the weights."""

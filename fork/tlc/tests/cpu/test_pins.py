@@ -116,6 +116,12 @@ def test_native_tokenizer_reads_tlc_split_patterns():
     patterns = {_cpp_strings(m)[0] for m in re.findall(rf"regex_expr == ((?:{CPP_STRING}\s*)+)", custom)}
     assert {tokenizer.PRETOKENIZERS["qwen2"], gpt2_default} <= patterns
     assert tokenizer.PRETOKENIZERS["python"] not in patterns
+    assert tokenizer.PRETOKENIZERS["python-digit"] not in patterns  # std::regex fallback; checked at G-TOK
+    from surogate_tlc.data import freqtrim
+
+    assert freqtrim.REGEXES["qwen"] in patterns  # freqtrim "qwen": the hand-written splitter, verbatim
+    assert freqtrim.REGEXES["fine-a"] not in patterns and freqtrim.REGEXES["fine-b"] not in patterns
+    assert all("(?i" not in freqtrim.REGEXES[r] for r in ("fine-a", "fine-b"))  # std::regex has no inline flags
 
 
 def test_native_data_loader_reads_padded_rows():

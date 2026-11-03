@@ -102,7 +102,12 @@ python -m surogate_tlc.data.synth OUT_DIR --seed 0 --per-task 4000 --train-chars
 
 ```bash
 python -m surogate_tlc.data.tokenizer train CORPUS.toml OUT_DIR --pretokenizer qwen2 --vocab-size 16384
+python -m surogate_tlc.data.tokenizer freqtrim CORPUS.toml OUT_DIR --regex qwen --teacher QWEN/tokenizer.json \
+    --teacher-repo REPO --teacher-revision SHA40 --teacher-licence apache-2.0 [--teacher-sha256 SHA256]
+python -m surogate_tlc.data.tokenizer freqtrim-check OUT_DIR --teacher QWEN/tokenizer.json
 ```
+
+词表有两种来源：`train` 在 train 划分上训练自己的 BPE；`freqtrim` 从 Qwen 的 BPE 中按 train 划分上的频率取一个子集（见下面的“freqtrim”）。两者的特殊 token、chat template、输出文件和身份规则相同。
 
 - 16384 个 id 的字节级 BPE，没有 normalizer，decode(encode(x)) == x。特殊 token 的 id 固定为 0–4：`<|pad|>`、`<|bos|>`、`<|eos|>`、`<|code_start|>`、`<|code_end|>`，其中前三个与 `hf.default_config()` 的 pad、bos、eos 一致。语料不够学满词表时报错。
 - 预分词由 `--pretokenizer` 选择，默认 `qwen2`：
@@ -112,14 +117,41 @@ python -m surogate_tlc.data.tokenizer train CORPUS.toml OUT_DIR --pretokenizer q
   | `qwen2`（默认） | Qwen2 的 split 正则：GPT-2 一族，字母和数字用 Unicode 类 `\p{L}`、`\p{N}`，每个数字单独成片 | 教师引导训练的备忘录：与 Qwen 子集词表配用，数字切分与 Qwen 教师一致 | 手写 splitter |
   | `gpt2` | GPT-2 正则，连续数字成一片 | 实验笔记的候选 | 手写 splitter |
   | `python` | 实验笔记的 pyaware2 改用 `\p{L}`、`\p{N}`：标识符（含 `_`）、常见的多字符运算符、换行连同其后的缩进、整个数字（含小数和指数）各成一片 | 实验笔记的候选 | std::regex 回退 |
+  | `python-digit` | `python` 的逐位变体：数字分支换成 `\p{N}`，标识符分支也去掉 `\p{N}`，所以每个数字单独成片（`x1` 切成 `x` 与 `1`，与 `qwen2` 相同）；其余与 `python` 相同 | 实验笔记：数字逐位时自训路线可选的两个正则之一 | std::regex 回退 |
 
   - 还没有选定，owner 在 A0 之前定下，四行共用同一个 tokenizer。实验笔记的选择规则看 Python 加英文的总 token 数、跨词素率和多角色率：比较总 token 数时，用各候选分别建 shard，对比 manifest 中每个来源的 `characters` 与 `real_tokens`；跨词素率和多角色率要用 P1 的对齐与角色标注来算。
-  - 另两个候选没有实现，同样待 owner 定：实验笔记的第三个候选"严格按 Python 词法切分"不是正则预分词，原生 tokenizer 推理时做不到；教师引导训练的备忘录要的 Qwen 子集词表（按 TLC 语料频率从 Qwen 的 BPE 中选 16,384 个 token，对 merge 父项封闭，让 Qwen 教师能直接在学生的 token 上打分）不是训练出来的 BPE，要另写一个构建器，`train_tokenizer` 做不出来。选它的话，要在 A0 之前加上这个构建器。
-  - `model_type` 为 `tlc` 时，原生 tokenizer 从 `tokenizer.json` 读取 split 正则，没有时用 GPT-2 的。`qwen2` 与 GPT-2 的正则各有手写实现；其他正则（包括 `python`）走 std::regex 回退，用之前必须通过下面的一致性检查。CPU 的 pin 测试钉住这几点。
+  - 只改标识符分支是因为：实验笔记只要求把数字分支换成 `\p{N}`，但 `python` 的标识符分支允许数字，`x1` 仍是一片，BPE 可以学出 `x1` 这个 token，违反“数字逐位”；`test_python_digit_splits_every_digit` 钉住这一点。
+  - 实验笔记的另一个候选"严格按 Python 词法切分"没有实现：它不是正则预分词，原生 tokenizer 推理时做不到。
+  - `model_type` 为 `tlc` 时，原生 tokenizer 从 `tokenizer.json` 读取 split 正则，没有时用 GPT-2 的。`qwen2` 与 GPT-2 的正则各有手写实现；其他正则（包括 `python`、`python-digit` 和 freqtrim 的 `fine-a`、`fine-b`）走 std::regex 回退，用之前必须通过下面的一致性检查（G-TOK 时在 ≥10k 篇文档上；CPU 上只用替身验证了检查本身）。CPU 的 pin 测试钉住这几点。
 - 编码：文档正文按普通文本编码，其中的特殊 token 字符串不会变成特殊 id（原始文本永远不产生特殊 token）；prompt 按带特殊 token 的方式编码。
 - chat template：`<|bos|>` 加各条消息的内容，不要求生成提示时最后加 `<|eos|>`。prompt 就是文档的开头，与 shard 的框定一致。
 - 输出目录：`tokenizer.json`、`tokenizer_config.json` 和 `tokenizer_manifest.json`（配方、`tokenizer_sha256`、语料 spec 的 sha256、各来源的 provenance 和参与训练的文档数）。tokenizer 的身份是 `tokenizer.json` 的 sha256（`surogate_tlc.data.tokenizer.tokenizer_sha256()`），shard 的 manifest 也记录它。同样的语料与参数训练出逐字节相同的文件。
 - 一致性检查：`compare()` 比较本 tokenizer 与原生 tokenizer 的特殊 id 和词表大小，并逐段比较普通编码、带特殊 token 的编码，以及两侧对普通编码 id 的解码。文本是固定的边界用例（`EDGE_CASES`：CRLF、单独的 CR、tab、CJK 标识符、emoji、f-string、字符串中的 U+2028、特殊 token 字符串等）加语料样本。CPU 测试用替身检查 harness 能发现各类差异；与真实原生 tokenizer 的比较在 GPU 主机上进行（G0 的 `check` 命令与 `fork/tlc/tests/gpu/test_data_native.py`）。原生 tokenizer 在 CPU 上编译需要 CMake 拉取的头文件依赖（fmt、nlohmann/json、minja），fork CI 的 CPU lane 没有它们，所以这一比较放在有原生构建的主机上；上游同步时，pin 测试盯住 split 正则的名单和手写 splitter 覆盖的正则。
+
+### freqtrim
+
+`surogate_tlc.data.freqtrim`（命令 `freqtrim`）按实验笔记的构建步骤从 Qwen 的字节级 BPE 中取子集。用途：后训练由 Qwen 教师按 byte-prefix marginal（BPM）在学生 token 上打分，学生的每个 token 都是 Qwen token、按 Qwen 的 rank 合并时，这种打分近乎精确。
+
+- 输入：Qwen 格式的 `tokenizer.json`（字节级 BPE，split 正则必须与 Qwen2 的逐字相同，否则拒绝），以及它的仓库、revision（40 位十六进制）、许可；`--teacher-sha256` 给出时文件必须一致。语料是 corpus spec 的 train 划分，与 `train` 读同一批文档（去污染报告删除的文档不参与）。
+- 构建：
+  1. 子集先放入全部 256 个 ByteLevel 字母表 token；
+  2. 用教师的词表与 merge（不带教师的 normalizer）在**该臂正则**切出的 pre-token 内编码 train 划分，统计每个教师 token 的次数；
+  3. 按次数从高到低（同次数时教师 id 小的在前）加入 token，并递归加入它的 merge 父项（父项取产生它的 rank 最小的 merge）；加不下的 token 跳过、继续试下一个，直到 `vocab_size − 5` 个；train 划分达不到这个数时报错；
+  4. merge 表取结果与两个父项都在子集内的教师 merge，保持 rank 顺序；
+  5. 特殊 token 只属于学生，id 0–4 与 `train` 相同；教师自己的特殊 token（`<|im_end|>` 等）不进入；普通 token 按教师 id 的顺序从 id 5 起编号。
+- 正则 `--regex`（预分词的选择尚未定，三者都可建）：
+
+  | 名称 | 规则 | 原生 tokenizer 的实现 |
+  |---|---|---|
+  | `qwen` | Qwen2 正则逐字（即 `qwen2`） | 手写 splitter |
+  | `fine-a` | 细分写法 A：把 `[^\r\n\p{L}\p{N}]?\p{L}+` 换成 ` ?\p{L}+`，字母只带一个前导空格，标点不粘字母；缩写写成 `'[sS]` 形式（std::regex 没有 `(?i:…)`） | std::regex 回退 |
+  | `fine-b` | 写法 B：在写法 A 上另保留 `_\p{L}+` 成片 | std::regex 回退 |
+
+  实验笔记要求在 TOK-AB 之前固定细分写法中的一种；两种都实现，由 owner 选定。
+- 没有 normalizer：Qwen 的 `tokenizer.json` 带 NFC，学生不带，`decode(encode(x)) == x`；manifest 记下教师的 normalizer，BPM 打分时教师一侧要按同样的字节处理。
+- manifest（`tokenizer_manifest.json`）另记：`kind = "freqtrim"`、正则名与正则、教师的仓库/revision/许可/文件 sha256、Qwen 词表身份 `vocab_identity`（普通 token 词表、merge、pre-tokenizer 与 normalizer 合起来的 sha256，只差附加特殊 token 的两个教师文件相同）、子集的填充统计（字节 token、按频率加入、作为父项加入、因放不下跳过的个数）、在 train 划分上实际出现的学生 token 数 `reachable_on_train`，以及学生 id 到教师 id 映射的 sha256。同样的输入得到逐字节相同的三个文件。
+- `freqtrim-check` 对一个 freqtrim 目录和它 manifest 中的教师（sha256 必须相同）做实验笔记的 CPU 检查：每个普通 token 都是教师 token；对 merge 父项封闭；merge 是过滤后的教师 merge 且保持 rank；256 个字节逐个可编码；边界用例 round trip 且正文不产生特殊 id；没有 token 把数字与其他字符混在一起；特殊 id 为 0–4；学生 BPE 单独编码每个教师普通 token 的字节都成功（BPM 的 φ 表的前提）；没有 normalizer。
+- CPU 测试用测试写出的合成教师（Qwen2 格式，不是真实的 Qwen 文件）验证以上各条，并验证实验笔记的结构性事实：`qwen` 子集下，把标识符与整数并成一片的更粗正则不改变切分，依赖上下文的空白（行首缩进加下一个词）是例外。真实 Qwen 文件上的构建与检查在 owner 主机上运行，尚未运行。
 
 ## 数据 shard
 

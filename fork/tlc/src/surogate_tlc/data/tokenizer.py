@@ -4,10 +4,13 @@
   "gpt2" and "python" are regex candidates of the experiment notebook (GPT-2's pattern, and an identifier-aware
   pattern after its pyaware2 with Unicode letter classes); "qwen2", the default, is Qwen2's split pattern, GPT-2's
   family with the Unicode classes \\p{L} and \\p{N} and every digit a piece of its own, the regex the teacher-led
-  training memo pairs with its Qwen-subset vocabulary. For a model_type it does not know, such as "tlc", the native
-  tokenizer (csrc/src/tokenizer) reads the pattern from tokenizer.json, or uses GPT-2's when there is none. It has
-  hand-written splitters for the qwen2 and GPT-2 patterns and runs any other one, "python" included, through its
-  std::regex fallback. There is no normaliser, so decode(encode(text)) == text.
+  training memo pairs with its Qwen-subset vocabulary; "python-digit" is "python" with every digit a piece of its
+  own (the notebook's digit rule). For a model_type it does not know, such as "tlc", the native tokenizer (csrc/src/tokenizer)
+  reads the pattern from tokenizer.json, or uses GPT-2's when there is none. It has hand-written splitters for the
+  qwen2 and GPT-2 patterns and runs any other one, "python" and "python-digit" included, through its std::regex
+  fallback. There is no normaliser, so decode(encode(text)) == text.
+- The vocabulary is a BPE trained here (train_tokenizer), or a frequency-chosen subset of a Qwen BPE (freqtrim,
+  GAP-18, in surogate_tlc.data.freqtrim; the `freqtrim` command below).
 - Special tokens, ids 0-4: <|pad|>, <|bos|>, <|eos|>, <|code_start|>, <|code_end|>; the pad, bos and eos ids of
   hf.default_config() are these.
 - The chat template renders <|bos|>, the message contents, then <|eos|> unless a generation prompt is asked
@@ -44,7 +47,8 @@ PAD, BOS, EOS, CODE_START, CODE_END = SPECIAL_TOKENS = (
 VOCAB_SIZE = 16384
 # Pre-tokenizer candidates by name: a split pattern, or None for the GPT-2 regex built into the byte-level step.
 # "qwen2" is GPT-2's family with single digits; "python" keeps identifiers (with "_") whole and common operators
-# together, after the notebook's pyaware2, with Unicode letter and digit classes.
+# together, after the notebook's pyaware2, with Unicode letter and digit classes; "python-digit" (below) is "python"
+# with single digits.
 PRETOKENIZERS = {
     "qwen2": (
         r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}"
@@ -56,6 +60,14 @@ PRETOKENIZERS = {
         r"|[ ]?(?:\*\*=|//=|>>=|<<=|->|:=|==|!=|<=|>=|\*\*|//|<<|>>|[+\-*/%&|^@]=)|[ ]?[^\s\p{L}\p{N}_]|\n[ \t]*|[ \t]+"
     ),
 }
+# The notebook's per-digit variant of "python": its number branch becomes \p{N}. Its identifier branch also
+# drops \p{N}, or "x1" would stay one piece whose merge "x1" breaks the one-digit-per-token rule; so "x1" is "x" + "1",
+# as under qwen2.
+PRETOKENIZERS["python-digit"] = (
+    PRETOKENIZERS["python"]
+    .replace(r"[ ]?\p{N}+(?:\.\p{N}*)?(?:[eE][+-]?\p{N}+)?", r"\p{N}")
+    .replace(r"[\p{L}_][\p{L}\p{N}_]*", r"[\p{L}_][\p{L}_]*")
+)
 DEFAULT_PRETOKENIZER = "qwen2"
 CHAT_TEMPLATE = (
     "{{ bos_token }}{% for message in messages %}{{ message['content'] }}{% endfor %}"
@@ -93,12 +105,74 @@ EDGE_CASES = (
 )
 
 
-def _pre_tokenizer(name: str) -> pre_tokenizers.PreTokenizer:
-    pattern = PRETOKENIZERS[name]
+def split_pre_tokenizer(pattern: str | None) -> pre_tokenizers.PreTokenizer:
+    """A split pattern isolating its matches, then the byte-level mapping; None is the byte-level step's GPT-2 regex."""
     if pattern is None:
         return pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=True)
     split = pre_tokenizers.Split(Regex(pattern), behavior="isolated")
     return pre_tokenizers.Sequence([split, pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False)])
+
+
+def _pre_tokenizer(name: str) -> pre_tokenizers.PreTokenizer:
+    return split_pre_tokenizer(PRETOKENIZERS[name])
+
+
+class TrainTexts:
+    """The texts every vocabulary builder learns from: the documents of the corpus's train split, in corpus order,
+    counted per source (`count`) next to the documents the builder dropped (`dropped`, by source and reason)."""
+
+    def __init__(self, corpus: Corpus):
+        self.corpus = corpus
+        self.dropped: Counter = Counter()
+        self.count: Counter = Counter()
+
+    def __iter__(self):
+        for doc in documents(self.corpus, self.dropped):
+            if split_of(self.corpus, doc) == "train":
+                self.count[doc.source.name] += 1
+                yield doc.text
+
+    def sources(self) -> list[dict[str, Any]]:
+        """The corpus provenance per source, with the documents read and dropped by the last pass."""
+        sources = provenance(self.corpus)
+        for s in sources:
+            s["documents"] = self.count[s["name"]]
+            s["dropped"] = {reason: n for (name, reason), n in sorted(self.dropped.items()) if name == s["name"]}
+        return sources
+
+    def record(self) -> dict[str, Any]:
+        return {
+            "spec_sha256": file_sha256(self.corpus.path),
+            "seed": self.corpus.seed,
+            "val_fraction": self.corpus.val_fraction,
+            "trained_on": "train split",
+            "decontam": decontam_record(self.corpus),
+            "rules": list(RULES),
+        }
+
+
+def finish_tokenizer(tokenizer: Tokenizer) -> Tokenizer:
+    """The decoder and post-processor every TLC tokenizer.json carries."""
+    tokenizer.decoder = decoders.ByteLevel()
+    tokenizer.post_processor = processors.ByteLevel(trim_offsets=False)
+    return tokenizer
+
+
+def write_config(out: Path) -> None:
+    """tokenizer_config.json: the special tokens and the chat template, the same for every vocabulary."""
+    config = {
+        "tokenizer_class": "PreTrainedTokenizerFast",
+        "bos_token": BOS,
+        "eos_token": EOS,
+        "pad_token": PAD,
+        "additional_special_tokens": [CODE_START, CODE_END],
+        "add_bos_token": False,
+        "add_eos_token": False,
+        "clean_up_tokenization_spaces": False,
+        "model_max_length": hf.CONTEXT_LENGTH,
+        "chat_template": CHAT_TEMPLATE,
+    }
+    (Path(out) / CONFIG_FILE).write_text(dump_json(config), encoding="utf-8")
 
 
 def train_tokenizer(
@@ -113,10 +187,8 @@ def train_tokenizer(
     out = Path(out)
     if (out / TOKENIZER_FILE).exists():
         raise FileExistsError(f"{out / TOKENIZER_FILE} exists")
-    tokenizer = Tokenizer(models.BPE())
+    tokenizer = finish_tokenizer(Tokenizer(models.BPE()))
     tokenizer.pre_tokenizer = _pre_tokenizer(pretokenizer)
-    tokenizer.decoder = decoders.ByteLevel()
-    tokenizer.post_processor = processors.ByteLevel(trim_offsets=False)
     trainer = trainers.BpeTrainer(
         vocab_size=vocab_size,
         min_frequency=min_frequency,
@@ -124,37 +196,13 @@ def train_tokenizer(
         initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
         show_progress=False,
     )
-    dropped: Counter = Counter()
-    count = Counter()
-
-    def texts():
-        for doc in documents(corpus, dropped):
-            if split_of(corpus, doc) == "train":
-                count[doc.source.name] += 1
-                yield doc.text
-
-    tokenizer.train_from_iterator(texts(), trainer)
+    texts = TrainTexts(corpus)
+    tokenizer.train_from_iterator(texts, trainer)
     if tokenizer.get_vocab_size() != vocab_size:
         raise ValueError(f"the corpus yields {tokenizer.get_vocab_size()} tokens, not {vocab_size}: it is too small")
     out.mkdir(parents=True, exist_ok=True)
     tokenizer.save(str(out / TOKENIZER_FILE))
-    config = {
-        "tokenizer_class": "PreTrainedTokenizerFast",
-        "bos_token": BOS,
-        "eos_token": EOS,
-        "pad_token": PAD,
-        "additional_special_tokens": [CODE_START, CODE_END],
-        "add_bos_token": False,
-        "add_eos_token": False,
-        "clean_up_tokenization_spaces": False,
-        "model_max_length": hf.CONTEXT_LENGTH,
-        "chat_template": CHAT_TEMPLATE,
-    }
-    (out / CONFIG_FILE).write_text(dump_json(config), encoding="utf-8")
-    sources = provenance(corpus)
-    for s in sources:
-        s["documents"] = count[s["name"]]
-        s["dropped"] = {reason: n for (name, reason), n in sorted(dropped.items()) if name == s["name"]}
+    write_config(out)
     manifest = {
         "tlc_tokenizer_version": TOKENIZER_VERSION,
         "tokenizer_sha256": tokenizer_sha256(out),
@@ -163,15 +211,8 @@ def train_tokenizer(
         "pretokenizer": pretokenizer,
         "split_pattern": PRETOKENIZERS[pretokenizer],
         "special_tokens": list(SPECIAL_TOKENS),
-        "corpus": {
-            "spec_sha256": file_sha256(corpus.path),
-            "seed": corpus.seed,
-            "val_fraction": corpus.val_fraction,
-            "trained_on": "train split",
-            "decontam": decontam_record(corpus),
-            "rules": list(RULES),
-        },
-        "sources": sources,
+        "corpus": texts.record(),
+        "sources": texts.sources(),
     }
     (out / MANIFEST_FILE).write_text(dump_json(manifest), encoding="utf-8")
     return out
@@ -254,11 +295,43 @@ def main(argv: Sequence[str] | None = None) -> int:
     check.add_argument("model_dir", type=Path, help="model (or tokenizer) directory")
     check.add_argument("corpus", type=Path, help="corpus spec (TOML) to draw documents from")
     check.add_argument("--limit", type=int, default=10_000, help="documents, in equal shares per source")
+    trim = commands.add_parser("freqtrim", help="a Qwen BPE subset by frequency on the train split (GAP-18)")
+    trim.add_argument("corpus", type=Path, help="corpus spec (TOML)")
+    trim.add_argument("out", type=Path, help="output directory")
+    trim.add_argument("--teacher", type=Path, required=True, help="the Qwen tokenizer.json")
+    trim.add_argument("--teacher-repo", required=True, help="its Hugging Face repository, e.g. Qwen/...")
+    trim.add_argument("--teacher-revision", required=True, help="the 40-hex commit the file was fetched at")
+    trim.add_argument("--teacher-licence", required=True, help="the repository's licence, e.g. apache-2.0")
+    trim.add_argument("--teacher-sha256", help="refuse a file with another sha256")
+    trim.add_argument("--regex", required=True, help="qwen, fine-a or fine-b (docs/data.md: Tokenizer)")
+    trim.add_argument("--vocab-size", type=int, default=VOCAB_SIZE)
+    verify = commands.add_parser("freqtrim-check", help="the CPU checks of a freqtrim directory against its teacher")
+    verify.add_argument("tokenizer_dir", type=Path)
+    verify.add_argument("--teacher", type=Path, required=True, help="the teacher tokenizer.json the manifest names")
     args = parser.parse_args(argv)
     if args.command == "train":
         out = train_tokenizer(
             load_corpus(args.corpus), args.out, pretokenizer=args.pretokenizer, vocab_size=args.vocab_size
         )
+        print(json.dumps({"tokenizer": str(out), "sha256": tokenizer_sha256(out)}))
+        return 0
+    if args.command in ("freqtrim", "freqtrim-check"):
+        from . import freqtrim
+
+        try:
+            if args.command == "freqtrim-check":
+                problems = freqtrim.check_directory(args.tokenizer_dir, args.teacher)
+                print("\n".join(problems) if problems else "freqtrim checks pass")
+                return 1 if problems else 0
+            ref = freqtrim.TeacherRef(
+                args.teacher_repo, args.teacher_revision, args.teacher_licence, args.teacher_sha256
+            )
+            out = freqtrim.build(
+                load_corpus(args.corpus), args.out, args.teacher, ref, regex=args.regex, vocab_size=args.vocab_size
+            )
+        except (freqtrim.FreqtrimError, FileExistsError) as err:
+            print(f"freqtrim: {err}", file=sys.stderr)
+            return 1
         print(json.dumps({"tokenizer": str(out), "sha256": tokenizer_sha256(out)}))
         return 0
     from ..native import native_tokenizer
