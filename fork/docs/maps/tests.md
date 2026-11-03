@@ -14,6 +14,8 @@
 | `fork/experimental/tests/` | fork：实验训练器 |
 | `fork/tlc/tests/` | fork：TLC 包；`cpu/` 不需要原生扩展，`gpu/` 在 GPU 主机上运行 |
 | `fork/bilingual/tests/` | fork：双语独立专家包（纯 PyTorch）；`cpu/` 用 `FORK_PY` 运行，在任何主机上都只用 CPU；`gpu/` 是运行手册 G0 第 3 步，在 GPU 主机的 `fork/.venv-bilingual` 中单独运行 |
+| `fork/corpora/tests/` | fork：语料适配器包；`cpu/` 用 `FORK_PY` 运行，用本地 HTTP 服务器代替 Hub，不访问网络 |
+| `fork/tokstudy/tests/` | fork：分词器研究包；`cpu/` 用 `FORK_PY` 运行，在任何主机上都只用 CPU |
 | `fork/native/tests/` | fork：编译进上游测试可执行文件的 C++ 用例；`host/`：由 `fork/patches/tests/native/` 的 pytest 用主机编译器构建的主机程序，不属于任何上游目标 |
 | `fork/native/openmp-contract/` | fork：OpenMP 接线测试，以及 `csrc/CMakeLists.txt` 挂接点的 configure 期检查 |
 | `fork/tools/tests/` | fork：维护工具（同步脚本、ledger 检查、`fork/dev`、原生挂接点检查、发布检查 `release_guard.py`）的测试 |

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools==84.2.1"]
+build-backend = "setuptools.build_meta"
+
+# Not published. Installed editable into fork/.venv-corpora on the host that stages the corpora (README.md, 环境).
+[project]
+name = "surogate-corpora"
+version = "0.1.0.dev0"
+description = "Pinned UltraData (and UN PC) corpus adapters: HTTP Range reads, row-group plans, filters, exports"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+# Runtime requirement: pyarrow, listed in requirements.txt rather than here (the same rule as the other fork
+# packages: installing this package never lets a resolver change the environment's pinned versions).
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["surogate_corpora*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/cpu"]
+addopts = "-p no:cacheprovider --import-mode=importlib"

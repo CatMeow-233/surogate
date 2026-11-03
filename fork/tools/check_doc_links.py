@@ -156,11 +156,19 @@ def repo_path_problem(doc, token, doc_relative=True):
 
 
 def module_exists(name):
-    """True when `python -m name` finds a module in the package or the experimental, TLC or bilingual checkout."""
+    """True when `python -m name` finds a module in the package or a fork package's checkout (experimental, TLC,
+    bilingual, corpora, tokstudy)."""
     path = name.replace(".", "/")
     return any(
         exists(root + path + suffix)
-        for root in ("", "fork/experimental/src/", "fork/tlc/src/", "fork/bilingual/src/")
+        for root in (
+            "",
+            "fork/experimental/src/",
+            "fork/tlc/src/",
+            "fork/bilingual/src/",
+            "fork/corpora/src/",
+            "fork/tokstudy/src/",
+        )
         for suffix in (".py", "/__init__.py", "/__main__.py")
     )
 

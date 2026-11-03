@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools==84.2.1"]
+build-backend = "setuptools.build_meta"
+
+# Not published. Installed editable into fork/.venv-tokstudy (README.md, 环境).
+[project]
+name = "surogate-tokstudy"
+version = "0.1.0.dev0"
+description = "Tokenizer study of TLC (O-10) and the bilingual experts (B-O11): equal-FLOPs pilots of subword, byte and H-Net arms"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+# Runtime requirements: torch (a CUDA build for the GPU host, installed on its own), numpy, tokenizers,
+# safetensors, optionally mamba-ssm; listed in requirements-gpu.txt rather than here, so that installing this
+# package never lets a resolver replace the torch build the environment was created with.
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["surogate_tokstudy*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/cpu"]
+addopts = "-p no:cacheprovider --import-mode=importlib"

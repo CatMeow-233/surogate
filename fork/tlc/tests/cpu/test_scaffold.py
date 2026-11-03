@@ -122,3 +122,16 @@ def test_no_citations_of_documents_outside_the_repository():
                 if EXTERNAL_CITATION.search(line):
                     found.append(f"{path.relative_to(TLC)}:{number}: {line.strip()[:80]}")
     assert not found, "\n".join(found)
+
+
+def test_src_never_imports_the_study_packages():
+    """fork/tokstudy and fork/corpora read this project (its corpus and tokenizer files, a few pure-data modules);
+    the project never imports them, so their experiments cannot change what the production pipeline does."""
+    pattern = re.compile(r"\bsurogate_(?:tokstudy|corpora)\b")
+    hits = [
+        f"{path.relative_to(TLC)}:{number}"
+        for path in sorted((TLC / "src").rglob("*.py"))
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if pattern.search(line)
+    ]
+    assert not hits, hits

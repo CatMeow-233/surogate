@@ -47,6 +47,8 @@ def run(tree, env, *args, **extra):
         ("patches", "fork/patches/tests"),
         ("tlc", "fork/tlc/tests/cpu"),
         ("bilingual", "fork/bilingual/tests/cpu"),
+        ("corpora", "fork/corpora/tests/cpu"),
+        ("tokstudy", "fork/tokstudy/tests/cpu"),
         ("tools", "fork/tools/tests"),
     ],
 )

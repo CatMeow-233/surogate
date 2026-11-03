@@ -1,0 +1,11 @@
+# Python dependencies of fork/.venv-tokstudy, without torch: install a CUDA torch build for sm_120 (RTX 5090) first
+# and record the exact wheel at G0-ts (a CPU-only machine installs CPU torch). Then install fork/tokstudy, fork/tlc
+# and fork/bilingual editable with --no-deps (README.md, 环境). The versions are those of the CPU lane in development.
+numpy==2.5.4
+tokenizers==0.23.3
+safetensors==0.8.0
+pytest==9.1.1
+pytest-timeout==2.4.0
+# Optional, G0-ts: the Triton SSD path of mamba-ssm only, installed with MAMBA_SKIP_CUDA_BUILD=TRUE and
+# --no-build-isolation; whether that imports on sm_120 is untested [assumption]. The torch backend needs nothing.
+# mamba-ssm==2.3.2.post1

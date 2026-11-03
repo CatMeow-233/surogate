@@ -61,10 +61,14 @@ Commands
                                     no native extension needed)
   test bilingual [pytest args]      CPU tests of the bilingual-experts package fork/bilingual (FORK_PY, default
                                     .venv/bin/python; pure PyTorch, imports nothing from surogate)
+  test corpora [pytest args]        CPU tests of the corpus adapters fork/corpora (FORK_PY, default .venv/bin/python;
+                                    needs pyarrow; a local HTTP server stands in for the Hub, no network)
+  test tokstudy [pytest args]       CPU tests of the tokenizer-study package fork/tokstudy (FORK_PY, default
+                                    .venv/bin/python; imports nothing from surogate)
   test tools [pytest args]          tests of the maintenance tools under fork/tools/tests, release_guard.py
                                     included (FORK_PY; the hook-contract cases need cmake and a C++ compiler)
-                                    cpu, patches, tlc, bilingual, tools: a test fails after FORK_TEST_TIMEOUT
-                                    seconds (default 120); FORK_PY needs pytest-timeout
+                                    cpu, patches, tlc, bilingual, corpora, tokstudy, tools: a test fails after
+                                    FORK_TEST_TIMEOUT seconds (default 120); FORK_PY needs pytest-timeout
   test openmp                       OpenMP contract test and csrc hook check in build/fork-openmp
   test release                      the release gates fork/native/release/plan.sh and
                                     fork/experimental/release_plan.sh against synthetic git repositories
@@ -174,6 +178,8 @@ test_suite() {
         patches) fork_pytest fork/patches/tests "$@" ;;
         tlc) fork_pytest fork/tlc/tests/cpu "$@" ;;
         bilingual) fork_pytest fork/bilingual/tests/cpu "$@" ;;
+        corpora) fork_pytest fork/corpora/tests/cpu "$@" ;;
+        tokstudy) fork_pytest fork/tokstudy/tests/cpu "$@" ;;
         tools) fork_pytest fork/tools/tests "$@" ;;
         openmp)
             run cmake -S fork/native/openmp-contract -B build/fork-openmp
@@ -193,7 +199,7 @@ test_suite() {
             run make serve-check
             run make grpo-test
             ;;
-        *) die "usage: fork/dev test cpu|experimental|patches|tlc|bilingual|tools|openmp|release|native|gpu [pytest args]" ;;
+        *) die "usage: fork/dev test cpu|experimental|patches|tlc|bilingual|corpora|tokstudy|tools|openmp|release|native|gpu [pytest args]" ;;
     esac
 }
 

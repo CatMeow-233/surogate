@@ -428,7 +428,8 @@ def checks(fast):
     suites = [["fork/dev", "check"]]
     if not fast:
         suites += [
-            ["fork/dev", "test", suite] for suite in ("patches", "experimental", "tlc", "bilingual", "tools", "cpu")
+            ["fork/dev", "test", suite]
+            for suite in ("patches", "experimental", "tlc", "bilingual", "corpora", "tokstudy", "tools", "cpu")
         ]
     failed = [" ".join(cmd) for cmd in suites if run(*cmd) != 0]
     if failed:

@@ -13,3 +13,12 @@
 /bilingual/src/*.egg-info/
 /bilingual/build/
 /bilingual/dist/
+# fork/corpora and fork/tokstudy: their environments (no trailing slash, as above) and build outputs.
+/.venv-corpora
+/corpora/src/*.egg-info/
+/corpora/build/
+/corpora/dist/
+/.venv-tokstudy
+/tokstudy/src/*.egg-info/
+/tokstudy/build/
+/tokstudy/dist/

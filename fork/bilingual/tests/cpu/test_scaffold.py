@@ -429,3 +429,16 @@ def test_the_cpu_suite_hides_cuda_on_every_host():
     code = "import os, torch; print(os.environ['CUDA_VISIBLE_DEVICES'] == '' and not torch.cuda.is_available())"
     out = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=120)
     assert out.stdout.strip() == "True"
+
+
+def test_src_never_imports_the_study_packages():
+    """fork/tokstudy and fork/corpora read this package (its corpus files, tokenizer.json and a few public modules);
+    the package never imports them, so the study cannot change what the production pipeline does."""
+    pattern = re.compile(r"\bsurogate_(?:tokstudy|corpora)\b")
+    hits = [
+        f"{path.relative_to(BILINGUAL)}:{number}"
+        for path in sorted(SRC.rglob("*.py"))
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if pattern.search(line)
+    ]
+    assert not hits, hits

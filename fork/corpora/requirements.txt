@@ -1,0 +1,6 @@
+# Python dependencies of fork/.venv-corpora (README.md, 环境). pyarrow 21.0.0 is the version the range-read probes of
+# the study ran with; the CPU lane (FORK_PY) gets pyarrow through `datasets` at a floating version, so the tests never
+# compare parquet bytes, only decoded values and export bytes.
+pyarrow==21.0.0
+pytest==9.1.1
+pytest-timeout==2.4.0
