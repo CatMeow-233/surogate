@@ -80,8 +80,12 @@ def write_bpe(path, merges=(), *, specials=(), pre="whole", normalizer=None, tra
     if train_on is not None:
         tok = Tokenizer(models.BPE())
         tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=pre == "gpt2")
-        trainer = trainers.BpeTrainer(vocab_size=vocab_size, special_tokens=list(specials), show_progress=False,
-                                      initial_alphabet=pre_tokenizers.ByteLevel.alphabet())  # fmt: skip
+        trainer = trainers.BpeTrainer(
+            vocab_size=vocab_size,
+            special_tokens=list(specials),
+            show_progress=False,
+            initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
+        )
         tok.train_from_iterator(list(train_on), trainer)
     else:
         vocab = {s: i for i, s in enumerate(specials)}
@@ -142,8 +146,17 @@ init.init_model_dir(modeldir.write_model_dir(out / "model", cfg, out / "tok", in
 
 
 def run_tlc(out: Path, overrides: dict, seed: int | str) -> str:
-    command = [sys.executable, "-I", "-B", "-c", TLC_MODEL_DIR_SCRIPT, str(REPO), str(out), json.dumps(overrides),
-               str(seed)]  # fmt: skip
+    command = [
+        sys.executable,
+        "-I",
+        "-B",
+        "-c",
+        TLC_MODEL_DIR_SCRIPT,
+        str(REPO),
+        str(out),
+        json.dumps(overrides),
+        str(seed),
+    ]
     result = subprocess.run(command, cwd=out.parent, capture_output=True, text=True, timeout=300)
     assert result.returncode == 0, result.stdout + result.stderr
     return result.stdout
@@ -181,15 +194,20 @@ TEXTS = (
 def write_tlc_corpus(root: Path, n_code: int = 60) -> Path:
     """A TLC corpus spec with a code source (groups of 3) and a text source with fences: SYNTHETIC FIXTURE."""
     root.mkdir(parents=True, exist_ok=True)
-    code = [{"text": f"def f{i}(x):\n    return x * {i}  # <|code_end|>\n", "group": f"repo{i // 3}"}
-            for i in range(n_code)]  # fmt: skip
+    code = [
+        {"text": f"def f{i}(x):\n    return x * {i}  # <|code_end|>\n", "group": f"repo{i // 3}"} for i in range(n_code)
+    ]
     (root / "code.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in code) + "\n", "utf-8")
     text = [{"text": TEXTS[i % len(TEXTS)] + f"doc {i}\n"} for i in range(24)]
     (root / "text.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in text) + "\n", "utf-8")
-    source = ('[[source]]\nname = "{0}"\nkind = "{1}"\nfiles = ["{0}.jsonl"]\nurl = "SYNTHETIC FIXTURE"\n'
-              'license = "SYNTHETIC FIXTURE"\ndownloaded = "2026-11-03"\nfilters = []\n')  # fmt: skip
-    (root / "spec.toml").write_text("seed = 5\nval_fraction = 0.25\n" + source.format("code", "code")
-                                    + source.format("text", "text"), encoding="utf-8")  # fmt: skip
+    source = (
+        '[[source]]\nname = "{0}"\nkind = "{1}"\nfiles = ["{0}.jsonl"]\nurl = "SYNTHETIC FIXTURE"\n'
+        'license = "SYNTHETIC FIXTURE"\ndownloaded = "2026-11-03"\nfilters = []\n'
+    )
+    (root / "spec.toml").write_text(
+        "seed = 5\nval_fraction = 0.25\n" + source.format("code", "code") + source.format("text", "text"),
+        encoding="utf-8",
+    )
     return root / "spec.toml"
 
 
@@ -220,11 +238,21 @@ def bilingual_built(tmp_path_factory):
     corpus.mkdir()
     zh = [{"id": f"z{i}", "text": _han(rng, 20) + "，" + _han(rng, 8) + "。"} for i in range(60)]
     en = [{"id": f"e{i}", "text": _words(rng, 15) + ", <|en|> stays text."} for i in range(60)]
-    cs = [{"id": f"c{i}", "segments": [{"lang": "zh", "text": _han(rng, 6)}, {"tag": "<|en|>"},
-                                       {"lang": "en", "text": _words(rng, 4)}]} for i in range(10)]  # fmt: skip
+    cs = [
+        {
+            "id": f"c{i}",
+            "segments": [
+                {"lang": "zh", "text": _han(rng, 6)},
+                {"tag": "<|en|>"},
+                {"lang": "en", "text": _words(rng, 4)},
+            ],
+        }
+        for i in range(10)
+    ]
     for name, rows in (("zh", zh), ("en", en), ("cs", cs)):
-        (corpus / f"{name}.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
-                                             encoding="utf-8")  # fmt: skip
+        (corpus / f"{name}.jsonl").write_text(
+            "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8"
+        )
     (corpus / "spec.toml").write_text(
         '[[source]]\nname = "zh-fix"\nkind = "zh"\nfiles = ["zh.jsonl"]\nlicence = "CC0-1.0"\n'
         '[[source]]\nname = "en-fix"\nkind = "en"\nfiles = ["en.jsonl"]\nlicence = "CC0-1.0"\n'

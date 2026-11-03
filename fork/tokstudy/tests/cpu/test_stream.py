@@ -239,12 +239,14 @@ def test_the_stream_holds_its_byte_mixture(tmp_path):
         seen[doc.domain] += doc.text_bytes()
         if n >= 100:
             assert abs(seen["en"] / (seen["en"] + seen["py"]) - 0.4) < 0.02
-    capped = S.build_stream(docs, tmp_path / "cap", seed=0, k_train=64, source=SOURCE, mixture={"py": 0.6, "en": 0.4},
-                            max_units=20000)  # fmt: skip
+    capped = S.build_stream(
+        docs, tmp_path / "cap", seed=0, k_train=64, source=SOURCE, mixture={"py": 0.6, "en": 0.4}, max_units=20000
+    )
     assert 20000 <= capped.doc["units"] < 20000 + 2 * 200
     with pytest.raises(TokstudyError, match="too few units"):
-        S.build_stream(docs, tmp_path / "big", seed=0, k_train=64, source=SOURCE, mixture={"py": 0.6, "en": 0.4},
-                       max_units=10**9)  # fmt: skip
+        S.build_stream(
+            docs, tmp_path / "big", seed=0, k_train=64, source=SOURCE, mixture={"py": 0.6, "en": 0.4}, max_units=10**9
+        )
 
 
 def test_the_stream_refuses_bad_inputs(tmp_path):
@@ -268,8 +270,13 @@ def test_the_stream_refuses_bad_inputs(tmp_path):
 def test_rows_of_two_arms_cover_the_same_byte_spans_in_the_same_order(tmp_path, bpe_writer):
     docs = mixture_docs(80)
     st = S.build_stream(docs, tmp_path / "s", seed=0, k_train=48, source=SOURCE, mixture={"py": 0.5, "en": 0.5})
-    path, sha = bpe_writer(tmp_path / "tok" / "tokenizer.json", specials=tuple(TLC_SPECIALS), pre="gpt2",
-                           train_on=[d.texts()[0] for d in docs], vocab_size=320)  # fmt: skip
+    path, sha = bpe_writer(
+        tmp_path / "tok" / "tokenizer.json",
+        specials=tuple(TLC_SPECIALS),
+        pre="gpt2",
+        train_on=[d.texts()[0] for d in docs],
+        vocab_size=320,
+    )
     sub = SubwordCodec.from_tokenizer_json(path, sha, TLC_SPECIALS, check=True)
     byte = ByteCodec(TLC_SPECIALS, check=True)
     rows_s, rows_b = list(S.rows_for_arm(st, sub)), list(S.rows_for_arm(st, byte))
@@ -288,16 +295,31 @@ def test_rows_of_two_arms_cover_the_same_byte_spans_in_the_same_order(tmp_path, 
 def test_stream_command_line(tmp_path, tlc_corpus_writer):
     spec = tlc_corpus_writer(tmp_path / "corpus")
     prereg = tmp_path / "prereg.toml"
-    prereg.write_text('format = "tokstudy-prereg/1"\ntable = "tlc-N"\n[budget]\nF_target = 1e9\n'
-                      '[context]\nK_train = 64\nK_eval = 64\n[mixture]\npy = 0.7\nen = 0.3\n', encoding="utf-8")  # fmt: skip
-    command = [sys.executable, "-I", "-B", "-c", "import sys; sys.path[:0] = sys.argv[1:4]; "
-               "from surogate_tokstudy.__main__ import main; sys.exit(main(sys.argv[4:]))",
-               *(str(REPO / "fork" / p / "src") for p in ("tokstudy", "tlc", "bilingual")), "stream"]  # fmt: skip
-    ok = subprocess.run([*command, "--prereg", str(prereg), "--tlc", str(spec), "--out", str(tmp_path / "s")],
-                        capture_output=True, text=True, timeout=120)  # fmt: skip
+    prereg.write_text(
+        'format = "tokstudy-prereg/1"\ntable = "tlc-N"\n[budget]\nF_target = 1e9\n'
+        "[context]\nK_train = 64\nK_eval = 64\n[mixture]\npy = 0.7\nen = 0.3\n",
+        encoding="utf-8",
+    )
+    command = [
+        sys.executable,
+        "-I",
+        "-B",
+        "-c",
+        "import sys; sys.path[:0] = sys.argv[1:4]; "
+        "from surogate_tokstudy.__main__ import main; sys.exit(main(sys.argv[4:]))",
+        *(str(REPO / "fork" / p / "src") for p in ("tokstudy", "tlc", "bilingual")),
+        "stream",
+    ]
+    ok = subprocess.run(
+        [*command, "--prereg", str(prereg), "--tlc", str(spec), "--out", str(tmp_path / "s")],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
     assert ok.returncode == 0, ok.stderr
     summary = json.loads(ok.stdout)
     assert summary["docs"] > 0 and set(summary["achieved_mixture"]) == {"py", "en"}
-    bad = subprocess.run([*command, "--prereg", str(prereg), "--out", str(tmp_path / "t")], capture_output=True,
-                         text=True, timeout=120)  # fmt: skip
+    bad = subprocess.run(
+        [*command, "--prereg", str(prereg), "--out", str(tmp_path / "t")], capture_output=True, text=True, timeout=120
+    )
     assert bad.returncode == 1 and "give exactly one of" in bad.stderr

@@ -111,8 +111,10 @@ def test_the_web_pool_keeps_only_its_three_sources(fake_hub, client_for, monkeyp
     kept = [r for r in files[0] if r["source"] in profiles.WEB_POOL]
     assert doc["totals"]["docs"] == len(kept) and doc["totals"]["drops"] == {"source_in": 48 - len(kept)}
     assert {p["path"].split("/")[1].rsplit("-", 1)[0] for p in doc["parts"]} == {
-        "ufw-zh-cci3", "ufw-zh-chinesewebtext", "ufw-zh-industrycorpus"
-    }  # fmt: skip
+        "ufw-zh-cci3",
+        "ufw-zh-chinesewebtext",
+        "ufw-zh-industrycorpus",
+    }
 
 
 def test_parallel_export_is_parsed_by_the_bilingual_bridge_layout(fake_hub, client_for, monkeypatch, tmp_path):
@@ -136,8 +138,9 @@ def test_two_runs_give_byte_identical_parts_and_verify_catches_one_changed_byte(
 ):
     files = [stack3_rows(60), stack3_rows(60, offset=60)]
     a = tmp_path / "a"
-    plan, doc, source = _export(fake_hub, client_for, monkeypatch, a, "stack3-py", "tlc-python-all", files,
-                                part_bytes=600)  # fmt: skip
+    plan, doc, source = _export(
+        fake_hub, client_for, monkeypatch, a, "stack3-py", "tlc-python-all", files, part_bytes=600
+    )
     b = tmp_path / "b"
     fetch(plan, b, client=client_for(fake_hub), downloaded="2026-11-03", part_bytes=600)
     parts = sorted(p.relative_to(a) for p in (a / "parts").iterdir())
@@ -204,8 +207,9 @@ def test_verify_reports_a_damaged_manifest(fake_hub, client_for, monkeypatch, tm
         doc = json.loads((out / "provenance.json").read_text())
         doc["totals"]["docs"] += 1
         (out / "provenance.json").write_text(json.dumps(doc))
-        assert verify_export(out) == ["provenance.json: provenance_sha256 does not match the document's content "
-                                      "(edited by hand?)"]  # fmt: skip
+        assert verify_export(out) == [
+            "provenance.json: provenance_sha256 does not match the document's content (edited by hand?)"
+        ]
     else:
         (out / "spec_fragment.toml").write_text("# emptied\n")
         assert verify_export(out) == [

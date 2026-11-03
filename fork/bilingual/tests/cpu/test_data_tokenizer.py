@@ -101,8 +101,9 @@ def arms(data_pipeline, tmp_path_factory):
     derived = data_pipeline["derived"]
     files = [derived.root / e["path"] for e in derived.files(split="seed_train")]
     root = tmp_path_factory.mktemp("pretok")
-    paths = {n: T.train_tokenizer(files, 1024, root / n / "tokenizer.json", derived, pretokenizer=n)
-             for n in T.PRETOKENIZERS}  # fmt: skip
+    paths = {
+        n: T.train_tokenizer(files, 1024, root / n / "tokenizer.json", derived, pretokenizer=n) for n in T.PRETOKENIZERS
+    }
     return {n: (path, T.load_tokenizer(path)) for n, path in paths.items()}
 
 
@@ -118,8 +119,13 @@ def test_bytelevel_default_is_the_v10_recipe(data_pipeline, arms):
     old = Tokenizer(models.BPE(unk_token="<unk>"))
     old.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
     old.decoder = decoders.ByteLevel()
-    trainer = trainers.BpeTrainer(vocab_size=1024, min_frequency=2, special_tokens=list(SPECIAL_TOKENS),
-                                  initial_alphabet=pre_tokenizers.ByteLevel.alphabet(), show_progress=False)  # fmt: skip
+    trainer = trainers.BpeTrainer(
+        vocab_size=1024,
+        min_frequency=2,
+        special_tokens=list(SPECIAL_TOKENS),
+        initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
+        show_progress=False,
+    )
     derived = data_pipeline["derived"]
     inputs = [(derived.root / e["path"], e) for e in derived.files(split="seed_train")]
     old.train_from_iterator(T._texts(inputs, derived), trainer=trainer)

@@ -76,8 +76,17 @@ def test_command_line(tmp_path, capsys, bpe_writer):
     t_path, t_sha = bpe_writer(tmp_path / "t" / "tokenizer.json", [("Ġ", "Ġ")], normalizer="nfc")
     samples = tmp_path / "py.jsonl"
     samples.write_text(json.dumps({"text": "x  = 1\n"}) + "\n", encoding="utf-8")  # SYNTHETIC FIXTURE
-    args = ["align", "--teacher", f"{t_path}@{t_sha}", "--bytes", "bytes", "--docs", f"py={samples}",
-            "--out", str(tmp_path / "align.json")]  # fmt: skip
+    args = [
+        "align",
+        "--teacher",
+        f"{t_path}@{t_sha}",
+        "--bytes",
+        "bytes",
+        "--docs",
+        f"py={samples}",
+        "--out",
+        str(tmp_path / "align.json"),
+    ]
     assert main(args) == 0
     report = json.loads((tmp_path / "align.json").read_text(encoding="utf-8"))
     assert report["format"] == "tokstudy-align/1" and report["teacher"]["normalizer_dropped"] == {"type": "NFC"}

@@ -40,8 +40,11 @@ def environment(dev: torch.device) -> dict[str, Any]:
         "deterministic": torch.are_deterministic_algorithms_enabled(),
     }
     if dev.type == "cuda":
-        out |= {"cuda": torch.version.cuda, "gpu": torch.cuda.get_device_name(dev),
-                "capability": list(torch.cuda.get_device_capability(dev))}  # fmt: skip
+        out |= {
+            "cuda": torch.version.cuda,
+            "gpu": torch.cuda.get_device_name(dev),
+            "capability": list(torch.cuda.get_device_capability(dev)),
+        }
     return out
 
 

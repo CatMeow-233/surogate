@@ -156,8 +156,9 @@ def test_dry_run_footers_replace_the_footer_reads(fake_hub, client_for, monkeypa
         f.path: RemoteParquet(client, f).footer for f in client.list_files(source.repo, source.revision, source.files)
     }
     heads = len(fake_hub.requests("api", "HEAD"))
-    plan = build_plan(profiles.resolve("bilingual-parallel-unpc"), budget_bytes=300, seed=0, client=client,
-                      dry_run_footers=footers)  # fmt: skip
+    plan = build_plan(
+        profiles.resolve("bilingual-parallel-unpc"), budget_bytes=300, seed=0, client=client, dry_run_footers=footers
+    )
     assert len(fake_hub.requests("api", "HEAD")) == heads and plan.doc["estimate"]["metadata_bytes_fetched"] == 0
 
 

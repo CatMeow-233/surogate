@@ -26,8 +26,7 @@ from surogate_tokstudy.docs import EvalDoc, Seg
 from surogate_tokstudy.prereg import load_prereg
 
 WORDS = ("def", "add", "x", "return", "total", "self", "value", "for", "in", "range", "if", "None")
-TINY_HNET = ('{d0 = 16, encoder_layers = 1, decoder_layers = 1, ratio = 4.0, head_dim = 8, state = 4, '
-             'ssd_chunk = 8}')  # fmt: skip
+TINY_HNET = "{d0 = 16, encoder_layers = 1, decoder_layers = 1, ratio = 4.0, head_dim = 8, state = 4, ssd_chunk = 8}"
 K = 32
 
 
@@ -67,10 +66,21 @@ def table(tmp_path_factory, bpe_writer):
     """A SYNTHETIC tlc-N table: stream, tokenizer, registry (N0 subword, N1 H-Net, N2 bytes; tiny geometry)."""
     root = tmp_path_factory.mktemp("table")
     docs = word_docs()
-    st = S.build_stream(docs, root / "stream", seed=0, k_train=K, source={"project": "tlc", "fixture": "SYNTHETIC"},
-                        mixture={"py": 0.75, "en": 0.25})  # fmt: skip
-    path, sha = bpe_writer(root / "tok" / "tokenizer.json", specials=tuple(TLC_SPECIALS), pre="gpt2",
-                           train_on=[d.texts()[0] for d in docs], vocab_size=300)  # fmt: skip
+    st = S.build_stream(
+        docs,
+        root / "stream",
+        seed=0,
+        k_train=K,
+        source={"project": "tlc", "fixture": "SYNTHETIC"},
+        mixture={"py": 0.75, "en": 0.25},
+    )
+    path, sha = bpe_writer(
+        root / "tok" / "tokenizer.json",
+        specials=tuple(TLC_SPECIALS),
+        pre="gpt2",
+        train_on=[d.texts()[0] for d in docs],
+        vocab_size=300,
+    )
     arms = root / "arms.toml"
     arms.write_text(
         'format = "tokstudy-arms/1"\ntable = "tlc-N"\n'
@@ -83,21 +93,40 @@ def table(tmp_path_factory, bpe_writer):
     )
     found = {a.id: a for a in load_arms(arms)}
     # F_target: about 30 steps of the byte arm at 4 rows of K positions
-    probe = T.setup(found["N2"], stream=st, prereg=load_prereg(write_prereg(root / "probe.toml", f_target=10**9)),
-                    seed=0, config=CONFIG)  # fmt: skip
+    probe = T.setup(
+        found["N2"],
+        stream=st,
+        prereg=load_prereg(write_prereg(root / "probe.toml", f_target=10**9)),
+        seed=0,
+        config=CONFIG,
+    )
     from surogate_tokstudy import flops
 
     f_target = 30 * 4 * flops.row_train_flops(probe.spec, K)
-    return {"root": root, "stream": st, "arms": found, "registry": arms, "f_target": f_target,
-            "prereg": write_prereg(root / "prereg.toml", f_target=f_target)}  # fmt: skip
+    return {
+        "root": root,
+        "stream": st,
+        "arms": found,
+        "registry": arms,
+        "f_target": f_target,
+        "prereg": write_prereg(root / "prereg.toml", f_target=f_target),
+    }
 
 
 CONFIG = T.TrainConfig(lr=3e-3, batch_rows=4, micro_rows=2, precision="fp32")
 
 
 def run(table, arm, runs, *, prereg=None, seed=0, config=CONFIG, **kw):
-    return T.train(table["arms"][arm], runs, stream=table["stream"], prereg=load_prereg(prereg or table["prereg"]),
-                   seed=seed, config=config, registry_path=table["registry"], **kw)  # fmt: skip
+    return T.train(
+        table["arms"][arm],
+        runs,
+        stream=table["stream"],
+        prereg=load_prereg(prereg or table["prereg"]),
+        seed=seed,
+        config=config,
+        registry_path=table["registry"],
+        **kw,
+    )
 
 
 def metrics(run_dir):
@@ -155,8 +184,9 @@ def test_the_rate_is_the_wsd_of_the_flops_before_each_step(table, runs):
         for line in metrics(Path(result["dir"])):
             assert line["lr"] == wsd.lr(before)
             # lr_at on pi, up to the integer rounding of the schedule's bounds (relative 1 / warmup FLOPs)
-            assert line["lr"] == pytest.approx(schedule.lr_at(before / prereg.f_target, peak=CONFIG.lr),
-                                               rel=2 / wsd.warmup_flops, abs=1e-15)  # fmt: skip
+            assert line["lr"] == pytest.approx(
+                schedule.lr_at(before / prereg.f_target, peak=CONFIG.lr), rel=2 / wsd.warmup_flops, abs=1e-15
+            )
             before = line["flops"]
         assert metrics(Path(result["dir"]))[0]["lr"] == 0.0  # the first step only fills Adam's moments
 
@@ -211,8 +241,7 @@ def test_resume_is_bit_identical_to_an_uninterrupted_run(table, runs, tmp_path, 
     resumed = run(table, arm, tmp_path, runtime=T.Runtime(checkpoint_every=every))
     reference = runs[1][arm]
     assert resumed["run_id"] == reference["run_id"]
-    assert_same_state(final_state(Path(resumed["dir"]) / "final.pt"),
-                      final_state(Path(reference["dir"]) / "final.pt"))  # fmt: skip
+    assert_same_state(final_state(Path(resumed["dir"]) / "final.pt"), final_state(Path(reference["dir"]) / "final.pt"))
     drop = ("seconds", "bytes_per_s", "flops_per_s", "peak_memory")
     clean = lambda lines: [{k: v for k, v in x.items() if k not in drop} for x in lines]  # noqa: E731
     assert clean(metrics(Path(resumed["dir"]))) == clean(metrics(Path(reference["dir"])))
@@ -222,8 +251,11 @@ def test_resume_is_bit_identical_to_an_uninterrupted_run(table, runs, tmp_path, 
 
 
 def test_a_screening_stage_halts_at_the_stable_checkpoint_and_the_run_continues(table, tmp_path):
-    screen = write_prereg(tmp_path / "screen.toml", f_target=table["f_target"],
-                          extra="[stages.screen]\nstop_after = 0.5\n[stages.decision]\n")  # fmt: skip
+    screen = write_prereg(
+        tmp_path / "screen.toml",
+        f_target=table["f_target"],
+        extra="[stages.screen]\nstop_after = 0.5\n[stages.decision]\n",
+    )
     first = run(table, "N1", tmp_path / "runs", prereg=screen, stage="screen")
     threshold = round(0.9 * round(0.5 * table["f_target"]))
     assert not first["done"] and first["state"]["flops"] >= threshold
@@ -239,17 +271,33 @@ def test_the_run_id_changes_with_each_input_and_another_id_is_refused(table, tmp
     prereg = load_prereg(table["prereg"])
     base = T.setup(table["arms"]["N0"], stream=table["stream"], prereg=prereg, seed=0, config=CONFIG)
     rid = base.record["run_id"]
-    other_stream = S.build_stream(word_docs(seed=1), tmp_path / "s2", seed=0, k_train=K,
-                                  source={"project": "tlc"}, mixture={"py": 0.75, "en": 0.25})  # fmt: skip
+    other_stream = S.build_stream(
+        word_docs(seed=1),
+        tmp_path / "s2",
+        seed=0,
+        k_train=K,
+        source={"project": "tlc"},
+        mixture={"py": 0.75, "en": 0.25},
+    )
     variants = [
         T.setup(table["arms"]["N2"], stream=table["stream"], prereg=prereg, seed=0, config=CONFIG),
         T.setup(table["arms"]["N0"], stream=other_stream, prereg=prereg, seed=0, config=CONFIG),
-        T.setup(table["arms"]["N0"], stream=table["stream"], prereg=prereg, seed=0,
-                config=T.TrainConfig(lr=1e-3, batch_rows=4, micro_rows=2, precision="fp32")),
+        T.setup(
+            table["arms"]["N0"],
+            stream=table["stream"],
+            prereg=prereg,
+            seed=0,
+            config=T.TrainConfig(lr=1e-3, batch_rows=4, micro_rows=2, precision="fp32"),
+        ),
         T.setup(table["arms"]["N0"], stream=table["stream"], prereg=prereg, seed=1, config=CONFIG),
-        T.setup(table["arms"]["N0"], stream=table["stream"], seed=0, config=CONFIG,
-                prereg=load_prereg(write_prereg(tmp_path / "p.toml", f_target=table["f_target"] + 1))),
-    ]  # fmt: skip
+        T.setup(
+            table["arms"]["N0"],
+            stream=table["stream"],
+            seed=0,
+            config=CONFIG,
+            prereg=load_prereg(write_prereg(tmp_path / "p.toml", f_target=table["f_target"] + 1)),
+        ),
+    ]
     ids = [v.record["run_id"] for v in variants]
     assert len({rid, *ids}) == 6
     assert registry.run_id(**registry.id_inputs(base.record)) == rid
@@ -320,8 +368,9 @@ def test_prereg_refusals(tmp_path, body, message):
 def test_prereg_identity_and_signature(table, tmp_path):
     p = load_prereg(table["prereg"])
     assert not p.signed and p.stages == {"decision": {"stop_after": None}} and p.points == (0.25, 0.5, 1.0)
-    signed = write_prereg(tmp_path / "s.toml", f_target=table["f_target"],
-                          extra='[signature]\nsigned_by = "owner"\ndate = "2026-11-03"\n')  # fmt: skip
+    signed = write_prereg(
+        tmp_path / "s.toml", f_target=table["f_target"], extra='[signature]\nsigned_by = "owner"\ndate = "2026-11-03"\n'
+    )
     q = load_prereg(signed)
     assert q.signed and q.sha256 != p.sha256 and q.f_target == p.f_target
     w = p.wsd(1.0, endpoint=0.25)
@@ -341,9 +390,30 @@ def test_wsd_and_cosine_shapes():
 
 
 def test_train_and_branch_command_lines(table, tmp_path, capsys):
-    args = ["--arms", str(table["registry"]), "--arm", "N2", "--seed", "0", "--stream", str(table["root"] / "stream"),
-            "--prereg", str(table["prereg"]), "--runs", str(tmp_path), "--lr", "3e-3", "--batch-rows", "4",
-            "--micro-rows", "2", "--precision", "fp32", "--device", "cpu"]  # fmt: skip
+    args = [
+        "--arms",
+        str(table["registry"]),
+        "--arm",
+        "N2",
+        "--seed",
+        "0",
+        "--stream",
+        str(table["root"] / "stream"),
+        "--prereg",
+        str(table["prereg"]),
+        "--runs",
+        str(tmp_path),
+        "--lr",
+        "3e-3",
+        "--batch-rows",
+        "4",
+        "--micro-rows",
+        "2",
+        "--precision",
+        "fp32",
+        "--device",
+        "cpu",
+    ]
     assert T.main(args) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["done"] and out["progress"] >= 1

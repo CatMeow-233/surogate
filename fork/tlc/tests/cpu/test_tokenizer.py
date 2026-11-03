@@ -141,8 +141,26 @@ def test_python_digit_splits_every_digit(variants):
     """The per-digit variant of "python": each digit alone, identifiers and operators as in "python"."""
     pre = tok._pre_tokenizer("python-digit")
     pieces = [p for p, _ in pre.pre_tokenize_str("x1 = 123; left_idx2 **= 3.5e-7")]
-    assert pieces == ["x", "1", "Ġ=", "Ġ", "1", "2", "3", ";", "Ġleft_idx", "2", "Ġ**=", "Ġ", "3", ".", "5", "e",
-                      "-", "7"]  # fmt: skip
+    assert pieces == [
+        "x",
+        "1",
+        "Ġ=",
+        "Ġ",
+        "1",
+        "2",
+        "3",
+        ";",
+        "Ġleft_idx",
+        "2",
+        "Ġ**=",
+        "Ġ",
+        "3",
+        ".",
+        "5",
+        "e",
+        "-",
+        "7",
+    ]
     python = [p for p, _ in tok._pre_tokenizer("python").pre_tokenize_str("left_idx **= f(a, b)\n    return")]
     assert [p for p, _ in pre.pre_tokenize_str("left_idx **= f(a, b)\n    return")] == python
     t = tok.load(variants["python-digit"])

@@ -22,10 +22,18 @@ filters = []
 
 
 def _tlc_exports(hub, client_for, monkeypatch, root):
-    py = export_fixture(hub, client_for, monkeypatch, root / "exports" / "py", "stack3-py", "tlc-python-permissive",
-                        [stack3_rows(60), stack3_rows(60, offset=60)])  # fmt: skip
-    en = export_fixture(hub, client_for, monkeypatch, root / "exports" / "en", "ufw-en", "tlc-english",
-                        [ufw_rows(30, zh=False)], rg=10)  # fmt: skip
+    py = export_fixture(
+        hub,
+        client_for,
+        monkeypatch,
+        root / "exports" / "py",
+        "stack3-py",
+        "tlc-python-permissive",
+        [stack3_rows(60), stack3_rows(60, offset=60)],
+    )
+    en = export_fixture(
+        hub, client_for, monkeypatch, root / "exports" / "en", "ufw-en", "tlc-english", [ufw_rows(30, zh=False)], rg=10
+    )
     return py, en
 
 
@@ -40,11 +48,19 @@ def test_a_tlc_spec_composed_elsewhere_reads_every_exported_document(fake_hub, c
     include = tmp_path / "corpus" / "synth.toml"
     include.write_text(INCLUDED, encoding="utf-8")
     spec = tmp_path / "corpus" / "spec.toml"
-    summary = compose("tlc", [tmp_path / "exports" / "py", tmp_path / "exports" / "en"], spec, includes=[include],
-                      top={"seed": 5, "val_fraction": 0.2})  # fmt: skip
+    summary = compose(
+        "tlc",
+        [tmp_path / "exports" / "py", tmp_path / "exports" / "en"],
+        spec,
+        includes=[include],
+        top={"seed": 5, "val_fraction": 0.2},
+    )
     corpus = tlc.load_corpus(spec)
     assert [(s.name, s.kind) for s in corpus.sources] == [
-        ("stack3-py", "code"), ("ufw-en", "text"), ("synthetic-binding", "code")]  # fmt: skip
+        ("stack3-py", "code"),
+        ("ufw-en", "text"),
+        ("synthetic-binding", "code"),
+    ]
     assert corpus.seed == 5 and corpus.val_fraction == 0.2
     assert '"../exports/py/parts/' in spec.read_text(encoding="utf-8")  # relative to the spec, outside its directory
     docs = list(tlc.documents(corpus))
@@ -52,7 +68,8 @@ def test_a_tlc_spec_composed_elsewhere_reads_every_exported_document(fake_hub, c
     assert [d.source.name for d in docs].count("stack3-py") == n_py > 0
     assert [d.source.name for d in docs].count("ufw-en") == n_en > 0
     assert sum(len(d.text.encode("utf-8")) for d in docs if d.source.name != "synthetic-binding") == (
-        py_doc["totals"]["text_bytes"] + en_doc["totals"]["text_bytes"])  # fmt: skip
+        py_doc["totals"]["text_bytes"] + en_doc["totals"]["text_bytes"]
+    )
     # the byte mixture the plans produced, by kind of the exports
     mix = summary["mixture_by_bytes"]
     total = py_doc["totals"]["text_bytes"] + en_doc["totals"]["text_bytes"]
@@ -67,17 +84,32 @@ def test_a_bilingual_spec_under_the_corpus_root_builds_a_manifest(fake_hub, clie
     from surogate_bilingual.data.manifest import build_manifest, load_manifest
 
     root = tmp_path / "corpus"
-    _, zh, _ = export_fixture(fake_hub, client_for, monkeypatch, root / "ufw-zh", "ufw-zh", "bilingual-zh-web",
-                              [ufw_rows(48, zh=True)], rg=16)  # fmt: skip
-    _, en, _ = export_fixture(fake_hub, client_for, monkeypatch, root / "ufw-en", "ufw-en", "bilingual-en",
-                              [ufw_rows(30, zh=False)], rg=10)  # fmt: skip
-    _, par, _ = export_fixture(fake_hub, client_for, monkeypatch, root / "unpc", "unpc-en-zh",
-                               "bilingual-parallel-unpc", [unpc_rows(20)], rg=10)  # fmt: skip
+    _, zh, _ = export_fixture(
+        fake_hub, client_for, monkeypatch, root / "ufw-zh", "ufw-zh", "bilingual-zh-web", [ufw_rows(48, zh=True)], rg=16
+    )
+    _, en, _ = export_fixture(
+        fake_hub, client_for, monkeypatch, root / "ufw-en", "ufw-en", "bilingual-en", [ufw_rows(30, zh=False)], rg=10
+    )
+    _, par, _ = export_fixture(
+        fake_hub,
+        client_for,
+        monkeypatch,
+        root / "unpc",
+        "unpc-en-zh",
+        "bilingual-parallel-unpc",
+        [unpc_rows(20)],
+        rg=10,
+    )
     spec = tmp_path / "spec.toml"
     summary = compose("bilingual", [root / "ufw-zh", root / "ufw-en", root / "unpc"], spec, root=root)
     manifest = load_manifest(build_manifest(spec, root, tmp_path / "manifest.json"))
-    assert set(manifest.sources) == {"ufw-zh-cci3", "ufw-zh-chinesewebtext", "ufw-zh-industrycorpus", "ufw-en",
-                                     "unpc-en-zh"}  # fmt: skip
+    assert set(manifest.sources) == {
+        "ufw-zh-cci3",
+        "ufw-zh-chinesewebtext",
+        "ufw-zh-industrycorpus",
+        "ufw-en",
+        "unpc-en-zh",
+    }
     assert manifest.doc["unverified_licences"] == sorted(manifest.sources)
     docs = list(manifest.iter_docs())
     assert len(docs) == zh["totals"]["docs"] + en["totals"]["docs"] + par["totals"]["docs"]
@@ -100,8 +132,7 @@ def test_compose_refuses_what_would_make_a_wrong_spec(fake_hub, client_for, monk
     refused(["--project", "bilingual", *args], "writes the tlc format, not a bilingual corpus")
     refused(["--project", "tlc", *args, "--export", str(exports[0])], "source names occur twice: ['stack3-py']")
     refused(["--project", "tlc", *args, "--root", str(tmp_path)], "--root is bilingual's corpus root")
-    refused(["--project", "bilingual", "--out", str(spec), "--seed", "1", "--export", str(exports[0])],
-            "TLC spec keys")  # fmt: skip
+    refused(["--project", "bilingual", "--out", str(spec), "--seed", "1", "--export", str(exports[0])], "TLC spec keys")
     bad = tmp_path / "bad.toml"
     bad.write_text("seed = 3\n", encoding="utf-8")
     refused(["--project", "tlc", *args, "--include", str(bad)], "holds [[source]] tables only")
@@ -122,8 +153,16 @@ def test_compose_refuses_what_would_make_a_wrong_spec(fake_hub, client_for, monk
 def test_a_bilingual_export_outside_the_root_is_refused(fake_hub, client_for, monkeypatch, tmp_path):
     from surogate_corpora.canonical import CorporaError
 
-    export_fixture(fake_hub, client_for, monkeypatch, tmp_path / "elsewhere", "ufw-en", "bilingual-en",
-                   [ufw_rows(10, zh=False)], rg=10)  # fmt: skip
+    export_fixture(
+        fake_hub,
+        client_for,
+        monkeypatch,
+        tmp_path / "elsewhere",
+        "ufw-en",
+        "bilingual-en",
+        [ufw_rows(10, zh=False)],
+        rg=10,
+    )
     (tmp_path / "root").mkdir()
     with pytest.raises(CorporaError, match="outside the corpus root"):
         compose("bilingual", [tmp_path / "elsewhere"], tmp_path / "root" / "spec.toml", root=tmp_path / "root")

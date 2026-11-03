@@ -151,8 +151,15 @@ def tlc_source(spec: Path, split: str) -> dict[str, Any]:
         corpus = load_corpus(Path(spec))
     except (OSError, ValueError) as err:
         raise TokstudyError(f"{spec}: {err}") from None
-    return {"project": "tlc", "spec": Path(spec).name, "spec_sha256": sha256_file(Path(spec)), "split": split,
-            "seed": corpus.seed, "val_fraction": corpus.val_fraction, "decontam": decontam_record(corpus)}  # fmt: skip
+    return {
+        "project": "tlc",
+        "spec": Path(spec).name,
+        "spec_sha256": sha256_file(Path(spec)),
+        "split": split,
+        "seed": corpus.seed,
+        "val_fraction": corpus.val_fraction,
+        "decontam": decontam_record(corpus),
+    }
 
 
 # --- bilingual -------------------------------------------------------------------------------------------------------
@@ -214,8 +221,13 @@ def bilingual_doc(doc) -> EvalDoc:
 def bilingual_source(manifest: Path, split: str) -> dict[str, Any]:
     manifest = Path(manifest)
     doc = _derived_manifest(manifest)
-    return {"project": "bilingual", "manifest": manifest.name, "manifest_sha256": sha256_file(manifest),
-            "split": split, "derived_from": doc["derived_from"]}  # fmt: skip
+    return {
+        "project": "bilingual",
+        "manifest": manifest.name,
+        "manifest_sha256": sha256_file(manifest),
+        "split": split,
+        "derived_from": doc["derived_from"],
+    }
 
 
 # --- plain sample files ----------------------------------------------------------------------------------------------

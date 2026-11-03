@@ -171,8 +171,9 @@ def test_manifest(freqtrim_dirs, qwen_teacher, corpus_spec, tmp_path):
 
 
 def test_build_is_deterministic(tmp_path, corpus_spec, qwen_teacher, freqtrim_dirs):
-    again = freqtrim.build(corpus.load_corpus(corpus_spec), tmp_path / "again", qwen_teacher, REF, regex="qwen",
-                           vocab_size=300)  # fmt: skip
+    again = freqtrim.build(
+        corpus.load_corpus(corpus_spec), tmp_path / "again", qwen_teacher, REF, regex="qwen", vocab_size=300
+    )
     for name in (tok.TOKENIZER_FILE, tok.CONFIG_FILE, tok.MANIFEST_FILE):
         assert (again / name).read_bytes() == (freqtrim_dirs["qwen"] / name).read_bytes()
 

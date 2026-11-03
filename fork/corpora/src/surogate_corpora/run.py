@@ -46,10 +46,16 @@ def code_state() -> dict[str, Any]:
     """The checkout's commit and whether tracked files differ from it (None when git is unavailable)."""
     here = Path(__file__).resolve().parent
     try:
-        commit = subprocess.run(["git", "-C", str(here), "rev-parse", "HEAD"], capture_output=True, text=True,
-                                check=True, timeout=30).stdout.strip()  # fmt: skip
-        status = subprocess.run(["git", "-C", str(here), "status", "--porcelain", "--untracked-files=no"],
-                                capture_output=True, text=True, check=True, timeout=30).stdout  # fmt: skip
+        commit = subprocess.run(
+            ["git", "-C", str(here), "rev-parse", "HEAD"], capture_output=True, text=True, check=True, timeout=30
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "-C", str(here), "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        ).stdout
     except (OSError, subprocess.SubprocessError):
         return {"commit": None, "dirty": None}
     return {"commit": commit, "dirty": bool(status.strip())}
@@ -250,7 +256,9 @@ def main(argv: Sequence[str]) -> int:
         print(f"surogate_corpora fetch: refused: {err}", file=sys.stderr)
         return 1
     totals = doc["totals"]
-    print(f"{totals['units']} units, {totals['rows_kept']:,} of {totals['rows_read']:,} rows kept, "
-          f"{totals['text_bytes']:,} text bytes in {totals['parts']} parts; fetched {totals['bytes_fetched']:,} bytes")  # fmt: skip
+    print(
+        f"{totals['units']} units, {totals['rows_kept']:,} of {totals['rows_read']:,} rows kept, "
+        f"{totals['text_bytes']:,} text bytes in {totals['parts']} parts; fetched {totals['bytes_fetched']:,} bytes"
+    )
     print(f"wrote {args.out / 'provenance.json'} and {args.out / 'spec_fragment.toml'}")
     return 0

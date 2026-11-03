@@ -129,11 +129,21 @@ def build_plan(
                 raise CorporaError(f"{remote.path}: the parquet schema differs from the registry's: {diff[:4]}")
             footers[remote.path], remotes[remote.path] = footer, remote
             for rg in footer.row_groups:
-                units.append((rank_key(seed, source.repo, source.revision, remote.path, rg.index), remote.path, rg.index,
-                              source))  # fmt: skip
-            files.append({"source": source_id, "path": remote.path, "size": remote.size,
-                          "lfs_sha256": remote.lfs_sha256, "xet_hash": remote.xet_hash,
-                          "num_rows": footer.num_rows, "created_by": footer.created_by, "row_groups": []})  # fmt: skip
+                units.append(
+                    (rank_key(seed, source.repo, source.revision, remote.path, rg.index), remote.path, rg.index, source)
+                )
+            files.append(
+                {
+                    "source": source_id,
+                    "path": remote.path,
+                    "size": remote.size,
+                    "lfs_sha256": remote.lfs_sha256,
+                    "xet_hash": remote.xet_hash,
+                    "num_rows": footer.num_rows,
+                    "created_by": footer.created_by,
+                    "row_groups": [],
+                }
+            )
     units.sort()
     pipelines = {s: Pipeline(profile, get_source(s)) for s in profile.sources}
     estimates: dict[tuple[str, int], int] = {}
@@ -156,11 +166,16 @@ def build_plan(
         source = get_source(entry["source"])
         for info in footers[entry["path"]].row_groups:
             compressed, uncompressed = info.size_of(source.content)
-            entry["row_groups"].append({
-                "index": info.index, "num_rows": info.num_rows, "content_compressed": compressed,
-                "content_uncompressed": uncompressed, "pass_compressed": info.size_of(source.columns)[0],
-                "est_kept_bytes": estimates.get((entry["path"], info.index)),
-            })  # fmt: skip
+            entry["row_groups"].append(
+                {
+                    "index": info.index,
+                    "num_rows": info.num_rows,
+                    "content_compressed": compressed,
+                    "content_uncompressed": uncompressed,
+                    "pass_compressed": info.size_of(source.columns)[0],
+                    "est_kept_bytes": estimates.get((entry["path"], info.index)),
+                }
+            )
     by_path = {f["path"]: f for f in files}
     for unit in chosen:
         transfer += by_path[unit["path"]]["row_groups"][unit["rg"]]["pass_compressed"]

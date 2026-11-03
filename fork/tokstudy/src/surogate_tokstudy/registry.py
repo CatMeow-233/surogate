@@ -31,10 +31,22 @@ LOCK_FILE = "prereg-lock.json"
 ID_KEYS = ("arm_sha256", "stream_sha256", "config_hash", "code_commit", "seed", "f_target", "schedule")
 
 
-def run_id(arm_sha256: str, stream_sha256: str, config_hash: str, code_commit: str | None, seed: int,
-           f_target: int, schedule: Mapping[str, Any]) -> str:  # fmt: skip
-    inputs = dict(zip(ID_KEYS, (arm_sha256, stream_sha256, config_hash, code_commit, int(seed), int(f_target),
-                                dict(schedule)), strict=True))  # fmt: skip
+def run_id(
+    arm_sha256: str,
+    stream_sha256: str,
+    config_hash: str,
+    code_commit: str | None,
+    seed: int,
+    f_target: int,
+    schedule: Mapping[str, Any],
+) -> str:
+    inputs = dict(
+        zip(
+            ID_KEYS,
+            (arm_sha256, stream_sha256, config_hash, code_commit, int(seed), int(f_target), dict(schedule)),
+            strict=True,
+        )
+    )
     return sha256_json(inputs)[:16]
 
 
@@ -46,10 +58,16 @@ def code_identity(start: Path | None = None) -> dict[str, Any]:
     """{commit, dirty} of the git checkout holding `start` (default: this package); nulls outside one."""
     where = Path(start or __file__).resolve().parent
     try:
-        commit = subprocess.run(["git", "-C", str(where), "rev-parse", "HEAD"], capture_output=True, text=True,
-                                timeout=30, check=True).stdout.strip()  # fmt: skip
-        status = subprocess.run(["git", "-C", str(where), "status", "--porcelain", "--untracked-files=no"],
-                                capture_output=True, text=True, timeout=60, check=True).stdout  # fmt: skip
+        commit = subprocess.run(
+            ["git", "-C", str(where), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=30, check=True
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "-C", str(where), "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
+        ).stdout
     except (OSError, subprocess.SubprocessError):
         return {"commit": None, "dirty": None}
     return {"commit": commit, "dirty": bool(status.strip())}
@@ -67,8 +85,11 @@ def lock_prereg(root: Path, prereg, *, amend: str | None = None) -> dict[str, An
     """Accept `prereg` for its table under `root` (module docstring); returns the lock document."""
     path = Path(root) / prereg.table / LOCK_FILE
     if not path.exists():
-        lock = {"format": "tokstudy-prereg-lock/1", "table": prereg.table,
-                "history": [{"sha256": prereg.sha256, "file": prereg.path.name, "reason": "first run", "at": now()}]}  # fmt: skip
+        lock = {
+            "format": "tokstudy-prereg-lock/1",
+            "table": prereg.table,
+            "history": [{"sha256": prereg.sha256, "file": prereg.path.name, "reason": "first run", "at": now()}],
+        }
         atomic_write_json(path, lock)
         return lock
     lock = read_json(path, "prereg-lock")
@@ -77,8 +98,10 @@ def lock_prereg(root: Path, prereg, *, amend: str | None = None) -> dict[str, An
     if prereg.sha256 in {entry["sha256"] for entry in lock["history"]}:
         return lock
     if not amend:
-        raise TokstudyError(f"{prereg.path}: sha256 {prereg.sha256} differs from the prereg the table {prereg.table} "
-                            f"was first run with ({lock['history'][-1]['sha256']}); a change needs --amend REASON")  # fmt: skip
+        raise TokstudyError(
+            f"{prereg.path}: sha256 {prereg.sha256} differs from the prereg the table {prereg.table} "
+            f"was first run with ({lock['history'][-1]['sha256']}); a change needs --amend REASON"
+        )
     lock["history"].append({"sha256": prereg.sha256, "file": prereg.path.name, "reason": amend, "at": now()})
     atomic_write_json(path, lock)
     return lock

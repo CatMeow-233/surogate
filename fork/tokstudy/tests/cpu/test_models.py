@@ -24,8 +24,15 @@ F64 = torch.float64
 REF_FILE = Path(__file__).resolve().parents[3] / "tlc" / "prototypes" / "ref_mamba2.py"
 # A two-layer A0 with a short scan chunk, so that 17 positions cross chunk boundaries.
 SMALL_TLC = {"num_hidden_layers": 2, "tlc_layer_pattern": "MM", "chunk_size": 8, "vocab_size": 320}
-TINY_HNET = {"d0": 16, "encoder_layers": 1, "decoder_layers": 1, "ratio": 4.0, "head_dim": 8, "state": 4,
-             "ssd_chunk": 8}  # fmt: skip
+TINY_HNET = {
+    "d0": 16,
+    "encoder_layers": 1,
+    "decoder_layers": 1,
+    "ratio": 4.0,
+    "head_dim": 8,
+    "state": 4,
+    "ssd_chunk": 8,
+}
 
 
 @pytest.fixture(autouse=True)
@@ -409,8 +416,9 @@ def test_build_model_builds_every_kind_of_both_tables():
             model_table["overrides"] = {"max_seq": 64}
         if kind == "hnet":
             model_table["hnet"] = dict(TINY_HNET)
-        model = build.build_model(arm(table, kind, model_table), vocab_size=300 if kind == "subword" else None,
-                                  init_seed=0)  # fmt: skip
+        model = build.build_model(
+            arm(table, kind, model_table), vocab_size=300 if kind == "subword" else None, init_seed=0
+        )
         expected = {"subword": SubwordLM, "bytes": ByteLM, "hnet": HNetLM}[kind]
         assert type(model) is expected, (table, kind)
         assert (model.cfg.vocab_size if kind == "hnet" else model.vocab_size) == (300 if kind == "subword" else 261)

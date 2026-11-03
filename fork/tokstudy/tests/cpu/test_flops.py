@@ -73,8 +73,9 @@ def test_hnet_row_flops_split_into_outer_and_main_on_the_realized_chunks():
     trunk = HNetLM(BilingualTrunk("tiny", {"max_seq": 64}, vocab_size=None, init_seed=1), cfg, init_seed=2)
     tspec = flop_spec(trunk)
     q = tspec["main"]["q_width"]
-    assert (flops.row_train_flops(tspec, 40, 10) - flops.row_train_flops(tspec, 40, 9)
-            == 3 * (flops.stack_fwd(tspec["main"], 10) * 10 - flops.stack_fwd(tspec["main"], 9) * 9))  # fmt: skip
+    assert flops.row_train_flops(tspec, 40, 10) - flops.row_train_flops(tspec, 40, 9) == 3 * (
+        flops.stack_fwd(tspec["main"], 10) * 10 - flops.stack_fwd(tspec["main"], 9) * 9
+    )
     assert flops.stack_fwd(tspec["main"], 10) - flops.stack_fwd(tspec["main"], 9) == tspec["main"]["layers"] * 2 * q
 
 

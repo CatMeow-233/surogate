@@ -149,14 +149,18 @@ def test_plan_and_fetch_dry_runs_write_nothing(planned, fake_hub, tmp_path, caps
 @pytest.mark.parametrize(
     ("argv", "reason"),
     [
-        (["plan", "--profile", "tlc-python-unlicensed-ablation", "--budget-bytes", "10", "--dry-run"],
-         "--allow-unlicensed"),
+        (
+            ["plan", "--profile", "tlc-python-unlicensed-ablation", "--budget-bytes", "10", "--dry-run"],
+            "--allow-unlicensed",
+        ),
         (["plan", "--profile", "tlc-python", "--budget-bytes", "10", "--dry-run"], "unknown profile"),
-        (["plan", "--profile", "bilingual-en", "--budget-bytes", "10", "--param", "score_min=0.5", "--dry-run"],
-         "no parameters"),
+        (
+            ["plan", "--profile", "bilingual-en", "--budget-bytes", "10", "--param", "score_min=0.5", "--dry-run"],
+            "no parameters",
+        ),
         (["plan", "--profile", "bilingual-en", "--budget-bytes", "0", "--dry-run"], "budget must be positive"),
     ],
-)  # fmt: skip
+)
 def test_plan_refusals_exit_1_with_a_reason(argv, reason, capsys, fake_hub):
     assert main([*argv, "--endpoint", fake_hub.endpoint]) == 1
     err = capsys.readouterr().err
@@ -181,10 +185,24 @@ def test_the_module_entry_point_exits_1_on_a_refusal(tmp_path):
 
     code = "import runpy, sys; sys.argv[1:] = sys.argv[2:]; runpy.run_module('surogate_corpora', run_name='__main__')"
     result = subprocess.run(
-        [sys.executable, "-I", "-c", f"import sys; sys.path.insert(0, {str(SRC)!r}); " + code, "x",
-         "plan", "--profile", "tlc-python-unlicensed-ablation", "--budget-bytes", "1", "--dry-run"],
-        capture_output=True, text=True, timeout=120, cwd=tmp_path,
-    )  # fmt: skip
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            f"import sys; sys.path.insert(0, {str(SRC)!r}); " + code,
+            "x",
+            "plan",
+            "--profile",
+            "tlc-python-unlicensed-ablation",
+            "--budget-bytes",
+            "1",
+            "--dry-run",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=tmp_path,
+    )
     assert result.returncode == 1 and "--allow-unlicensed" in result.stderr, result.stdout + result.stderr
 
 
@@ -224,9 +242,21 @@ def test_verify_samples_refuses_a_schema_mismatch_and_the_registry_refusals(tmp_
     with pytest.raises(CorporaError, match="features differ"):
         verify_samples(good, "ufw-en", "bilingual-en", tmp_path / "o2")
     code = get("code-l2-py")
-    l2 = write_rows_json(tmp_path / "l2.json", code, [{"uuid": "u", "repo_name": "r/r", "relative_path": "a.py",
-                         "content": "SYNTHETIC FIXTURE", "category": "TOOL", "algo_rel_score": 0.9,
-                         "quality_score": 3.0}])  # fmt: skip
+    l2 = write_rows_json(
+        tmp_path / "l2.json",
+        code,
+        [
+            {
+                "uuid": "u",
+                "repo_name": "r/r",
+                "relative_path": "a.py",
+                "content": "SYNTHETIC FIXTURE",
+                "category": "TOOL",
+                "algo_rel_score": 0.9,
+                "quality_score": 3.0,
+            }
+        ],
+    )
     argv = ["verify-samples", str(l2), "--source", "code-l2-py", "--out", str(tmp_path / "o3")]
     assert main([*argv, "--profile", "tlc-python-permissive"]) == 1
     assert "which source code-l2-py does not have" in capsys.readouterr().err

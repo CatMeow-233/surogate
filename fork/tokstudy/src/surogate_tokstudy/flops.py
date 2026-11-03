@@ -45,8 +45,9 @@ DEFAULT_GRID_D0 = (512, 384, 320, 256, 192, 128)
 TOLERANCE = 0.03
 
 
-def mamba2_mixer_fwd(d: int, heads: int, head_dim: int, state: int, groups: int, chunk: int, kernel: int,
-                     *, scan: bool = True) -> int:  # fmt: skip
+def mamba2_mixer_fwd(
+    d: int, heads: int, head_dim: int, state: int, groups: int, chunk: int, kernel: int, *, scan: bool = True
+) -> int:
     """Forward FLOPs per position of one Mamba-2 mixer (surogate_tlc.ir.flops_per_token's terms)."""
     inner = heads * head_dim
     total = 2 * (d * (2 * inner + 2 * groups * state + heads) + inner * d)
@@ -96,8 +97,16 @@ def stack_params(stack: Mapping[str, Any]) -> int:
 def _matmul_layer(stack: Mapping[str, Any], ctx: int, scan: bool) -> int:
     d, ffn = stack["d"], stack.get("ffn")
     if stack["type"] == "mamba":
-        mixer = mamba2_mixer_fwd(d, stack["heads"], stack["head_dim"], stack["state"], stack["groups"],
-                                 stack["chunk"], stack["kernel"], scan=scan)  # fmt: skip
+        mixer = mamba2_mixer_fwd(
+            d,
+            stack["heads"],
+            stack["head_dim"],
+            stack["state"],
+            stack["groups"],
+            stack["chunk"],
+            stack["kernel"],
+            scan=scan,
+        )
         return mixer + (swiglu_fwd(d, ffn) if ffn else 0)
     return attention_fwd(d, stack["q_width"], stack["kv_width"], ctx) + swiglu_fwd(d, ffn)
 
@@ -126,8 +135,9 @@ def outer_fwd_per_byte(spec: Mapping[str, Any], *, convention: str = "matmul", s
     return stacks + 2 * 3 * d0 * d0 + head_fwd(d0, spec["vocab"])
 
 
-def row_train_flops(spec: Mapping[str, Any], positions: int, chunks: int | None = None, *,
-                    convention: str = "matmul", scan: bool = True) -> int:  # fmt: skip
+def row_train_flops(
+    spec: Mapping[str, Any], positions: int, chunks: int | None = None, *, convention: str = "matmul", scan: bool = True
+) -> int:
     """Training FLOPs (3 x forward) of one row of `positions` ids; an H-Net row also needs its realized `chunks`."""
     if positions < 0:
         raise ValueError("a row has a non-negative length")
@@ -143,8 +153,14 @@ def row_train_flops(spec: Mapping[str, Any], positions: int, chunks: int | None 
     return 3 * (outer + chunks * stack_fwd(main, chunks, convention=convention, scan=scan))
 
 
-def train_flops(model_spec: Mapping[str, Any], *, positions_main: int, positions_byte: int,
-                convention: str = "matmul", scan: bool = True) -> int:  # fmt: skip
+def train_flops(
+    model_spec: Mapping[str, Any],
+    *,
+    positions_main: int,
+    positions_byte: int,
+    convention: str = "matmul",
+    scan: bool = True,
+) -> int:
     """One row: positions_byte ids in, positions_main of them reach the main network (equal for token arms)."""
     if model_spec["kind"] != "hnet" and positions_main != positions_byte:
         raise ValueError("a token arm's main network reads every position")
@@ -157,8 +173,15 @@ def batch_train_flops(spec: Mapping[str, Any], rows: Iterable[tuple[int, int | N
     return sum(row_train_flops(spec, n, m, **kw) for n, m in rows)
 
 
-def flops_per_byte(spec: Mapping[str, Any], *, row_bytes: int, bytes_per_position: float = 1.0,
-                   ratio: float | None = None, convention: str = "matmul", scan: bool = True) -> float:  # fmt: skip
+def flops_per_byte(
+    spec: Mapping[str, Any],
+    *,
+    row_bytes: int,
+    bytes_per_position: float = 1.0,
+    ratio: float | None = None,
+    convention: str = "matmul",
+    scan: bool = True,
+) -> float:
     """Training FLOPs per text byte of a full row of `row_bytes` bytes: a subword arm at c bytes per token
     (row of row_bytes / c tokens), a byte arm (c = 1), an H-Net at `ratio` bytes per chunk."""
     if spec["kind"] == "hnet":
@@ -174,20 +197,39 @@ def flops_per_byte(spec: Mapping[str, Any], *, row_bytes: int, bytes_per_positio
     return 3 * per / bytes_per_position
 
 
-def outer_stack(d0: int, layers: int, *, expand: int = 2, head_dim: int = 64, state: int = 64, chunk: int = 128,
-                kernel: int = 4) -> dict[str, Any]:  # fmt: skip
+def outer_stack(
+    d0: int, layers: int, *, expand: int = 2, head_dim: int = 64, state: int = 64, chunk: int = 128, kernel: int = 4
+) -> dict[str, Any]:
     """The spec of an H-Net encoder or decoder (Mamba-2 layers without an MLP, models.hnet.HNetConfig's)."""
     inner = expand * d0
     if inner % head_dim:
         raise ValueError(f"inner width {inner} is not a multiple of head_dim {head_dim}")
-    return {"type": "mamba", "d": d0, "layers": layers, "ffn": None, "heads": inner // head_dim, "head_dim": head_dim,
-            "state": state, "groups": 1, "chunk": chunk, "kernel": kernel}  # fmt: skip
+    return {
+        "type": "mamba",
+        "d": d0,
+        "layers": layers,
+        "ffn": None,
+        "heads": inner // head_dim,
+        "head_dim": head_dim,
+        "state": state,
+        "groups": 1,
+        "chunk": chunk,
+        "kernel": kernel,
+    }
 
 
-def match_hnet_config(main_spec: Mapping[str, Any], target_flops_per_byte: float, N: float,
-                      grid: Sequence[tuple[int, int]] | None = None, *, row_bytes: int, vocab: int = 261,
-                      tolerance: float = TOLERANCE, convention: str = "matmul",
-                      outer: Mapping[str, int] | None = None) -> dict[str, Any]:  # fmt: skip
+def match_hnet_config(
+    main_spec: Mapping[str, Any],
+    target_flops_per_byte: float,
+    N: float,
+    grid: Sequence[tuple[int, int]] | None = None,
+    *,
+    row_bytes: int,
+    vocab: int = 261,
+    tolerance: float = TOLERANCE,
+    convention: str = "matmul",
+    outer: Mapping[str, int] | None = None,
+) -> dict[str, Any]:
     """The first (layers, d0) of `grid` (encoder layers = decoder layers) whose H-Net, at N bytes per chunk, costs
     target_flops_per_byte within +-tolerance, with every grid point that fits under "candidates"; refuses when none
     fits, naming the closest. The default grid runs from deep to shallow and, per depth, from wide to narrow
@@ -210,16 +252,25 @@ def match_hnet_config(main_spec: Mapping[str, Any], target_flops_per_byte: float
         error = found / target_flops_per_byte - 1
         tried.append((abs(error), layers, d0, error))
         if abs(error) <= tolerance:
-            fits.append({"d0": d0, "encoder_layers": layers, "decoder_layers": layers, "flops_per_byte": found,
-                         "error": error})  # fmt: skip
+            fits.append(
+                {"d0": d0, "encoder_layers": layers, "decoder_layers": layers, "flops_per_byte": found, "error": error}
+            )
     if not tried:
         raise ValueError("no grid point fits the main network's width")
     if not fits:
         _, layers, d0, error = min(tried)
-        raise ValueError(f"no grid point within {tolerance:.0%} of {target_flops_per_byte:.6g} FLOPs/byte; closest: "
-                         f"{layers}+{layers} layers at d0 {d0} ({error:+.2%})")  # fmt: skip
-    return {**fits[0], "ratio": N, "target_flops_per_byte": target_flops_per_byte, "tolerance": tolerance,
-            "convention": convention, "candidates": fits}  # fmt: skip
+        raise ValueError(
+            f"no grid point within {tolerance:.0%} of {target_flops_per_byte:.6g} FLOPs/byte; closest: "
+            f"{layers}+{layers} layers at d0 {d0} ({error:+.2%})"
+        )
+    return {
+        **fits[0],
+        "ratio": N,
+        "target_flops_per_byte": target_flops_per_byte,
+        "tolerance": tolerance,
+        "convention": convention,
+        "candidates": fits,
+    }
 
 
 # --- command line ----------------------------------------------------------------------------------------------------
@@ -236,12 +287,19 @@ def _parse_c(values: Sequence[str]) -> dict[str, float]:
 
 
 def main(argv: Sequence[str]) -> int:
-    parser = argparse.ArgumentParser(prog="python -m surogate_tokstudy flops",
-                                     description="analytic training FLOPs per arm; H-Net configuration matching")  # fmt: skip
+    parser = argparse.ArgumentParser(
+        prog="python -m surogate_tokstudy flops",
+        description="analytic training FLOPs per arm; H-Net configuration matching",
+    )
     parser.add_argument("registry", help="arm registry (tokstudy-arms/1)")
     parser.add_argument("--k-train", type=int, required=True, help="row length in byte positions (K_train)")
-    parser.add_argument("--bytes-per-token", action="append", default=[], metavar="ARM=C",
-                        help="measured bytes per token of a subword arm (intrinsic); needed for its FLOPs per byte")  # fmt: skip
+    parser.add_argument(
+        "--bytes-per-token",
+        action="append",
+        default=[],
+        metavar="ARM=C",
+        help="measured bytes per token of a subword arm (intrinsic); needed for its FLOPs per byte",
+    )
     parser.add_argument("--match", metavar="HNET_ARM", help="solve the H-Net arm's outer stage against --reference")
     parser.add_argument("--reference", metavar="ARM", help="the subword arm whose FLOPs per byte the H-Net matches")
     parser.add_argument("--convention", choices=CONVENTIONS, default="matmul")
@@ -263,21 +321,28 @@ def main(argv: Sequence[str]) -> int:
             spec = specs[arm.id] = flop_spec(build_model(arm, vocab_size=vocab, init_seed=0))
             row = {"kind": arm.kind, "main_params": stack_params(spec["main"])}
             if arm.kind == "subword" and arm.id in cs:
-                row["flops_per_byte"] = flops_per_byte(spec, row_bytes=args.k_train, bytes_per_position=cs[arm.id],
-                                                       convention=args.convention)  # fmt: skip
+                row["flops_per_byte"] = flops_per_byte(
+                    spec, row_bytes=args.k_train, bytes_per_position=cs[arm.id], convention=args.convention
+                )
             elif arm.kind == "bytes":
                 row["flops_per_byte"] = flops_per_byte(spec, row_bytes=args.k_train, convention=args.convention)
             elif arm.kind == "hnet":
                 ratio = arm.model["hnet"]["ratio"]
-                row["flops_per_byte_at_target_ratio"] = flops_per_byte(spec, row_bytes=args.k_train, ratio=ratio,
-                                                                       convention=args.convention)  # fmt: skip
+                row["flops_per_byte_at_target_ratio"] = flops_per_byte(
+                    spec, row_bytes=args.k_train, ratio=ratio, convention=args.convention
+                )
             out["arms"][arm.id] = row
         if args.match:
             if args.reference not in cs:
                 raise ValueError("--match needs --reference ARM with --bytes-per-token ARM=C")
             target = out["arms"][args.reference]["flops_per_byte"]
-            out["match"] = match_hnet_config(specs[args.match]["main"], target, cs[args.reference],
-                                             row_bytes=args.k_train, convention=args.convention)  # fmt: skip
+            out["match"] = match_hnet_config(
+                specs[args.match]["main"],
+                target,
+                cs[args.reference],
+                row_bytes=args.k_train,
+                convention=args.convention,
+            )
         sys.stdout.write(json_text(out))
     except (TokstudyError, ValueError, KeyError) as err:
         print(f"flops: {err}", file=sys.stderr)

@@ -130,9 +130,17 @@ def _codec(arm: ArmSpec) -> Codec:
     return codec if codec is not None else ByteCodec(arm.specials, name=arm.id)
 
 
-def setup(arm: ArmSpec, *, stream: StreamManifest, prereg: Prereg, seed: int, config: TrainConfig,
-          device: str | None = None, registry_path: Path | None = None,
-          code: dict[str, Any] | None = None) -> _Setup:  # fmt: skip
+def setup(
+    arm: ArmSpec,
+    *,
+    stream: StreamManifest,
+    prereg: Prereg,
+    seed: int,
+    config: TrainConfig,
+    device: str | None = None,
+    registry_path: Path | None = None,
+    code: dict[str, Any] | None = None,
+) -> _Setup:
     """Everything a run needs, rebuilt the same way for a start, a resume and a branch; checks the inputs agree.
     `code` replaces the checkout's identity (evaluation of a run recorded under another commit)."""
     if arm.table != prereg.table:
@@ -146,32 +154,50 @@ def setup(arm: ArmSpec, *, stream: StreamManifest, prereg: Prereg, seed: int, co
         raise TokstudyError(f"seed {seed} is not one of arm {arm.id}'s registered seeds {list(arm.seeds)}")
     limit = positional_limit(arm)
     if limit is not None and limit < stream.k_train:
-        raise TokstudyError(f"arm {arm.id}: its main network takes {limit} positions, a row may hold {stream.k_train}"
-                            " (set model.overrides.max_seq)")  # fmt: skip
+        raise TokstudyError(
+            f"arm {arm.id}: its main network takes {limit} positions, a row may hold {stream.k_train}"
+            " (set model.overrides.max_seq)"
+        )
     codec = _codec(arm)
     dev = devices.device(device)
-    model = build_model(arm, vocab_size=codec.vocab_size if arm.kind == "subword" else None, init_seed=seed,
-                        backend=config.backend)  # fmt: skip
+    model = build_model(
+        arm, vocab_size=codec.vocab_size if arm.kind == "subword" else None, init_seed=seed, backend=config.backend
+    )
     model = model.to(dev, devices.PRECISIONS[config.precision])
     spec = flop_spec(model)
     out = _Setup(arm, codec, model, spec, stream, prereg, config, seed, dev)
     schedule = prereg.wsd(config.lr).to_json()
     code = dict(code) if code is not None else registry.code_identity()
-    rid = registry.run_id(arm_sha256(arm), stream.sha256, config.sha256(), code["commit"], seed, prereg.f_target,
-                          schedule)  # fmt: skip
+    rid = registry.run_id(
+        arm_sha256(arm), stream.sha256, config.sha256(), code["commit"], seed, prereg.f_target, schedule
+    )
     c_arm = bytes_per_token(stream, codec) if arm.kind == "subword" else 1.0
     out.record = {
         "format": "tokstudy-run/1",
         "run_id": rid,
-        "id_inputs": {"arm_sha256": arm_sha256(arm), "stream_sha256": stream.sha256, "config_hash": config.sha256(),
-                      "code_commit": code["commit"], "seed": seed, "f_target": prereg.f_target, "schedule": schedule},
+        "id_inputs": {
+            "arm_sha256": arm_sha256(arm),
+            "stream_sha256": stream.sha256,
+            "config_hash": config.sha256(),
+            "code_commit": code["commit"],
+            "seed": seed,
+            "f_target": prereg.f_target,
+            "schedule": schedule,
+        },
         "backend": BACKEND,
         "table": arm.table,
-        "arm": {"id": arm.id, "kind": arm.kind, "main": arm.main, "model": dict(arm.model),
-                "tokenizer": None if arm.tokenizer is None else {"path": str(arm.tokenizer.path),
-                                                                  "sha256": arm.tokenizer.sha256},
-                "registry": None if registry_path is None else {"path": str(Path(registry_path).resolve()),
-                                                                "sha256": sha256_file(registry_path)}},
+        "arm": {
+            "id": arm.id,
+            "kind": arm.kind,
+            "main": arm.main,
+            "model": dict(arm.model),
+            "tokenizer": None
+            if arm.tokenizer is None
+            else {"path": str(arm.tokenizer.path), "sha256": arm.tokenizer.sha256},
+            "registry": None
+            if registry_path is None
+            else {"path": str(Path(registry_path).resolve()), "sha256": sha256_file(registry_path)},
+        },
         "codec": codec.identity(),
         "seed": seed,
         "config": config.to_json(),
@@ -187,7 +213,7 @@ def setup(arm: ArmSpec, *, stream: StreamManifest, prereg: Prereg, seed: int, co
         "flop_spec": spec,
         "parameters": sum(p.numel() for p in model.parameters() if p.requires_grad),
         "code": code,
-    }  # fmt: skip
+    }
     _check_stream_length(out, c_arm)
     return out
 
@@ -203,12 +229,15 @@ def _stable_flops(prereg: Prereg, e: float) -> int:
 
 def _check_stream_length(s: _Setup, c_arm: float) -> None:
     ratio = s.model.cfg.ratio if s.arm.kind == "hnet" else None
-    per_byte = flops.flops_per_byte(s.spec, row_bytes=s.stream.k_train, bytes_per_position=c_arm, ratio=ratio,
-                                    convention=s.prereg.convention)  # fmt: skip
+    per_byte = flops.flops_per_byte(
+        s.spec, row_bytes=s.stream.k_train, bytes_per_position=c_arm, ratio=ratio, convention=s.prereg.convention
+    )
     available = per_byte * s.stream.doc["bytes"]
     if available < s.prereg.f_target:
-        raise TokstudyError(f"arm {s.arm.id}: the stream's {s.stream.doc['bytes']} bytes give about {available:.4g} "
-                            f"training FLOPs at {per_byte:.4g} FLOPs/byte, below F_target {s.prereg.f_target:.4g}")  # fmt: skip
+        raise TokstudyError(
+            f"arm {s.arm.id}: the stream's {s.stream.doc['bytes']} bytes give about {available:.4g} "
+            f"training FLOPs at {per_byte:.4g} FLOPs/byte, below F_target {s.prereg.f_target:.4g}"
+        )
 
 
 # --- optimiser -------------------------------------------------------------------------------------------------------
@@ -240,8 +269,11 @@ def optimizer(s: _Setup) -> torch.optim.AdamW:
 def _rng_state() -> dict[str, Any]:
     name, keys, pos, has_gauss, cached = np.random.get_state()
     version, internal, gauss = random.getstate()
-    state = {"torch": torch.get_rng_state(), "numpy": [name, torch.from_numpy(keys.astype(np.int64)), pos, has_gauss,
-             cached], "python": [version, torch.tensor(internal, dtype=torch.int64), gauss]}  # fmt: skip
+    state = {
+        "torch": torch.get_rng_state(),
+        "numpy": [name, torch.from_numpy(keys.astype(np.int64)), pos, has_gauss, cached],
+        "python": [version, torch.tensor(internal, dtype=torch.int64), gauss],
+    }
     if torch.cuda.is_available() and torch.cuda.is_initialized():
         state["cuda"] = torch.cuda.get_rng_state_all()
     return state
@@ -258,9 +290,17 @@ def _set_rng_state(state: dict[str, Any]) -> None:
 
 
 def save_checkpoint(path: Path, s: _Setup, opt: torch.optim.Optimizer, state: dict[str, Any], kind: str) -> Path:
-    payload = {"format": CKPT_FORMAT, "run_id": s.record["run_id"], "kind": kind, "step": state["step"],
-               "flops": state["flops"], "cursor": list(state["cursor"]), "model": s.model.state_dict(),
-               "optimizer": opt.state_dict(), "rng": _rng_state()}  # fmt: skip
+    payload = {
+        "format": CKPT_FORMAT,
+        "run_id": s.record["run_id"],
+        "kind": kind,
+        "step": state["step"],
+        "flops": state["flops"],
+        "cursor": list(state["cursor"]),
+        "model": s.model.state_dict(),
+        "optimizer": opt.state_dict(),
+        "rng": _rng_state(),
+    }
     buffer = io.BytesIO()
     torch.save(payload, buffer)
     return atomic_write_bytes(path, buffer.getvalue())
@@ -339,14 +379,29 @@ def step_losses(s: _Setup, rows: Sequence[Row], n_targets: int, n_positions: int
     if out is not None:
         weight = int(valid.sum()) / n_positions
         loss = loss + s.model.cfg.alpha * out.ratio_loss * weight
-        parts |= {"ratio": float(out.ratio_loss.detach()) * weight, "F": float(out.F) * weight,
-                  "G": float(out.G.detach()) * weight, "chunks": [int(c) for c in out.lengths]}  # fmt: skip
+        parts |= {
+            "ratio": float(out.ratio_loss.detach()) * weight,
+            "F": float(out.F) * weight,
+            "G": float(out.G.detach()) * weight,
+            "chunks": [int(c) for c in out.lengths],
+        }
     loss.backward()
     return parts
 
 
-def _loop(s: _Setup, opt: torch.optim.Optimizer, state: dict[str, Any], *, out: Path, schedule: WSD, end: int,
-          stable: dict[str, int], stop_at: int | None, runtime: Runtime, kind: str) -> dict[str, Any]:  # fmt: skip
+def _loop(
+    s: _Setup,
+    opt: torch.optim.Optimizer,
+    state: dict[str, Any],
+    *,
+    out: Path,
+    schedule: WSD,
+    end: int,
+    stable: dict[str, int],
+    stop_at: int | None,
+    runtime: Runtime,
+    kind: str,
+) -> dict[str, Any]:
     c = s.config
     trainable = [p for g in opt.param_groups for p in g["params"]]
     rows = rows_for_arm(s.stream, s.codec, start=state["cursor"])
@@ -357,8 +412,10 @@ def _loop(s: _Setup, opt: torch.optim.Optimizer, state: dict[str, Any], *, out: 
             started = time.perf_counter()
             batch = next(batches, None)
             if batch is None:
-                raise TokstudyError(f"the stream is exhausted at step {state['step']}, F {state['flops']:.6g} "
-                                    f"(progress {state['flops'] / s.prereg.f_target:.4f}); build a longer stream")  # fmt: skip
+                raise TokstudyError(
+                    f"the stream is exhausted at step {state['step']}, F {state['flops']:.6g} "
+                    f"(progress {state['flops'] / s.prereg.f_target:.4f}); build a longer stream"
+                )
             lr = schedule.lr(state["flops"])
             for group in opt.param_groups:
                 group["lr"] = lr * group["lr_mult"]
@@ -379,25 +436,44 @@ def _loop(s: _Setup, opt: torch.optim.Optimizer, state: dict[str, Any], *, out: 
                 raise TokstudyError(f"step {state['step']}: non-finite loss {ce} or gradient norm {norm}")
             opt.step()
             if s.arm.kind == "hnet":
-                step_flops = sum(flops.row_train_flops(s.spec, len(r.ids), m, convention=s.prereg.convention)
-                                 for r, m in zip(batch, chunks, strict=True))  # fmt: skip
+                step_flops = sum(
+                    flops.row_train_flops(s.spec, len(r.ids), m, convention=s.prereg.convention)
+                    for r, m in zip(batch, chunks, strict=True)
+                )
             else:
-                step_flops = sum(flops.row_train_flops(s.spec, len(r.ids), convention=s.prereg.convention)
-                                 for r in batch)  # fmt: skip
+                step_flops = sum(
+                    flops.row_train_flops(s.spec, len(r.ids), convention=s.prereg.convention) for r in batch
+                )
             before = state["flops"]
             state = {"step": state["step"] + 1, "flops": before + step_flops, "cursor": batch[-1].next_cursor}
             seconds = time.perf_counter() - started
             text_bytes = sum(r.text_bytes for r in batch)
-            line = {"step": state["step"], "flops": state["flops"], "progress": state["flops"] / s.prereg.f_target,
-                    "lr": lr, "rows": len(batch), "positions": n_positions, "targets": n_targets,
-                    "bytes": text_bytes, "ce": ce, "loss": ce + (s.model.cfg.alpha * parts["ratio"]
-                                                                 if s.arm.kind == "hnet" else 0.0),
-                    "grad_norm": norm, "seconds": seconds, "bytes_per_s": text_bytes / seconds,
-                    "flops_per_s": step_flops / seconds, "peak_memory": devices.peak_memory(s.device),
-                    "cursor": list(state["cursor"])}  # fmt: skip
+            line = {
+                "step": state["step"],
+                "flops": state["flops"],
+                "progress": state["flops"] / s.prereg.f_target,
+                "lr": lr,
+                "rows": len(batch),
+                "positions": n_positions,
+                "targets": n_targets,
+                "bytes": text_bytes,
+                "ce": ce,
+                "loss": ce + (s.model.cfg.alpha * parts["ratio"] if s.arm.kind == "hnet" else 0.0),
+                "grad_norm": norm,
+                "seconds": seconds,
+                "bytes_per_s": text_bytes / seconds,
+                "flops_per_s": step_flops / seconds,
+                "peak_memory": devices.peak_memory(s.device),
+                "cursor": list(state["cursor"]),
+            }
             if s.arm.kind == "hnet":
-                line |= {"ratio_loss": parts["ratio"], "F": parts["F"], "G": parts["G"], "chunks": sum(chunks),
-                         "positions_per_chunk": _per_domain(batch, chunks)}  # fmt: skip
+                line |= {
+                    "ratio_loss": parts["ratio"],
+                    "F": parts["F"],
+                    "G": parts["G"],
+                    "chunks": sum(chunks),
+                    "positions_per_chunk": _per_domain(batch, chunks),
+                }
             metrics.write(json.dumps(line, sort_keys=True) + "\n")
             metrics.flush()
             for label, threshold in stable.items():
@@ -427,8 +503,14 @@ def _per_domain(batch: Sequence[Row], chunks: Sequence[int]) -> dict[str, float]
 
 
 def _event(out: Path, event: str, s: _Setup, state: dict[str, Any], **extra) -> None:
-    line = {"event": event, "at": registry.now(), "step": state["step"], "flops": state["flops"],
-            "environment": devices.environment(s.device), **extra}  # fmt: skip
+    line = {
+        "event": event,
+        "at": registry.now(),
+        "step": state["step"],
+        "flops": state["flops"],
+        "environment": devices.environment(s.device),
+        **extra,
+    }
     with (out / "events.jsonl").open("a", encoding="utf-8") as f:
         f.write(json.dumps(line, sort_keys=True) + "\n")
 
@@ -443,8 +525,15 @@ def _truncate_metrics(out: Path, step: int) -> None:
     atomic_write_bytes(path, "".join(kept).encode("utf-8"))
 
 
-def _start_or_resume(s: _Setup, out: Path, opt: torch.optim.Optimizer, header: dict[str, Any],
-                     initial: dict[str, Any], runtime: Runtime, kind: str) -> tuple[dict[str, Any], bool]:  # fmt: skip
+def _start_or_resume(
+    s: _Setup,
+    out: Path,
+    opt: torch.optim.Optimizer,
+    header: dict[str, Any],
+    initial: dict[str, Any],
+    runtime: Runtime,
+    kind: str,
+) -> tuple[dict[str, Any], bool]:
     """The state to continue from: the latest checkpoint of `out`, else `initial`; writes the metrics header."""
     latest = latest_checkpoint(out)
     if latest is not None:
@@ -457,10 +546,21 @@ def _start_or_resume(s: _Setup, out: Path, opt: torch.optim.Optimizer, header: d
     return initial, False
 
 
-def train(arm: ArmSpec, runs: Path, *, stream: StreamManifest, prereg: Prereg, seed: int, config: TrainConfig,
-          stage: str | None = None, stop_after: float | None = None, amend: str | None = None,
-          run_dir: Path | None = None, runtime: Runtime | None = None,
-          registry_path: Path | None = None) -> dict[str, Any]:  # fmt: skip
+def train(
+    arm: ArmSpec,
+    runs: Path,
+    *,
+    stream: StreamManifest,
+    prereg: Prereg,
+    seed: int,
+    config: TrainConfig,
+    stage: str | None = None,
+    stop_after: float | None = None,
+    amend: str | None = None,
+    run_dir: Path | None = None,
+    runtime: Runtime | None = None,
+    registry_path: Path | None = None,
+) -> dict[str, Any]:
     """Start or resume the run of (arm, seed) under `runs`; returns its record with the state reached."""
     runtime = runtime or Runtime()
     if stage is not None:
@@ -469,8 +569,9 @@ def train(arm: ArmSpec, runs: Path, *, stream: StreamManifest, prereg: Prereg, s
         stop_after = prereg.stop_after(stage) if stop_after is None else stop_after
     if stop_after is not None and stop_after not in prereg.points[:-1]:
         raise TokstudyError(f"stop_after must be a budget point below 1 ({list(prereg.points[:-1])}), got {stop_after}")
-    s = setup(arm, stream=stream, prereg=prereg, seed=seed, config=config, device=runtime.device,
-              registry_path=registry_path)  # fmt: skip
+    s = setup(
+        arm, stream=stream, prereg=prereg, seed=seed, config=config, device=runtime.device, registry_path=registry_path
+    )
     rid = s.record["run_id"]
     expected = registry.run_dir_for(runs, arm.table, arm.id, seed, rid)
     out = Path(run_dir) if run_dir is not None else expected
@@ -491,20 +592,42 @@ def train(arm: ArmSpec, runs: Path, *, stream: StreamManifest, prereg: Prereg, s
     stable = {_label(e): _stable_flops(prereg, e) for e in prereg.points}
     unfinished = state["flops"] < prereg.f_target and (stop_at is None or state["flops"] < stop_at)
     if unfinished or (state["flops"] >= prereg.f_target and not (out / "final.pt").is_file()):
-        state = _loop(s, opt, state, out=out, schedule=prereg.wsd(config.lr), end=prereg.f_target, stable=stable,
-                      stop_at=stop_at, runtime=runtime, kind="main")  # fmt: skip
+        state = _loop(
+            s,
+            opt,
+            state,
+            out=out,
+            schedule=prereg.wsd(config.lr),
+            end=prereg.f_target,
+            stable=stable,
+            stop_at=stop_at,
+            runtime=runtime,
+            kind="main",
+        )
     done = state["flops"] >= prereg.f_target
     _event(out, "main-done" if done else "main-stop", s, state)
     return {**s.record, "dir": str(out), "state": _state_json(state, prereg), "done": done}
 
 
 def _state_json(state: dict[str, Any], prereg: Prereg) -> dict[str, Any]:
-    return {"step": state["step"], "flops": state["flops"], "progress": state["flops"] / prereg.f_target,
-            "cursor": list(state["cursor"])}  # fmt: skip
+    return {
+        "step": state["step"],
+        "flops": state["flops"],
+        "progress": state["flops"] / prereg.f_target,
+        "cursor": list(state["cursor"]),
+    }
 
 
-def reopen(run_dir: Path, *, arms: Path | None = None, stream: Path | None = None, prereg: Path | None = None,
-           device: str | None = None, verify_stream: bool = True, same_code: bool = True) -> _Setup:  # fmt: skip
+def reopen(
+    run_dir: Path,
+    *,
+    arms: Path | None = None,
+    stream: Path | None = None,
+    prereg: Path | None = None,
+    device: str | None = None,
+    verify_stream: bool = True,
+    same_code: bool = True,
+) -> _Setup:
     """The setup of an existing run from its record (inputs at their recorded paths unless given), the run id
     recomputed from them (so every input is checked: tokenizer sha256s, the stream manifest, the prereg's budget and
     schedule, the config, the code); `verify_stream` also re-hashes the stream's parts (evaluation reads none).
@@ -520,16 +643,33 @@ def reopen(run_dir: Path, *, arms: Path | None = None, stream: Path | None = Non
     p = load_prereg(Path(prereg or record["prereg"]["path"]))
     st = open_stream(Path(stream or record["stream"]["path"]), verify=verify_stream)
     config = TrainConfig(**record["config"])
-    s = setup(found[record["arm"]["id"]], stream=st, prereg=p, seed=record["seed"], config=config, device=device,
-              registry_path=registry_path, code=None if same_code else record["code"])  # fmt: skip
+    s = setup(
+        found[record["arm"]["id"]],
+        stream=st,
+        prereg=p,
+        seed=record["seed"],
+        config=config,
+        device=device,
+        registry_path=registry_path,
+        code=None if same_code else record["code"],
+    )
     if s.record["run_id"] != record["run_id"]:
-        raise TokstudyError(f"{run_dir}: run {record['run_id']}, but its inputs now make run {s.record['run_id']} "
-                            "(arm, stream, prereg schedule, config or code changed)")  # fmt: skip
+        raise TokstudyError(
+            f"{run_dir}: run {record['run_id']}, but its inputs now make run {s.record['run_id']} "
+            "(arm, stream, prereg schedule, config or code changed)"
+        )
     return s
 
 
-def branch(run_dir: Path, *, endpoint: float, runtime: Runtime | None = None, arms: Path | None = None,
-           stream: Path | None = None, prereg: Path | None = None) -> dict[str, Any]:  # fmt: skip
+def branch(
+    run_dir: Path,
+    *,
+    endpoint: float,
+    runtime: Runtime | None = None,
+    arms: Path | None = None,
+    stream: Path | None = None,
+    prereg: Path | None = None,
+) -> dict[str, Any]:
     """The decay branch of a run at budget point `endpoint` (< 1), from its stable checkpoint (module docstring)."""
     runtime = runtime or Runtime()
     run_dir = Path(run_dir)
@@ -545,8 +685,14 @@ def branch(run_dir: Path, *, endpoint: float, runtime: Runtime | None = None, ar
     schedule = p.wsd(s.config.lr, endpoint=endpoint)
     end = schedule.end_flops
     opt = optimizer(s)
-    info = {"format": "tokstudy-branch/1", "run_id": s.record["run_id"], "endpoint": endpoint,
-            "schedule": schedule.to_json(), "from": source.name, "from_sha256": sha256_file(source)}  # fmt: skip
+    info = {
+        "format": "tokstudy-branch/1",
+        "run_id": s.record["run_id"],
+        "endpoint": endpoint,
+        "schedule": schedule.to_json(),
+        "from": source.name,
+        "from_sha256": sha256_file(source),
+    }
     if (out / "branch.json").is_file():
         if read_json(out / "branch.json", "branch") != info:
             raise TokstudyError(f"{out}: branch.json differs from this branch (other schedule or stable checkpoint)")
@@ -556,8 +702,18 @@ def branch(run_dir: Path, *, endpoint: float, runtime: Runtime | None = None, ar
     header = {"format": METRICS_FORMAT, "run_id": s.record["run_id"], "arm": s.arm.id, "kind": f"branch/{label}"}
     state, _ = _start_or_resume(s, out, opt, header, initial, runtime, "branch")
     if state["flops"] < end or not (out / "final.pt").is_file():  # a stable step may already reach the endpoint
-        state = _loop(s, opt, state, out=out, schedule=schedule, end=end, stable={}, stop_at=None, runtime=runtime,
-                      kind=f"branch/{label}")  # fmt: skip
+        state = _loop(
+            s,
+            opt,
+            state,
+            out=out,
+            schedule=schedule,
+            end=end,
+            stable={},
+            stop_at=None,
+            runtime=runtime,
+            kind=f"branch/{label}",
+        )
     _event(out, "branch-done", s, state)
     return {**info, "dir": str(out), "state": _state_json(state, p), "done": state["flops"] >= end}
 
@@ -594,8 +750,9 @@ def _runtime_args(parser: argparse.ArgumentParser) -> None:
 
 
 def main(argv: Sequence[str]) -> int:
-    parser = argparse.ArgumentParser(prog="python -m surogate_tokstudy train",
-                                     description="one run of one arm at the table's F_target; resumes")  # fmt: skip
+    parser = argparse.ArgumentParser(
+        prog="python -m surogate_tokstudy train", description="one run of one arm at the table's F_target; resumes"
+    )
     parser.add_argument("--arms", type=Path, required=True, help="arm registry (tokstudy-arms/1)")
     parser.add_argument("--arm", required=True, help="arm id")
     parser.add_argument("--seed", type=int, required=True)
@@ -611,13 +768,28 @@ def main(argv: Sequence[str]) -> int:
         arms = {a.id: a for a in load_arms(args.arms)}
         if args.arm not in arms:
             raise TokstudyError(f"{args.arms} has no arm {args.arm!r} (arms: {sorted(arms)})")
-        config = TrainConfig(lr=args.lr, batch_rows=args.batch_rows, micro_rows=args.micro_rows,
-                             lambda_outer=args.lambda_outer, weight_decay=args.weight_decay,
-                             grad_clip=args.grad_clip, precision=args.precision, backend=args.backend)  # fmt: skip
-        result = train(arms[args.arm], args.runs, stream=open_stream(args.stream), prereg=load_prereg(args.prereg),
-                       seed=args.seed, config=config, stage=args.stage, amend=args.amend,
-                       runtime=Runtime(checkpoint_every=args.checkpoint_every, device=args.device),
-                       registry_path=args.arms)  # fmt: skip
+        config = TrainConfig(
+            lr=args.lr,
+            batch_rows=args.batch_rows,
+            micro_rows=args.micro_rows,
+            lambda_outer=args.lambda_outer,
+            weight_decay=args.weight_decay,
+            grad_clip=args.grad_clip,
+            precision=args.precision,
+            backend=args.backend,
+        )
+        result = train(
+            arms[args.arm],
+            args.runs,
+            stream=open_stream(args.stream),
+            prereg=load_prereg(args.prereg),
+            seed=args.seed,
+            config=config,
+            stage=args.stage,
+            amend=args.amend,
+            runtime=Runtime(checkpoint_every=args.checkpoint_every, device=args.device),
+            registry_path=args.arms,
+        )
     except (TokstudyError, ValueError) as err:
         print(f"train: {err}", file=sys.stderr)
         return 1
@@ -626,8 +798,9 @@ def main(argv: Sequence[str]) -> int:
 
 
 def branch_main(argv: Sequence[str]) -> int:
-    parser = argparse.ArgumentParser(prog="python -m surogate_tokstudy branch",
-                                     description="decay branch of a run from its stable checkpoint")  # fmt: skip
+    parser = argparse.ArgumentParser(
+        prog="python -m surogate_tokstudy branch", description="decay branch of a run from its stable checkpoint"
+    )
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("--at", type=float, required=True, help="the budget point (below 1)")
     parser.add_argument("--arms", type=Path, help="the arm registry, when it moved")
@@ -636,8 +809,14 @@ def branch_main(argv: Sequence[str]) -> int:
     _runtime_args(parser)
     args = parser.parse_args(list(argv))
     try:
-        result = branch(args.run_dir, endpoint=args.at, arms=args.arms, stream=args.stream, prereg=args.prereg,
-                        runtime=Runtime(checkpoint_every=args.checkpoint_every, device=args.device))  # fmt: skip
+        result = branch(
+            args.run_dir,
+            endpoint=args.at,
+            arms=args.arms,
+            stream=args.stream,
+            prereg=args.prereg,
+            runtime=Runtime(checkpoint_every=args.checkpoint_every, device=args.device),
+        )
     except (TokstudyError, ValueError) as err:
         print(f"branch: {err}", file=sys.stderr)
         return 1

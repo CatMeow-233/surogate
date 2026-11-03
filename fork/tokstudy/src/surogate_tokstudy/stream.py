@@ -153,8 +153,17 @@ def build_stream(
     out.mkdir(parents=True, exist_ok=True)
     tmp = out / ".build"
     try:
-        return _build(docs, out, tmp, seed=seed, k_train=k_train, source=dict(source), mixture=mixture,
-                      max_units=max_units, measure=measure)  # fmt: skip
+        return _build(
+            docs,
+            out,
+            tmp,
+            seed=seed,
+            k_train=k_train,
+            source=dict(source),
+            mixture=mixture,
+            max_units=max_units,
+            measure=measure,
+        )
     except BaseException:
         if not (out / MANIFEST).exists():
             shutil.rmtree(out, ignore_errors=True)
@@ -427,8 +436,9 @@ def main(argv: Sequence[str]) -> int:
         tlc_source,
     )
 
-    parser = argparse.ArgumentParser(prog="python -m surogate_tokstudy stream",
-                                     description="build a table's training stream (order, mixture, parts)")  # fmt: skip
+    parser = argparse.ArgumentParser(
+        prog="python -m surogate_tokstudy stream", description="build a table's training stream (order, mixture, parts)"
+    )
     parser.add_argument("--prereg", type=Path, required=True, help="the table's prereg: K_train and the mixture")
     parser.add_argument("--tlc", type=Path, help="a TLC corpus spec (split --split, default train)")
     parser.add_argument("--bilingual", type=Path, help="a bilingual derived manifest (default split seed_train)")
@@ -460,15 +470,18 @@ def main(argv: Sequence[str]) -> int:
                 raise TokstudyError(f"--docs needs --project {project} (the prereg's table)")
             parsed = [parse_docs_arg(a) for a in args.docs]
             docs = [frame_plain(d, project) for domain, path in parsed for d in plain_documents(path, domain)]
-            source = {"project": project, "plain": [{"domain": d, "file": p.name, "sha256": file_sha256(p)}
-                                                    for d, p in parsed]}  # fmt: skip
+            source = {
+                "project": project,
+                "plain": [{"domain": d, "file": p.name, "sha256": file_sha256(p)} for d, p in parsed],
+            }
         if source["project"] != project:
             raise TokstudyError(f"the prereg is table {prereg.table}'s; these are {source['project']} documents")
         measure = None
         if (args.measure is None) != (prereg.measure == "bytes"):
-            raise TokstudyError(f"the prereg measures the mixture in {prereg.measure!r}: "
-                                + ("pass --measure REGISTRY:" + prereg.measure if args.measure is None
-                                   else "--measure does not apply"))  # fmt: skip
+            raise TokstudyError(
+                f"the prereg measures the mixture in {prereg.measure!r}: "
+                + ("pass --measure REGISTRY:" + prereg.measure if args.measure is None else "--measure does not apply")
+            )
         if args.measure:
             registry, _, arm_id = args.measure.rpartition(":")
             if arm_id != prereg.measure:
@@ -477,12 +490,30 @@ def main(argv: Sequence[str]) -> int:
             if arm_id not in arms or arms[arm_id].kind != "subword":
                 raise TokstudyError(f"--measure {args.measure!r}: not a subword arm of that registry")
             measure = codec_for(arms[arm_id])
-        manifest = build_stream(docs, args.out, seed=args.seed, k_train=prereg.k_train, source=source,
-                                mixture=prereg.mixture, max_units=args.max_units, measure=measure)  # fmt: skip
+        manifest = build_stream(
+            docs,
+            args.out,
+            seed=args.seed,
+            k_train=prereg.k_train,
+            source=source,
+            mixture=prereg.mixture,
+            max_units=args.max_units,
+            measure=measure,
+        )
     except (TokstudyError, ValueError) as err:
         print(f"stream: {err}", file=sys.stderr)
         return 1
     d = manifest.doc
-    print(json.dumps({"out": str(args.out), "sha256": manifest.sha256, "docs": d["docs"], "bytes": d["bytes"],
-                      "achieved_mixture": d["achieved_mixture"], "dropped": d["dropped"]}))  # fmt: skip
+    print(
+        json.dumps(
+            {
+                "out": str(args.out),
+                "sha256": manifest.sha256,
+                "docs": d["docs"],
+                "bytes": d["bytes"],
+                "achieved_mixture": d["achieved_mixture"],
+                "dropped": d["dropped"],
+            }
+        )
+    )
     return 0

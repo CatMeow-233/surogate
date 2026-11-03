@@ -84,8 +84,9 @@ class ProfileSpec:
 def _python(name: str, source: str, metadata: tuple, note: str, requires: str | None = None) -> ProfileSpec:
     def build(params):
         content = (F.Utf8Valid(), F.ExactDedup(), F.NonLatinLetterRatioMax(float(params["non_latin_max"])))
-        return Profile(name, (source,), metadata, content, (), "tlc", "code", params=params, requires=requires,
-                       licence_note=note)  # fmt: skip
+        return Profile(
+            name, (source,), metadata, content, (), "tlc", "code", params=params, requires=requires, licence_note=note
+        )
 
     return ProfileSpec({"non_latin_max": 0.10}, build)
 
@@ -99,8 +100,16 @@ def _english(params) -> Profile:
 
 def _zh(name: str, pool: frozenset[str]) -> ProfileSpec:
     def build(params):
-        return Profile(name, ("ufw-zh",), (F.SourceIn(pool),), (F.Utf8Valid(),), (F.ScriptStats(),), "bilingual", "zh",
-                       params=params)  # fmt: skip
+        return Profile(
+            name,
+            ("ufw-zh",),
+            (F.SourceIn(pool),),
+            (F.Utf8Valid(),),
+            (F.ScriptStats(),),
+            "bilingual",
+            "zh",
+            params=params,
+        )
 
     return ProfileSpec({}, build)
 
@@ -135,7 +144,7 @@ PROFILES: dict[str, ProfileSpec] = {
             "parallel",
             "parallel",
         ),
-    ),  # fmt: skip
+    ),
 }
 
 

@@ -64,8 +64,16 @@ class WSD:
         return asdict(self)
 
 
-def wsd(f_target: int, *, peak: float, warmup: float = 0.02, decay_start: float = 0.9, floor: float = 0.1,
-        shape: str = "linear", endpoint: float = 1.0) -> WSD:  # fmt: skip
+def wsd(
+    f_target: int,
+    *,
+    peak: float,
+    warmup: float = 0.02,
+    decay_start: float = 0.9,
+    floor: float = 0.1,
+    shape: str = "linear",
+    endpoint: float = 1.0,
+) -> WSD:
     """The WSD of a run with F_target (endpoint 1) or of its decay branch at budget point `endpoint`."""
     if not 0 < endpoint <= 1:
         raise ValueError(f"a budget point lies in (0, 1], got {endpoint}")
@@ -73,8 +81,15 @@ def wsd(f_target: int, *, peak: float, warmup: float = 0.02, decay_start: float 
     return WSD(peak, round(warmup * f_target), round(decay_start * end), end, floor, shape)
 
 
-def lr_at(progress: float, *, peak: float, warmup: float = 0.02, decay_start: float = 0.9, floor: float = 0.1,
-          shape: str = "linear") -> float:  # fmt: skip
+def lr_at(
+    progress: float,
+    *,
+    peak: float,
+    warmup: float = 0.02,
+    decay_start: float = 0.9,
+    floor: float = 0.1,
+    shape: str = "linear",
+) -> float:
     """WSD on progress pi = F / F_target (the same rates as `wsd`, in real numbers)."""
     if progress < warmup:
         return peak * progress / warmup

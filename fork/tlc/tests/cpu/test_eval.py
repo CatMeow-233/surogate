@@ -154,9 +154,19 @@ def _expected_docs(corpus_spec, tokenizer_dir, split):
         text = [t for t in targets if pieces[t] is not None]
         eos = [t for t in targets if t == special["<|eos|>"]]
         other = [t for t in targets if pieces[t] is None and t != special["<|eos|>"]]
-        out.append((doc.key, "py" if doc.source.kind == "code" else "en", sum(len(pieces[t]) for t in text),
-                    math.fsum(nll[t] for t in text), len(text), math.fsum(nll[t] for t in eos), len(eos),
-                    math.fsum(nll[t] for t in other), len(other)))  # fmt: skip
+        out.append(
+            (
+                doc.key,
+                "py" if doc.source.kind == "code" else "en",
+                sum(len(pieces[t]) for t in text),
+                math.fsum(nll[t] for t in text),
+                len(text),
+                math.fsum(nll[t] for t in eos),
+                len(eos),
+                math.fsum(nll[t] for t in other),
+                len(other),
+            )
+        )
         assert out[-1][2] == loss.content_bytes(doc.text, doc.source.kind)
     return out
 
@@ -175,8 +185,7 @@ def test_token_bytes_cover_the_text_and_leave_out_the_specials(trained_tokenizer
 
 
 @pytest.mark.parametrize("split", ["val", "train"])
-def test_bpb_counts_every_text_byte_once_and_no_special(small_model, shard_dirs, corpus_spec, trained_tokenizer,
-                                                         split):  # fmt: skip
+def test_bpb_counts_every_text_byte_once_and_no_special(small_model, shard_dirs, corpus_spec, trained_tokenizer, split):
     """Windows of 64 tokens share a token, so a long document spans rows; each of its targets counts once, the
     bytes are its text pieces' UTF-8 bytes (fence lines of text documents are not text), specials are apart."""
     result = loss.evaluate(small_model, shard_dirs[64], split=split, batch=3, scorer=_id_scorer, corpus=corpus_spec)
@@ -187,8 +196,9 @@ def test_bpb_counts_every_text_byte_once_and_no_special(small_model, shard_dirs,
         mine = [e for e in expected if e[1] == domain]
         n_bytes = sum(e[2] for e in mine)
         assert result["bpb"][domain]["bytes"] == n_bytes and result["bpb"][domain]["documents"] == len(mine)
-        assert result["bpb"][domain]["bpb"] == pytest.approx(math.fsum(e[3] for e in mine) / (math.log(2) * n_bytes),
-                                                              rel=1e-12)  # fmt: skip
+        assert result["bpb"][domain]["bpb"] == pytest.approx(
+            math.fsum(e[3] for e in mine) / (math.log(2) * n_bytes), rel=1e-12
+        )
         with_eos = math.fsum(e[3] + e[5] for e in mine) / (math.log(2) * n_bytes)
         assert result["bpb"][domain]["bpb_with_eos"] == pytest.approx(with_eos, rel=1e-12)
     assert sum(v["bytes"] for v in result["bpb_by_source"].values()) == sum(e[2] for e in expected)
@@ -200,8 +210,7 @@ def _rows_per_document(data, split):
     return np.diff(np.append(starts, len(inputs)))
 
 
-def test_dump_nll_writes_one_exact_line_per_document(tmp_path, small_model, shard_dirs, corpus_spec,
-                                                      trained_tokenizer):  # fmt: skip
+def test_dump_nll_writes_one_exact_line_per_document(tmp_path, small_model, shard_dirs, corpus_spec, trained_tokenizer):
     import json
 
     out = tmp_path / "T0.nll"
@@ -227,8 +236,9 @@ def test_dump_nll_writes_one_exact_line_per_document(tmp_path, small_model, shar
             assert line[field] == pytest.approx(value, rel=1e-12)
 
 
-def test_bytes_per_document_do_not_depend_on_the_tokenizer(tmp_path, small_model, shard_dirs, corpus_spec,
-                                                           tokenizer_dir):  # fmt: skip
+def test_bytes_per_document_do_not_depend_on_the_tokenizer(
+    tmp_path, small_model, shard_dirs, corpus_spec, tokenizer_dir
+):
     """The denominator of bits per byte is the document's text, so two tokenizers give every key the same bytes."""
     from surogate_tlc import hf, init, modeldir
     from surogate_tlc.data import corpus
@@ -237,10 +247,12 @@ def test_bytes_per_document_do_not_depend_on_the_tokenizer(tmp_path, small_model
     assert other_data["tokenizer"]["sha256"] != shards.manifest(shard_dirs[64])["tokenizer"]["sha256"]
     cfg = hf.row_config("A0", num_hidden_layers=2, tlc_layer_pattern="MM", chunk_size=16, vocab_size=320)
     other = init.init_model_dir(modeldir.write_model_dir(tmp_path / "other", cfg, tokenizer_dir, init_seed=1)).parent
-    a = loss.evaluate(small_model, shard_dirs[64], scorer=_id_scorer, corpus=corpus_spec, dump=loss.NllDump(
-        tmp_path / "a.nll", "T0"))  # fmt: skip
-    b = loss.evaluate(other, tmp_path / "gpt2", scorer=_id_scorer, corpus=corpus_spec, dump=loss.NllDump(
-        tmp_path / "b.nll", "T1"))  # fmt: skip
+    a = loss.evaluate(
+        small_model, shard_dirs[64], scorer=_id_scorer, corpus=corpus_spec, dump=loss.NllDump(tmp_path / "a.nll", "T0")
+    )
+    b = loss.evaluate(
+        other, tmp_path / "gpt2", scorer=_id_scorer, corpus=corpus_spec, dump=loss.NllDump(tmp_path / "b.nll", "T1")
+    )
     import json
 
     read = lambda p: {d["key"]: d["bytes"] for d in map(json.loads, p.read_text().splitlines()[1:])}  # noqa: E731

@@ -30,10 +30,19 @@ from surogate_tokstudy.models.twin_a0 import A0Twin, twin_config
 from surogate_tokstudy.prereg import load_prereg
 
 F64 = torch.float64
-TINY_HNET = {"d0": 16, "encoder_layers": 1, "decoder_layers": 1, "ratio": 4.0, "head_dim": 8, "state": 4,
-             "ssd_chunk": 8}  # fmt: skip
-TABLES = {"tlc-N": ("tlc", "twin_a0", {"profile": "tiny"}),
-          "bilingual-B": ("bilingual", "bilingual_trunk", {"profile": "tiny", "overrides": {"max_seq": 256}})}  # fmt: skip
+TINY_HNET = {
+    "d0": 16,
+    "encoder_layers": 1,
+    "decoder_layers": 1,
+    "ratio": 4.0,
+    "head_dim": 8,
+    "state": 4,
+    "ssd_chunk": 8,
+}
+TABLES = {
+    "tlc-N": ("tlc", "twin_a0", {"profile": "tiny"}),
+    "bilingual-B": ("bilingual", "bilingual_trunk", {"profile": "tiny", "overrides": {"max_seq": 256}}),
+}
 
 
 @pytest.fixture(autouse=True)
@@ -51,8 +60,9 @@ def arm(table, kind, tokenizer=None, *, model=None, arm_id=None):
     model = dict(model or base)
     if kind == "hnet":
         model["hnet"] = dict(TINY_HNET)
-    return ArmSpec(arm_id or f"{kind}-arm", table, kind, tokenizer, PROJECT_SPECIALS[project], model, main, (0,),
-                   ("decision",))  # fmt: skip
+    return ArmSpec(
+        arm_id or f"{kind}-arm", table, kind, tokenizer, PROJECT_SPECIALS[project], model, main, (0,), ("decision",)
+    )
 
 
 def documents(project, n=6, seed=0):
@@ -72,8 +82,13 @@ def bpe(tmp_path_factory, bpe_writer):
     out = {}
     for project, specials in PROJECT_SPECIALS.items():
         texts = [d.texts()[0] for d in documents(project, 40, seed=1)]
-        path, sha = bpe_writer(tmp_path_factory.mktemp(project) / "tokenizer.json", specials=tuple(specials),
-                               pre="gpt2", train_on=texts, vocab_size=300)  # fmt: skip
+        path, sha = bpe_writer(
+            tmp_path_factory.mktemp(project) / "tokenizer.json",
+            specials=tuple(specials),
+            pre="gpt2",
+            train_on=texts,
+            vocab_size=300,
+        )
         out[project] = SubwordCodec.from_tokenizer_json(path, sha, specials, check=True)
     return out
 
@@ -113,8 +128,9 @@ def test_uniform_logits_give_ln_v_per_text_target(table, kind, bpe):
         expected = sum(r.n_targets for r in picked) * math.log(V) / (math.log(2) * sum(r.bytes for r in picked))
         assert E.bpb(rows, domain) == pytest.approx(expected, rel=1e-12)
         with_eos = sum(r.n_targets + r.n_eos for r in picked) * math.log(V)
-        assert E.bpb(rows, domain, with_eos=True) == pytest.approx(with_eos / (math.log(2) * sum(r.bytes for r in
-                                                                                              picked)), rel=1e-12)  # fmt: skip
+        assert E.bpb(rows, domain, with_eos=True) == pytest.approx(
+            with_eos / (math.log(2) * sum(r.bytes for r in picked)), rel=1e-12
+        )
 
 
 def test_a_zero_merge_bpe_and_the_byte_codec_with_the_same_weights_score_alike(tmp_path, bpe_writer):
@@ -157,11 +173,16 @@ def test_batching_and_order_do_not_change_a_documents_nll(bpe):
 
 def test_the_common_prefix_is_the_largest_boundary_every_arm_holds(bpe):
     small = {"profile": "tiny", "overrides": {"max_seq": 24}}
-    arms = [arm("bilingual-B", "bytes", model=small, arm_id="B5"),
-            arm("bilingual-B", "hnet", model=small, arm_id="B4"),
-            arm("bilingual-B", "subword", None, model=small, arm_id="B0")]  # fmt: skip
-    codecs = {"B5": ByteCodec(PROJECT_SPECIALS["bilingual"]), "B4": ByteCodec(PROJECT_SPECIALS["bilingual"]),
-              "B0": bpe["bilingual"]}  # fmt: skip
+    arms = [
+        arm("bilingual-B", "bytes", model=small, arm_id="B5"),
+        arm("bilingual-B", "hnet", model=small, arm_id="B4"),
+        arm("bilingual-B", "subword", None, model=small, arm_id="B0"),
+    ]
+    codecs = {
+        "B5": ByteCodec(PROJECT_SPECIALS["bilingual"]),
+        "B4": ByteCodec(PROJECT_SPECIALS["bilingual"]),
+        "B0": bpe["bilingual"],
+    }
     limits = E.arm_limits(arms)
     assert limits == {"B5": 24, "B4": 24, "B0": 24}
     for doc in documents("bilingual", 10, seed=7):
@@ -190,8 +211,13 @@ def write_table(root: Path, bpe_writer):
     """A SYNTHETIC tlc-N table with a stream, a registry (N0 subword, N2 bytes) and a prereg; returns paths."""
     docs = [EvalDoc(f"train/{d.key}", d.domain, d.segs) for d in documents("tlc", 120, seed=2)]
     S.build_stream(docs, root / "stream", seed=0, k_train=32, source={"project": "tlc", "fixture": "SYNTHETIC"})
-    path, sha = bpe_writer(root / "tok" / "tokenizer.json", specials=tuple(TLC_SPECIALS), pre="gpt2",
-                           train_on=[d.texts()[0] for d in docs], vocab_size=300)  # fmt: skip
+    path, sha = bpe_writer(
+        root / "tok" / "tokenizer.json",
+        specials=tuple(TLC_SPECIALS),
+        pre="gpt2",
+        train_on=[d.texts()[0] for d in docs],
+        vocab_size=300,
+    )
     (root / "arms.toml").write_text(
         'format = "tokstudy-arms/1"\ntable = "tlc-N"\n'
         f'[[arm]]\nid = "N0"\nkind = "subword"\ntokenizer = {{path = "tok/tokenizer.json", sha256 = "{sha}"}}\n'
@@ -205,15 +231,33 @@ def write_table(root: Path, bpe_writer):
         encoding="utf-8",
     )
     samples = root / "val.jsonl"
-    samples.write_text("".join(json.dumps({"text": d.texts()[0]}, ensure_ascii=False) + "\n"
-                               for d in documents("tlc", 10, seed=9)), encoding="utf-8")  # fmt: skip
+    samples.write_text(
+        "".join(json.dumps({"text": d.texts()[0]}, ensure_ascii=False) + "\n" for d in documents("tlc", 10, seed=9)),
+        encoding="utf-8",
+    )
     return root
 
 
 def test_evalset_scoring_and_nll_files_end_to_end(tmp_path, bpe_writer, capsys):
     root = write_table(tmp_path, bpe_writer)
-    assert E.main(["prefix", "--arms", str(root / "arms.toml"), "--prereg", str(root / "prereg.toml"),
-                   "--docs", f"py={root / 'val.jsonl'}", "--project", "tlc", "--out", str(root / "evalset")]) == 0  # fmt: skip
+    assert (
+        E.main(
+            [
+                "prefix",
+                "--arms",
+                str(root / "arms.toml"),
+                "--prereg",
+                str(root / "prereg.toml"),
+                "--docs",
+                f"py={root / 'val.jsonl'}",
+                "--project",
+                "tlc",
+                "--out",
+                str(root / "evalset"),
+            ]
+        )
+        == 0
+    )
     capsys.readouterr()
     manifest, sha, docs = E.open_evalset(root / "evalset")
     assert manifest["k_eval"] == 24 and all(d.text_bytes() <= 24 for d in docs) and len(docs) == 10
@@ -222,13 +266,35 @@ def test_evalset_scoring_and_nll_files_end_to_end(tmp_path, bpe_writer, capsys):
     config = T.TrainConfig(lr=3e-3, batch_rows=4, micro_rows=4, precision="fp64")
     stream = S.open_stream(root / "stream")
     for arm_id in ("N0", "N2"):
-        result = T.train(arms[arm_id], root / "runs", stream=stream, prereg=load_prereg(root / "prereg.toml"), seed=0,
-                         config=config, registry_path=root / "arms.toml")  # fmt: skip
+        result = T.train(
+            arms[arm_id],
+            root / "runs",
+            stream=stream,
+            prereg=load_prereg(root / "prereg.toml"),
+            seed=0,
+            config=config,
+            registry_path=root / "arms.toml",
+        )
         T.branch(result["dir"], endpoint=0.5)
         for point in (0.5, 1.0):
             out = root / f"{arm_id}-{point}.nll"
-            assert E.main(["score", result["dir"], "--point", str(point), "--evalset", str(root / "evalset"),
-                           "--out", str(out), "--device", "cpu"]) == 0  # fmt: skip
+            assert (
+                E.main(
+                    [
+                        "score",
+                        result["dir"],
+                        "--point",
+                        str(point),
+                        "--evalset",
+                        str(root / "evalset"),
+                        "--out",
+                        str(out),
+                        "--device",
+                        "cpu",
+                    ]
+                )
+                == 0
+            )
             printed = json.loads(capsys.readouterr().out)
             header, rows = E.read_nll(out)
             assert header["format"] == E.NLL_FORMAT and header["evalset_sha256"] == sha
@@ -255,8 +321,15 @@ def test_evaluation_accepts_a_run_of_another_commit_and_continuing_it_does_not(t
     root = write_table(tmp_path, bpe_writer)
     arms = {a.id: a for a in load_arms(root / "arms.toml")}
     config = T.TrainConfig(lr=3e-3, batch_rows=4, micro_rows=4, precision="fp64")
-    result = T.train(arms["N2"], root / "runs", stream=S.open_stream(root / "stream"), seed=0, config=config,
-                     prereg=load_prereg(root / "prereg.toml"), registry_path=root / "arms.toml")  # fmt: skip
+    result = T.train(
+        arms["N2"],
+        root / "runs",
+        stream=S.open_stream(root / "stream"),
+        seed=0,
+        config=config,
+        prereg=load_prereg(root / "prereg.toml"),
+        registry_path=root / "arms.toml",
+    )
     docs = documents("tlc", 5, seed=9)
     E.build_evalset(docs, list(arms.values()), root / "evalset", k_eval=24, source={"project": "tlc"})
     monkeypatch.setattr(registry, "code_identity", lambda start=None: {"commit": "f" * 40, "dirty": False})
@@ -278,16 +351,29 @@ def test_tlc_native_writer_of_tokstudy_nll_has_the_same_fields_and_domains(tmp_p
 
     loss_py = Path(__file__).resolve().parents[3] / "tlc" / "src" / "surogate_tlc" / "eval" / "loss.py"
     tree = ast.parse(loss_py.read_text(encoding="utf-8"))
-    constants = {n.targets[0].id: ast.literal_eval(n.value) for n in tree.body
-                 if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)
-                 and n.targets[0].id in ("NLL_FORMAT", "BACKEND", "DOMAINS")}  # fmt: skip
+    constants = {
+        n.targets[0].id: ast.literal_eval(n.value)
+        for n in tree.body
+        if isinstance(n, ast.Assign)
+        and isinstance(n.targets[0], ast.Name)
+        and n.targets[0].id in ("NLL_FORMAT", "BACKEND", "DOMAINS")
+    }
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "DocNLL")
     fields = [n.target.id for n in cls.body if isinstance(n, ast.AnnAssign)]
     assert fields == [f.name for f in dataclasses.fields(E.DocNLL)]
     assert constants["NLL_FORMAT"] == E.NLL_FORMAT and constants["BACKEND"] == "native"
     assert constants["DOMAINS"] == {"code": "py", "text": "en"}
-    line = {"key": "val-00000.bin:0", "domain": "py", "bytes": 10, "nll_nats": 1.5, "n_targets": 4, "eos_nats": 0.1,
-            "n_eos": 1, "special_nats": 0.2, "n_special": 2}  # fmt: skip
+    line = {
+        "key": "val-00000.bin:0",
+        "domain": "py",
+        "bytes": 10,
+        "nll_nats": 1.5,
+        "n_targets": 4,
+        "eos_nats": 0.1,
+        "n_eos": 1,
+        "special_nats": 0.2,
+        "n_special": 2,
+    }
     header = {"format": E.NLL_FORMAT, "table": "tlc-T", "backend": "native", "arm": "T0"}
     path = tmp_path / "T0.nll"
     path.write_text(json.dumps(header) + "\n" + json.dumps(line, sort_keys=True) + "\n", encoding="utf-8")

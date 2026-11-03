@@ -245,10 +245,18 @@ class TlcWriter(Writer):
 
     def attribution_lines(self) -> bytes:
         lines = [
-            canonical_json({"repo": repo, "commit_ids": sorted(e["commit_ids"]), "spdx": sorted(e["spdx"]),
-                            "files": e["files"], "bytes": e["bytes"]}) + b"\n"
+            canonical_json(
+                {
+                    "repo": repo,
+                    "commit_ids": sorted(e["commit_ids"]),
+                    "spdx": sorted(e["spdx"]),
+                    "files": e["files"],
+                    "bytes": e["bytes"],
+                }
+            )
+            + b"\n"
             for repo, e in sorted(self.attribution.items())
-        ]  # fmt: skip
+        ]
         return b"".join(lines)
 
     def licence_of(self, name):

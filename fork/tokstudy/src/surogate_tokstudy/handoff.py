@@ -60,13 +60,16 @@ def tlc_provenance(path: Path, spec: Path) -> dict[str, Any]:
     record = _read_json(record_path, "a TLC tokenizer manifest")
     found = sha256_file(path)
     if record.get("tokenizer_sha256") != found:
-        raise TokstudyError(f"{record_path}: records tokenizer sha256 {record.get('tokenizer_sha256')}, "
-                            f"the file has {found}")  # fmt: skip
+        raise TokstudyError(
+            f"{record_path}: records tokenizer sha256 {record.get('tokenizer_sha256')}, the file has {found}"
+        )
     corpus = record.get("corpus") or {}
     source = tlc_source(spec, "train")
     if corpus.get("spec_sha256") != source["spec_sha256"]:
-        raise TokstudyError(f"{path}: trained on the corpus spec with sha256 {corpus.get('spec_sha256')}, not on {spec} "
-                            f"({source['spec_sha256']}): the stream reads another corpus")  # fmt: skip
+        raise TokstudyError(
+            f"{path}: trained on the corpus spec with sha256 {corpus.get('spec_sha256')}, not on {spec} "
+            f"({source['spec_sha256']}): the stream reads another corpus"
+        )
     if corpus.get("decontam") != source["decontam"]:
         raise TokstudyError(f"{path}: trained under another decontamination report than {spec} names")
     if corpus.get("trained_on") != "train split":
@@ -96,14 +99,17 @@ def bilingual_provenance(path: Path, manifest: Path) -> dict[str, Any]:
         raise TokstudyError(f"{record_path}: not a {BILINGUAL_RECORD} document")
     found = sha256_file(path)
     if record.get("tokenizer_sha256") != found:
-        raise TokstudyError(f"{record_path}: records tokenizer sha256 {record.get('tokenizer_sha256')}, "
-                            f"the file has {found}")  # fmt: skip
+        raise TokstudyError(
+            f"{record_path}: records tokenizer sha256 {record.get('tokenizer_sha256')}, the file has {found}"
+        )
     derived = _derived_manifest(manifest)
     if record.get("split") != "seed_train":
         raise TokstudyError(f"{path}: trained on split {record.get('split')!r}, not seed_train (B-O11)")
     if record.get("manifest_sha256") != derived.get("manifest_sha256"):
-        raise TokstudyError(f"{path}: trained on the manifest {record.get('manifest_sha256')}, not on {manifest} "
-                            f"({derived.get('manifest_sha256')}): the stream reads another corpus")  # fmt: skip
+        raise TokstudyError(
+            f"{path}: trained on the manifest {record.get('manifest_sha256')}, not on {manifest} "
+            f"({derived.get('manifest_sha256')}): the stream reads another corpus"
+        )
     if record.get("normalization") != "none":
         raise TokstudyError(f"{path}: normalization {record.get('normalization')!r}; the study scores raw bytes")
     return {
@@ -129,8 +135,14 @@ def _registry(path: Path) -> tuple[str, list[dict[str, Any]], str]:
     return data["table"], [a for a in data.get("arm", []) if a.get("kind") == "subword"], text
 
 
-def handoff(registry: Path, *, tlc: Path | None = None, bilingual: Path | None = None, pin: bool = False,
-            record: Path | None = None) -> dict[str, Any]:  # fmt: skip
+def handoff(
+    registry: Path,
+    *,
+    tlc: Path | None = None,
+    bilingual: Path | None = None,
+    pin: bool = False,
+    record: Path | None = None,
+) -> dict[str, Any]:
     """Check (and with `pin`, write) the sha256 and the provenance of every subword arm's tokenizer."""
     registry = Path(registry)
     table, subword, text = _registry(registry)
@@ -146,8 +158,9 @@ def handoff(registry: Path, *, tlc: Path | None = None, bilingual: Path | None =
             raise TokstudyError(f"arm {entry.get('id')!r}: tokenizer = {{path, sha256}}")
         path = (registry.parent / tok["path"]).resolve()
         if not path.is_file():
-            raise TokstudyError(f"arm {entry['id']}: {path} does not exist (build it with the project's tokenizer "
-                                "command first)")  # fmt: skip
+            raise TokstudyError(
+                f"arm {entry['id']}: {path} does not exist (build it with the project's tokenizer command first)"
+            )
         found = sha256_file(path)
         if not pin and tok["sha256"] != found:
             what = "is not pinned yet" if tok["sha256"] == PLACEHOLDER else f"is pinned to {tok['sha256']}"
@@ -155,8 +168,13 @@ def handoff(registry: Path, *, tlc: Path | None = None, bilingual: Path | None =
         provenance = tlc_provenance(path, tlc) if project == "tlc" else bilingual_provenance(path, bilingual)
         if new_sha.setdefault(tok["path"], found) != found:
             raise TokstudyError(f"{tok['path']}: changed while it was read")
-        arms.append({"id": entry["id"], "tokenizer": {"path": tok["path"], "sha256": found, "previous": tok["sha256"]},
-                     "provenance": provenance})  # fmt: skip
+        arms.append(
+            {
+                "id": entry["id"],
+                "tokenizer": {"path": tok["path"], "sha256": found, "previous": tok["sha256"]},
+                "provenance": provenance,
+            }
+        )
     changed = [a["id"] for a in arms if a["tokenizer"]["previous"] != a["tokenizer"]["sha256"]]
     if pin and changed:
         lines = text.splitlines(keepends=True)
@@ -168,8 +186,10 @@ def handoff(registry: Path, *, tlc: Path | None = None, bilingual: Path | None =
                 lines[i] = m.group("head") + new_sha[m.group("path")] + m.group("tail") + end
                 hits += 1
         if hits != len(subword):
-            raise TokstudyError(f"{registry}: write every subword arm's tokenizer on one line as "
-                                'tokenizer = {path = "...", sha256 = "..."} (found {hits} of {len(subword)})')  # fmt: skip
+            raise TokstudyError(
+                f"{registry}: write every subword arm's tokenizer on one line as "
+                'tokenizer = {path = "...", sha256 = "..."} (found {hits} of {len(subword)})'
+            )
         atomic_write_bytes(registry, "".join(lines).encode("utf-8"))
     loaded = load_arms(registry)  # every sha256 checked, as every later command does
     if project == "tlc":

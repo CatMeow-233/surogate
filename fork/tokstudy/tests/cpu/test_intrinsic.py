@@ -114,8 +114,9 @@ def test_lexemes_of_edge_cases(edge_texts):
 def _write_samples(tmp_path):
     """SYNTHETIC FIXTURE sample files in the two accepted formats."""
     jsonl = tmp_path / "py.jsonl"
-    jsonl.write_text("\n".join(json.dumps({"text": t, "id": i}) for i, t in enumerate([PY, "y = 3\n"])) + "\n",
-                     encoding="utf-8")  # fmt: skip
+    jsonl.write_text(
+        "\n".join(json.dumps({"text": t, "id": i}) for i, t in enumerate([PY, "y = 3\n"])) + "\n", encoding="utf-8"
+    )
     rows = tmp_path / "rows_en.json"
     payload = {"rows": [{"row_idx": i, "row": {"content": t}} for i, t in enumerate(["Hello world.", "Two words"])]}
     rows.write_text(json.dumps(payload), encoding="utf-8")
@@ -127,8 +128,22 @@ def test_command_line(tmp_path, capsys, bpe_writer):
 
     path, sha = bpe_writer(tmp_path / "tok" / "tokenizer.json", MERGES, specials=list(TLC))
     jsonl, rows = _write_samples(tmp_path)
-    args = ["intrinsic", "--tokenizer", f"hand={path}@{sha}", "--bytes", "bytes", "--project", "tlc", "--check",
-            "--docs", f"py={jsonl}", "--docs", f"en={rows}", "--out", str(tmp_path / "out.json")]  # fmt: skip
+    args = [
+        "intrinsic",
+        "--tokenizer",
+        f"hand={path}@{sha}",
+        "--bytes",
+        "bytes",
+        "--project",
+        "tlc",
+        "--check",
+        "--docs",
+        f"py={jsonl}",
+        "--docs",
+        f"en={rows}",
+        "--out",
+        str(tmp_path / "out.json"),
+    ]
     assert main(args) == 0
     report = json.loads((tmp_path / "out.json").read_text(encoding="utf-8"))
     assert report["format"] == "tokstudy-intrinsic/1" and sorted(report["arms"]) == ["bytes", "hand"]

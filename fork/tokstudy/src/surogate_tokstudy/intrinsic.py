@@ -62,7 +62,7 @@ LEXEME_TYPES = frozenset(
         "TSTRING_START",
         "TSTRING_MIDDLE",
         "TSTRING_END",
-    )  # fmt: skip
+    )
     if hasattr(tokenize, name)
 )
 _HAN_REMOVED = None
@@ -126,7 +126,7 @@ class _Domain:
                 identifiers=0,
                 identifier_pieces=0,
                 single_piece_identifiers=0,
-            )  # fmt: skip
+            )
             if python
             else None
         )
@@ -250,8 +250,9 @@ def measure(
     for doc in docs:
         acc = domains.get(doc.domain)
         if acc is None:
-            acc = domains[doc.domain] = _Domain(codec.vocab_size, doc.domain in word_domains,
-                                                doc.domain in python_domains)  # fmt: skip
+            acc = domains[doc.domain] = _Domain(
+                codec.vocab_size, doc.domain in word_domains, doc.domain in python_domains
+            )
         acc.n["docs"] += 1
         lengths = []
         for text in doc.texts():
@@ -273,13 +274,24 @@ def measure(
 
 def add_codec_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--arms", type=Path, help="an arm registry: every subword and bytes arm (H-Net arms skipped)")
-    parser.add_argument("--tokenizer", action="append", default=[], metavar="NAME=PATH@SHA256",
-                        help="a byte-level BPE tokenizer.json, its sha256 checked (repeatable)")  # fmt: skip
+    parser.add_argument(
+        "--tokenizer",
+        action="append",
+        default=[],
+        metavar="NAME=PATH@SHA256",
+        help="a byte-level BPE tokenizer.json, its sha256 checked (repeatable)",
+    )
     parser.add_argument("--bytes", action="append", default=[], metavar="NAME", help="a byte codec arm (repeatable)")
-    parser.add_argument("--project", choices=sorted(PROJECT_SPECIALS),
-                        help="check --tokenizer files for this project's special ids 0-4 (default: no check)")  # fmt: skip
-    parser.add_argument("--drop-normalizer", action="store_true",
-                        help="load --tokenizer files that carry a normaliser without it (reference tokenizers)")  # fmt: skip
+    parser.add_argument(
+        "--project",
+        choices=sorted(PROJECT_SPECIALS),
+        help="check --tokenizer files for this project's special ids 0-4 (default: no check)",
+    )
+    parser.add_argument(
+        "--drop-normalizer",
+        action="store_true",
+        help="load --tokenizer files that carry a normaliser without it (reference tokenizers)",
+    )
     parser.add_argument("--check", action="store_true", help="compare token bytes with the text on every encode")
 
 
@@ -304,8 +316,12 @@ def codecs_from(args: argparse.Namespace) -> tuple[dict[str, Codec], list[str]]:
     specials = PROJECT_SPECIALS[args.project] if args.project else None
     for arg in args.tokenizer:
         name, path, sha = parse_tokenizer_arg(arg)
-        put(name, SubwordCodec.from_tokenizer_json(path, sha, specials, name=name,
-                                                   drop_normalizer=args.drop_normalizer, check=args.check))  # fmt: skip
+        put(
+            name,
+            SubwordCodec.from_tokenizer_json(
+                path, sha, specials, name=name, drop_normalizer=args.drop_normalizer, check=args.check
+            ),
+        )
     for name in args.bytes:
         put(name, ByteCodec(PROJECT_SPECIALS[args.project or "tlc"], name=name, check=args.check))
     if not out:
@@ -314,8 +330,13 @@ def codecs_from(args: argparse.Namespace) -> tuple[dict[str, Codec], list[str]]:
 
 
 def add_docs_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--docs", action="append", required=True, metavar="DOMAIN=PATH",
-                        help=".jsonl or datasets-server .json sample file of one domain (repeatable)")  # fmt: skip
+    parser.add_argument(
+        "--docs",
+        action="append",
+        required=True,
+        metavar="DOMAIN=PATH",
+        help=".jsonl or datasets-server .json sample file of one domain (repeatable)",
+    )
     parser.add_argument("--field", help="text field (default: text in .jsonl, content in .json)")
     parser.add_argument("--limit", type=int, help="documents per --docs file")
 
@@ -331,8 +352,10 @@ def docs_from(args: argparse.Namespace) -> tuple[list[EvalDoc], list[dict[str, A
 
 
 def lexer_record() -> dict[str, Any]:
-    return {"python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
-            "lexeme_types": sorted(tokenize.tok_name[t] for t in LEXEME_TYPES)}  # fmt: skip
+    return {
+        "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "lexeme_types": sorted(tokenize.tok_name[t] for t in LEXEME_TYPES),
+    }
 
 
 def main(argv: Sequence[str]) -> int:
@@ -348,19 +371,30 @@ def main(argv: Sequence[str]) -> int:
         docs, inputs = docs_from(args)
         python_domains, word_domains = args.python_domain or ["py"], args.word_domain or ["en"]
         arms = {
-            name: {"codec": codec.identity(),
-                   "domains": measure(codec, docs, python_domains=python_domains, word_domains=word_domains)}
+            name: {
+                "codec": codec.identity(),
+                "domains": measure(codec, docs, python_domains=python_domains, word_domains=word_domains),
+            }
             for name, codec in codecs.items()
-        }  # fmt: skip
+        }
     except (TokstudyError, OSError, ValueError) as err:
         print(f"intrinsic: {err}", file=sys.stderr)
         return 1
-    report = {"format": FORMAT, "inputs": inputs, "arms": arms, "skipped_hnet_arms": skipped, "lexer": lexer_record(),
-              "python_domains": sorted(python_domains), "word_domains": sorted(word_domains)}  # fmt: skip
+    report = {
+        "format": FORMAT,
+        "inputs": inputs,
+        "arms": arms,
+        "skipped_hnet_arms": skipped,
+        "lexer": lexer_record(),
+        "python_domains": sorted(python_domains),
+        "word_domains": sorted(word_domains),
+    }
     atomic_write_json(args.out, report)
     for name, arm in arms.items():
         for domain, m in arm["domains"].items():
             bpt = m["bytes_per_token"]
-            print(f"{name}\t{domain}\t{m['docs']} docs\t{m['bytes']} bytes\t{m['tokens']} tokens\t"
-                  f"{'-' if bpt is None else f'{bpt:.3f}'} bytes/token")  # fmt: skip
+            print(
+                f"{name}\t{domain}\t{m['docs']} docs\t{m['bytes']} bytes\t{m['tokens']} tokens\t"
+                f"{'-' if bpt is None else f'{bpt:.3f}'} bytes/token"
+            )
     return 0

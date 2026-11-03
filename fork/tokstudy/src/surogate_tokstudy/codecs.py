@@ -93,9 +93,19 @@ class _Encoded:
 
 
 class SubwordCodec(_Encoded):
-    def __init__(self, tokenizer, table: list[bytes | None], *, name: str, path: Path, sha256: str,
-                 special_ids: Mapping[str, int], normalizer_dropped: Any = None, dropped=None,
-                 check: bool = False):  # fmt: skip
+    def __init__(
+        self,
+        tokenizer,
+        table: list[bytes | None],
+        *,
+        name: str,
+        path: Path,
+        sha256: str,
+        special_ids: Mapping[str, int],
+        normalizer_dropped: Any = None,
+        dropped=None,
+        check: bool = False,
+    ):
         self._tokenizer = tokenizer
         self._dropped = dropped  # the removed normaliser object, to count the texts it would have changed
         self._table = table
@@ -144,8 +154,17 @@ class SubwordCodec(_Encoded):
         special_ids = {t["content"]: int(t["id"]) for t in data.get("added_tokens", []) if t.get("special")}
         if specials is not None and special_ids != dict(specials):
             raise TokstudyError(f"{path}: special tokens {special_ids}, expected {dict(specials)}")
-        return cls(tokenizer, table, name=name or path.parent.name, path=path, sha256=sha256,
-                   special_ids=special_ids, normalizer_dropped=normalizer, dropped=dropped, check=check)  # fmt: skip
+        return cls(
+            tokenizer,
+            table,
+            name=name or path.parent.name,
+            path=path,
+            sha256=sha256,
+            special_ids=special_ids,
+            normalizer_dropped=normalizer,
+            dropped=dropped,
+            check=check,
+        )
 
     def encode_text(self, text: str) -> tuple[np.ndarray, np.ndarray]:
         raw = utf8(text)
@@ -163,8 +182,14 @@ class SubwordCodec(_Encoded):
         return b"" if b is None else b
 
     def identity(self) -> dict[str, Any]:
-        return {"kind": "subword", "name": self.name, "path": str(self.path), "sha256": self.sha256,
-                "vocab_size": self.vocab_size, "normalizer_dropped": self.normalizer_dropped}  # fmt: skip
+        return {
+            "kind": "subword",
+            "name": self.name,
+            "path": str(self.path),
+            "sha256": self.sha256,
+            "vocab_size": self.vocab_size,
+            "normalizer_dropped": self.normalizer_dropped,
+        }
 
 
 def _check_byte_level(path: Path, pre_tokenizer: Any) -> None:
@@ -192,8 +217,9 @@ def _token_table(path: Path, vocab: Mapping[str, int], added: list, size: int) -
 
 
 class ByteCodec(_Encoded):
-    def __init__(self, special_ids: Mapping[str, int], *, name: str = "bytes", pad_to: int | None = None,
-                 check: bool = False):  # fmt: skip
+    def __init__(
+        self, special_ids: Mapping[str, int], *, name: str = "bytes", pad_to: int | None = None, check: bool = False
+    ):
         if sorted(special_ids.values()) != list(range(BYTE_OFFSET)):
             raise TokstudyError(f"ByteCodec needs special ids 0-4, got {dict(special_ids)}")
         self.name = name

@@ -25,8 +25,14 @@ def test_the_registry_refuses_a_revision_that_is_not_a_full_sha(revision):
 def test_every_registry_entry_is_pinned_and_expands_to_the_listed_file_counts():
     counts = {s.id: len(s.expand_files()) for s in sources.SOURCES.values()}
     # file counts read from the Hub API on 2026-11-03
-    assert counts == {"stack3-py": 45, "ufw-en": 2048, "ufw-zh": 256, "code-l2-py": 119, "code-l3-py": 147,
-                      "unpc-en-zh": 10}  # fmt: skip
+    assert counts == {
+        "stack3-py": 45,
+        "ufw-en": 2048,
+        "ufw-zh": 256,
+        "code-l2-py": 119,
+        "code-l3-py": 147,
+        "unpc-en-zh": 10,
+    }
     assert all(re.fullmatch(r"[0-9a-f]{40}", s.revision) for s in sources.SOURCES.values())
     assert sources.get("ufw-zh").expand_files()[0] == "data/ultrafineweb_zh/ultrafineweb-zh-part-001-of-256.parquet"
     assert sources.get("unpc-en-zh").expand_files()[-1] == "en-zh/train/0009.parquet"
@@ -54,10 +60,14 @@ def test_licence_ids_are_accepted_by_the_bilingual_manifest():
 
     ids = {i for s in sources.SOURCES.values() for i in s.licence.spdx.values()}
     assert ids == {
-        "ODC-By-1.0", "Apache-2.0", "LicenseRef-Skywork-Community-License", "LicenseRef-WanJuan-1.0",
-        "LicenseRef-BAAI-Data-Agreement", "LicenseRef-MiChao-Usage-Agreement",
+        "ODC-By-1.0",
+        "Apache-2.0",
+        "LicenseRef-Skywork-Community-License",
+        "LicenseRef-WanJuan-1.0",
+        "LicenseRef-BAAI-Data-Agreement",
+        "LicenseRef-MiChao-Usage-Agreement",
         "LicenseRef-UN-Parallel-Corpus-Disclaimer",
-    }  # fmt: skip
+    }
     assert all(LICENCE_ID.fullmatch(i) for i in ids)
     assert not any(s.licence.verified for s in sources.SOURCES.values())
     assert set(sources.get("ufw-zh").licence.spdx) == set(sources.UFW_ZH_UPSTREAM)

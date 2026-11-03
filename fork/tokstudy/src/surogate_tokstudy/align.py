@@ -64,9 +64,19 @@ def measure(student: Codec, teacher: SubwordCodec, docs: Iterable[EvalDoc]) -> d
     """Per domain: student and teacher tokens, the student tokens of each class, and the whitespace rows."""
     out: dict[str, dict[str, Any]] = {}
     for doc in docs:
-        d = out.setdefault(doc.domain, {"docs": 0, "bytes": 0, "student_tokens": 0, "teacher_tokens": 0,
-                                        **{c: 0 for c in CLASSES}, "whitespace_tokens": 0,
-                                        "non_identity_whitespace": 0, "docs_changed_by_teacher_normalizer": 0})  # fmt: skip
+        d = out.setdefault(
+            doc.domain,
+            {
+                "docs": 0,
+                "bytes": 0,
+                "student_tokens": 0,
+                "teacher_tokens": 0,
+                **{c: 0 for c in CLASSES},
+                "whitespace_tokens": 0,
+                "non_identity_whitespace": 0,
+                "docs_changed_by_teacher_normalizer": 0,
+            },
+        )
         d["docs"] += 1
         changed = False
         for text in doc.texts():
@@ -101,8 +111,9 @@ def main(argv: Sequence[str]) -> int:
     args = parser.parse_args(list(argv))
     try:
         _, teacher_path, teacher_sha = parse_tokenizer_arg(f"teacher={args.teacher}")
-        teacher = SubwordCodec.from_tokenizer_json(teacher_path, teacher_sha, name="teacher", drop_normalizer=True,
-                                                   check=args.check)  # fmt: skip
+        teacher = SubwordCodec.from_tokenizer_json(
+            teacher_path, teacher_sha, name="teacher", drop_normalizer=True, check=args.check
+        )
         students, skipped = codecs_from(args)
         docs, inputs = docs_from(args)
         report = {
@@ -120,6 +131,8 @@ def main(argv: Sequence[str]) -> int:
     for name, student in report["students"].items():
         for domain, d in student["domains"].items():
             r = {k: "-" if v is None else f"{v:.4f}" for k, v in d["rates"].items()}
-            print(f"{name}\t{domain}\t1:1 {r['one_to_one']}\tcross {r['cross_boundary']}\t"
-                  f"ws-non-identity {r['non_identity_whitespace']}")  # fmt: skip
+            print(
+                f"{name}\t{domain}\t1:1 {r['one_to_one']}\tcross {r['cross_boundary']}\t"
+                f"ws-non-identity {r['non_identity_whitespace']}"
+            )
     return 0

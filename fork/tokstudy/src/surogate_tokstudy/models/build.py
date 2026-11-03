@@ -57,8 +57,12 @@ def build_main(
     if main == "twin_a0":
         from .twin_a0 import A0Twin, twin_config
 
-        return A0Twin(twin_config(profile or DEFAULT_PROFILES[main], **overrides), vocab_size=vocab_size,
-                      init_seed=init_seed, backend=backend)  # fmt: skip
+        return A0Twin(
+            twin_config(profile or DEFAULT_PROFILES[main], **overrides),
+            vocab_size=vocab_size,
+            init_seed=init_seed,
+            backend=backend,
+        )
     if main == "bilingual_trunk":
         from .trunk_bilingual import BilingualTrunk
 
@@ -82,8 +86,9 @@ def build_model(arm: ArmSpec, *, vocab_size: int | None = None, init_seed: int, 
         main = build_main(arm.main, profile, overrides, vocab_size=vocab_size, init_seed=init_seed, backend=backend)
         return SubwordLM(main)
     if arm.kind == "bytes":
-        main = build_main(arm.main, profile, overrides, vocab_size=vocab_size or BYTE_VOCAB, init_seed=init_seed,
-                          backend=backend)  # fmt: skip
+        main = build_main(
+            arm.main, profile, overrides, vocab_size=vocab_size or BYTE_VOCAB, init_seed=init_seed, backend=backend
+        )
         return ByteLM(main)
     hnet = dict(model["hnet"])
     if hnet.setdefault("backend", backend) != backend:
@@ -104,29 +109,60 @@ def _main_spec(main: nn.Module) -> dict[str, Any]:
 
     if isinstance(main, A0Twin):
         c = main.cfg
-        return {"type": "mamba", "d": c["hidden_size"], "layers": c["num_hidden_layers"], "ffn": c["intermediate_size"],
-                "heads": c["mamba_num_heads"], "head_dim": c["mamba_head_dim"], "state": c["ssm_state_size"],
-                "groups": c["n_groups"], "chunk": c["chunk_size"], "kernel": c["conv_kernel"]}  # fmt: skip
+        return {
+            "type": "mamba",
+            "d": c["hidden_size"],
+            "layers": c["num_hidden_layers"],
+            "ffn": c["intermediate_size"],
+            "heads": c["mamba_num_heads"],
+            "head_dim": c["mamba_head_dim"],
+            "state": c["ssm_state_size"],
+            "groups": c["n_groups"],
+            "chunk": c["chunk_size"],
+            "kernel": c["conv_kernel"],
+        }
     if isinstance(main, BilingualTrunk):
         c = main.cfg
         if c.family != "swiglu":
             raise ValueError(f"the FLOP formulas know the dense SwiGLU trunk, not family {c.family!r}")
-        return {"type": "transformer", "d": c.d_model, "layers": c.n_layers, "q_width": c.n_heads * c.head_dim,
-                "kv_width": c.n_kv_heads * c.head_dim, "ffn": c.ffn_width}  # fmt: skip
+        return {
+            "type": "transformer",
+            "d": c.d_model,
+            "layers": c.n_layers,
+            "q_width": c.n_heads * c.head_dim,
+            "kv_width": c.n_kv_heads * c.head_dim,
+            "ffn": c.ffn_width,
+        }
     raise ValueError(f"no FLOP spec for a main network of type {type(main).__name__}")
 
 
 def _outer_spec(stack) -> dict[str, Any]:
     g = stack.geometry
-    return {"type": "mamba", "d": stack.d_model, "layers": len(stack.layers), "ffn": stack.ffn, "heads": g.heads,
-            "head_dim": g.head_dim, "state": g.state, "groups": g.groups, "chunk": g.chunk, "kernel": g.conv_kernel}  # fmt: skip
+    return {
+        "type": "mamba",
+        "d": stack.d_model,
+        "layers": len(stack.layers),
+        "ffn": stack.ffn,
+        "heads": g.heads,
+        "head_dim": g.head_dim,
+        "state": g.state,
+        "groups": g.groups,
+        "chunk": g.chunk,
+        "kernel": g.conv_kernel,
+    }
 
 
 def flop_spec(model: nn.Module) -> dict[str, Any]:
     """The flops.py spec dict of a model built by build_model."""
     if isinstance(model, HNetLM):
-        return {"kind": "hnet", "main": _main_spec(model.main), "vocab": model.cfg.vocab_size, "d0": model.cfg.d0,
-                "encoder": _outer_spec(model.encoder), "decoder": _outer_spec(model.decoder)}  # fmt: skip
+        return {
+            "kind": "hnet",
+            "main": _main_spec(model.main),
+            "vocab": model.cfg.vocab_size,
+            "d0": model.cfg.d0,
+            "encoder": _outer_spec(model.encoder),
+            "decoder": _outer_spec(model.decoder),
+        }
     if isinstance(model, (SubwordLM, ByteLM)):
         return {"kind": model.kind, "main": _main_spec(model.main), "vocab": model.vocab_size}
     raise ValueError(f"no FLOP spec for a model of type {type(model).__name__}")

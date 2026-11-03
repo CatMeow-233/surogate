@@ -61,8 +61,9 @@ def export_sources(export: Path, project: str, base: Path) -> tuple[list[dict[st
     provenance = read_json(export / "provenance.json", "export")
     writer = provenance["profile"]["writer"]
     if writer not in PROJECT_WRITERS[project]:
-        raise CorporaError(f"{export}: profile {provenance['profile']['name']} writes the {writer} format, "
-                           f"not a {project} corpus")  # fmt: skip
+        raise CorporaError(
+            f"{export}: profile {provenance['profile']['name']} writes the {writer} format, not a {project} corpus"
+        )
     entries = _read_toml(export / FRAGMENT, "a spec fragment").get("source", [])
     if not entries:
         raise CorporaError(f"{export}: {FRAGMENT} has no [[source]] tables")
@@ -83,8 +84,15 @@ def export_sources(export: Path, project: str, base: Path) -> tuple[list[dict[st
     return out, record
 
 
-def compose(project: str, exports: Sequence[Path], out: Path, *, root: Path | None = None,
-            includes: Sequence[Path] = (), top: Mapping[str, Any] | None = None) -> dict[str, Any]:  # fmt: skip
+def compose(
+    project: str,
+    exports: Sequence[Path],
+    out: Path,
+    *,
+    root: Path | None = None,
+    includes: Sequence[Path] = (),
+    top: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Write the project spec `out` from `exports` (and `includes`); returns the summary the command prints."""
     if project not in PROJECT_WRITERS:
         raise CorporaError(f"project must be one of {sorted(PROJECT_WRITERS)}, got {project!r}")
@@ -120,13 +128,19 @@ def compose(project: str, exports: Sequence[Path], out: Path, *, root: Path | No
         kinds[record["kind"]] += record["text_bytes"]
     total = sum(kinds.values())
     mixture = {k: {"text_bytes": v, "share": round(v / total, 6) if total else None} for k, v in sorted(kinds.items())}
-    lines = [f"# {project} corpus spec composed by `python -m surogate_corpora compose` from these exports",
-             f"# (file paths relative to {'the corpus root' if project == 'bilingual' else 'this file'}):"]  # fmt: skip
+    lines = [
+        f"# {project} corpus spec composed by `python -m surogate_corpora compose` from these exports",
+        f"# (file paths relative to {'the corpus root' if project == 'bilingual' else 'this file'}):",
+    ]
     for r in records:
-        lines.append(f"#   {r['export']}: profile {r['profile']}, plan {r['plan_sha256']}, "
-                     f"provenance {r['provenance_sha256']}, {r['docs']} docs, {r['text_bytes']} text bytes")  # fmt: skip
-    lines.append("# kept text bytes by kind (exports only): " + ", ".join(
-        f"{k} {v['text_bytes']} ({v['share']})" for k, v in mixture.items()))  # fmt: skip
+        lines.append(
+            f"#   {r['export']}: profile {r['profile']}, plan {r['plan_sha256']}, "
+            f"provenance {r['provenance_sha256']}, {r['docs']} docs, {r['text_bytes']} text bytes"
+        )
+    lines.append(
+        "# kept text bytes by kind (exports only): "
+        + ", ".join(f"{k} {v['text_bytes']} ({v['share']})" for k, v in mixture.items())
+    )
     if top:
         lines.append("")
         lines += [f"{k} = {toml_value(v)}" for k, v in top.items()]
@@ -146,27 +160,37 @@ def compose(project: str, exports: Sequence[Path], out: Path, *, root: Path | No
 
 
 def main(argv: Sequence[str]) -> int:
-    parser = argparse.ArgumentParser(prog="python -m surogate_corpora compose",
-                                     description="one project corpus spec from several export directories")  # fmt: skip
+    parser = argparse.ArgumentParser(
+        prog="python -m surogate_corpora compose", description="one project corpus spec from several export directories"
+    )
     parser.add_argument("--project", choices=sorted(PROJECT_WRITERS), required=True)
     parser.add_argument("--export", type=Path, action="append", default=[], help="an export directory (repeat)")
     parser.add_argument("--out", type=Path, required=True, help="the spec to write (must not exist)")
     parser.add_argument("--root", type=Path, help="bilingual: the corpus root (default the spec's directory)")
-    parser.add_argument("--include", type=Path, action="append", default=[],
-                        help="owner-written [[source]] tables appended verbatim (paths relative to the base)")  # fmt: skip
+    parser.add_argument(
+        "--include",
+        type=Path,
+        action="append",
+        default=[],
+        help="owner-written [[source]] tables appended verbatim (paths relative to the base)",
+    )
     parser.add_argument("--seed", type=int, help="TLC: the split seed (default 0)")
     parser.add_argument("--val-fraction", type=float, help="TLC: the share of documents in val (default 0.01)")
     parser.add_argument("--decontam", help="TLC: the decontamination report, relative to the spec")
     args = parser.parse_args(argv)
     top: dict[str, Any] = {}
     if args.project == "tlc":
-        top = {"seed": 0 if args.seed is None else args.seed,
-               "val_fraction": 0.01 if args.val_fraction is None else args.val_fraction}  # fmt: skip
+        top = {
+            "seed": 0 if args.seed is None else args.seed,
+            "val_fraction": 0.01 if args.val_fraction is None else args.val_fraction,
+        }
         if args.decontam:
             top["decontam"] = args.decontam
     elif args.seed is not None or args.val_fraction is not None or args.decontam:
-        print("compose: --seed, --val-fraction and --decontam are TLC spec keys; bilingual splits with "
-              "`split assign`", file=sys.stderr)  # fmt: skip
+        print(
+            "compose: --seed, --val-fraction and --decontam are TLC spec keys; bilingual splits with `split assign`",
+            file=sys.stderr,
+        )
         return 1
     try:
         summary = compose(args.project, args.export, args.out, root=args.root, includes=args.include, top=top)

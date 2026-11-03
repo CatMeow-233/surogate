@@ -113,8 +113,11 @@ def test_command_line(registry, capsys):
     path, sha = registry
     assert main(["arms", str(path)]) == 0
     lines = capsys.readouterr().out.strip().split("\n")
-    assert [line.split("\t")[:3] for line in lines] == [["N0", "tlc-N", "subword"], ["N1", "tlc-N", "hnet"],
-                                                         ["N2", "tlc-N", "bytes"]]  # fmt: skip
+    assert [line.split("\t")[:3] for line in lines] == [
+        ["N0", "tlc-N", "subword"],
+        ["N1", "tlc-N", "hnet"],
+        ["N2", "tlc-N", "bytes"],
+    ]
     path.write_text(path.read_text(encoding="utf-8").replace(sha, "1" * 64), encoding="utf-8")
     assert main(["arms", str(path)]) == 1
     assert "the registry says" in capsys.readouterr().err

@@ -101,9 +101,14 @@ def _char_boundaries(doc: EvalDoc) -> np.ndarray:
     return np.concatenate([[0], np.cumsum(lengths, dtype=np.int64)]) if lengths else np.zeros(1, dtype=np.int64)
 
 
-def common_prefix_bytes(doc: EvalDoc, arms: Sequence[ArmSpec], *, k_eval: int,
-                        codecs: Mapping[str, Codec] | None = None,
-                        limits: Mapping[str, int | None] | None = None) -> int:  # fmt: skip
+def common_prefix_bytes(
+    doc: EvalDoc,
+    arms: Sequence[ArmSpec],
+    *,
+    k_eval: int,
+    codecs: Mapping[str, Codec] | None = None,
+    limits: Mapping[str, int | None] | None = None,
+) -> int:
     """max k <= k_eval at a character boundary such that every arm's encoding of truncate(doc, k) fits its limit
     (0 when not even the empty prefix fits). Token counts need not grow with k, so the scan goes down from the top
     and the first fit is the maximum."""
@@ -119,9 +124,17 @@ def common_prefix_bytes(doc: EvalDoc, arms: Sequence[ArmSpec], *, k_eval: int,
     return 0
 
 
-def build_evalset(docs: Iterable[EvalDoc], arms: Sequence[ArmSpec], out: Path, *, k_eval: int,
-                  source: Mapping[str, Any], registry_sha256: str | None = None, max_docs: int | None = None,
-                  seed: int = 0) -> dict[str, Any]:  # fmt: skip
+def build_evalset(
+    docs: Iterable[EvalDoc],
+    arms: Sequence[ArmSpec],
+    out: Path,
+    *,
+    k_eval: int,
+    source: Mapping[str, Any],
+    registry_sha256: str | None = None,
+    max_docs: int | None = None,
+    seed: int = 0,
+) -> dict[str, Any]:
     """Cut every document to the table's common prefix and write evalset.json and docs.jsonl into `out`."""
     out = Path(out)
     if out.exists() and any(out.iterdir()):
@@ -202,8 +215,9 @@ def open_evalset(path: Path) -> tuple[dict[str, Any], str, list[EvalDoc]]:
 # --- scoring ---------------------------------------------------------------------------------------------------------
 
 
-def score_documents(model, codec: Codec, docs: Sequence[EvalDoc], *, batch: int = 8, precision: str = "fp32",
-                    device=None) -> list[DocNLL]:  # fmt: skip
+def score_documents(
+    model, codec: Codec, docs: Sequence[EvalDoc], *, batch: int = 8, precision: str = "fp32", device=None
+) -> list[DocNLL]:
     """Per-document NLLs of `docs` (already cut to their prefix) under `model`, in the order of `docs`."""
     import torch
     from torch.nn import functional as F
@@ -219,8 +233,9 @@ def score_documents(model, codec: Codec, docs: Sequence[EvalDoc], *, batch: int 
         if len(enc.ids) < 2 or not enc.special[0]:
             raise TokstudyError(f"{doc.key}: needs a special first position and at least one target")
         if enc.text_bytes != doc.text_bytes():
-            raise TokstudyError(f"{codec.name}: the tokens of {doc.key} cover {enc.text_bytes} of "
-                                f"{doc.text_bytes()} text bytes")  # fmt: skip
+            raise TokstudyError(
+                f"{codec.name}: the tokens of {doc.key} cover {enc.text_bytes} of {doc.text_bytes()} text bytes"
+            )
         encoded.append(enc)
     order = sorted(range(len(docs)), key=lambda i: len(encoded[i].ids))
     results: dict[int, DocNLL] = {}
@@ -248,9 +263,17 @@ def score_documents(model, codec: Codec, docs: Sequence[EvalDoc], *, batch: int 
                 row, targets = nll[r, : n - 1], enc.ids[1:]
                 special = enc.special[1:]
                 eos = special & np.isin(targets, list(eos_ids))
-                results[i] = DocNLL(docs[i].key, docs[i].domain, enc.text_bytes, float(row[~special].sum()),
-                                    int((~special).sum()), float(row[eos].sum()), int(eos.sum()),
-                                    float(row[special & ~eos].sum()), int((special & ~eos).sum()))  # fmt: skip
+                results[i] = DocNLL(
+                    docs[i].key,
+                    docs[i].domain,
+                    enc.text_bytes,
+                    float(row[~special].sum()),
+                    int((~special).sum()),
+                    float(row[eos].sum()),
+                    int(eos.sum()),
+                    float(row[special & ~eos].sum()),
+                    int((special & ~eos).sum()),
+                )
     finally:
         model.train(was_training)
     return [results[i] for i in range(len(docs))]
@@ -268,9 +291,16 @@ def bpb(rows: Sequence[DocNLL], domain: str, *, with_eos: bool = False) -> float
 
 def summary(rows: Sequence[DocNLL]) -> dict[str, Any]:
     domains = sorted({r.domain for r in rows})
-    return {d: {"bpb": bpb(rows, d), "bpb_with_eos": bpb(rows, d, with_eos=True),
-                "docs": sum(1 for r in rows if r.domain == d), "bytes": sum(r.bytes for r in rows if r.domain == d),
-                "targets": sum(r.n_targets for r in rows if r.domain == d)} for d in domains}  # fmt: skip
+    return {
+        d: {
+            "bpb": bpb(rows, d),
+            "bpb_with_eos": bpb(rows, d, with_eos=True),
+            "docs": sum(1 for r in rows if r.domain == d),
+            "bytes": sum(r.bytes for r in rows if r.domain == d),
+            "targets": sum(r.n_targets for r in rows if r.domain == d),
+        }
+        for d in domains
+    }
 
 
 def write_nll(path: Path, header: Mapping[str, Any], rows: Sequence[DocNLL]) -> Path:
@@ -288,33 +318,58 @@ def read_nll(path: Path) -> tuple[dict[str, Any], list[DocNLL]]:
     return header, [DocNLL(**json.loads(line)) for line in lines[1:] if line.strip()]
 
 
-def evaluate_point(run_dir: Path, endpoint: float, evalset: Path, out: Path, *, batch: int = 8,
-                   device: str | None = None, arms: Path | None = None, prereg: Path | None = None,
-                   stream: Path | None = None) -> dict[str, Any]:  # fmt: skip
+def evaluate_point(
+    run_dir: Path,
+    endpoint: float,
+    evalset: Path,
+    out: Path,
+    *,
+    batch: int = 8,
+    device: str | None = None,
+    arms: Path | None = None,
+    prereg: Path | None = None,
+    stream: Path | None = None,
+) -> dict[str, Any]:
     """Score a run's budget point (final.pt at 1, its decay branch's below) on an evalset; writes tokstudy-nll/1."""
     from . import train
 
     manifest, evalset_sha, docs = open_evalset(evalset)
-    s = train.reopen(run_dir, arms=arms, stream=stream, prereg=prereg, device=device, verify_stream=False,
-                     same_code=False)  # fmt: skip
+    s = train.reopen(
+        run_dir, arms=arms, stream=stream, prereg=prereg, device=device, verify_stream=False, same_code=False
+    )
     if manifest["table"] != s.arm.table:
         raise TokstudyError(f"the evalset is table {manifest['table']}'s, the run table {s.arm.table}'s")
     listed = {a["id"]: a["arm_sha256"] for a in manifest["arms"]}
     if listed.get(s.arm.id) != arm_sha256(s.arm):
-        raise TokstudyError(f"arm {s.arm.id} (sha256 {arm_sha256(s.arm)}) is not an arm the evalset's common prefix "
-                            "was computed for; rebuild the evalset for the table's current arms")  # fmt: skip
+        raise TokstudyError(
+            f"arm {s.arm.id} (sha256 {arm_sha256(s.arm)}) is not an arm the evalset's common prefix "
+            "was computed for; rebuild the evalset for the table's current arms"
+        )
     if manifest["k_eval"] != s.prereg.k_eval:
         raise TokstudyError(f"the evalset has K_eval {manifest['k_eval']}, the prereg {s.prereg.k_eval}")
     path = train.point_checkpoint(run_dir, endpoint)
     payload = train.load_checkpoint(path, s.record["run_id"], s.device)
     s.model.load_state_dict(payload["model"])
     rows = score_documents(s.model, s.codec, docs, batch=batch, precision=s.config.precision, device=s.device)
-    header = {"table": s.arm.table, "backend": train.BACKEND, "arm": s.arm.id, "arm_sha256": arm_sha256(s.arm),
-              "run_id": s.record["run_id"], "seed": s.seed, "point": endpoint, "checkpoint": path.name,
-              "checkpoint_sha256": sha256_file(path), "step": payload["step"], "flops": payload["flops"],
-              "progress": payload["flops"] / s.prereg.f_target, "k_eval": manifest["k_eval"],
-              "evalset_sha256": evalset_sha, "precision": s.config.precision, "run_code": s.record["code"],
-              "eval_code": registry.code_identity()}  # fmt: skip
+    header = {
+        "table": s.arm.table,
+        "backend": train.BACKEND,
+        "arm": s.arm.id,
+        "arm_sha256": arm_sha256(s.arm),
+        "run_id": s.record["run_id"],
+        "seed": s.seed,
+        "point": endpoint,
+        "checkpoint": path.name,
+        "checkpoint_sha256": sha256_file(path),
+        "step": payload["step"],
+        "flops": payload["flops"],
+        "progress": payload["flops"] / s.prereg.f_target,
+        "k_eval": manifest["k_eval"],
+        "evalset_sha256": evalset_sha,
+        "precision": s.config.precision,
+        "run_code": s.record["code"],
+        "eval_code": registry.code_identity(),
+    }
     write_nll(out, header, rows)
     return {"nll": str(out), **header, "summary": summary(rows)}
 
@@ -374,12 +429,29 @@ def main(argv: Sequence[str]) -> int:
             if args.docs and not args.project:
                 raise TokstudyError("--docs needs --project (the framing)")
             docs, source = _docs(args)
-            result = build_evalset(docs, arms, args.out, k_eval=prereg.k_eval, source=source,
-                                   registry_sha256=sha256_file(args.arms), max_docs=args.max_docs, seed=args.seed)  # fmt: skip
+            result = build_evalset(
+                docs,
+                arms,
+                args.out,
+                k_eval=prereg.k_eval,
+                source=source,
+                registry_sha256=sha256_file(args.arms),
+                max_docs=args.max_docs,
+                seed=args.seed,
+            )
             print(json.dumps({"out": str(args.out), "by_domain": result["by_domain"], "dropped": result["dropped"]}))
         else:
-            result = evaluate_point(args.run_dir, args.point, args.evalset, args.out, batch=args.batch,
-                                    device=args.device, arms=args.arms, prereg=args.prereg, stream=args.stream)  # fmt: skip
+            result = evaluate_point(
+                args.run_dir,
+                args.point,
+                args.evalset,
+                args.out,
+                batch=args.batch,
+                device=args.device,
+                arms=args.arms,
+                prereg=args.prereg,
+                stream=args.stream,
+            )
             print(json.dumps({"nll": result["nll"], "summary": result["summary"]}))
     except (TokstudyError, ValueError) as err:
         print(f"eval: {err}", file=sys.stderr)

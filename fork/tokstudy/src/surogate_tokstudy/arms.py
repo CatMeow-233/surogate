@@ -91,9 +91,11 @@ def _arm(table: str, entry: Mapping[str, Any], base: Path) -> ArmSpec:
         if not isinstance(tokenizer, Mapping) or set(tokenizer) != {"path", "sha256"}:
             raise TokstudyError(f"{where}: tokenizer = {{path, sha256}}")
         if tokenizer["sha256"] == PLACEHOLDER:
-            raise TokstudyError(f"{where}: its tokenizer is not pinned yet: build it with the project's tokenizer "
-                                "command, then `python -m surogate_tokstudy arms REGISTRY --pin --tlc SPEC` (or "
-                                "--bilingual MANIFEST) writes its sha256")  # fmt: skip
+            raise TokstudyError(
+                f"{where}: its tokenizer is not pinned yet: build it with the project's tokenizer "
+                "command, then `python -m surogate_tokstudy arms REGISTRY --pin --tlc SPEC` (or "
+                "--bilingual MANIFEST) writes its sha256"
+            )
         ref = TokRef((base / tokenizer["path"]).resolve(), check_sha256_value(tokenizer["sha256"], where))
         if not ref.path.is_file():
             raise TokstudyError(f"{where}: {ref.path} does not exist")
@@ -111,8 +113,9 @@ def _arm(table: str, entry: Mapping[str, Any], base: Path) -> ArmSpec:
     model = entry.get("model", {})
     if not isinstance(model, Mapping):
         raise TokstudyError(f"{where}: model must be a table")
-    return ArmSpec(entry["id"], table, kind, ref, dict(PROJECT_SPECIALS[project]), dict(model), main,
-                   tuple(seeds), tuple(stages))  # fmt: skip
+    return ArmSpec(
+        entry["id"], table, kind, ref, dict(PROJECT_SPECIALS[project]), dict(model), main, tuple(seeds), tuple(stages)
+    )
 
 
 def load_arms(path: Path) -> list[ArmSpec]:
@@ -146,8 +149,9 @@ def codec_for(arm: ArmSpec, *, check: bool = False) -> Codec | None:
     """The arm's codec: its tokenizer (special ids checked), the byte codec, or None for an H-Net arm (bytes in,
     learned chunks inside: it has no token-level intrinsic metrics)."""
     if arm.kind == "subword":
-        return SubwordCodec.from_tokenizer_json(arm.tokenizer.path, arm.tokenizer.sha256, arm.specials, name=arm.id,
-                                                check=check)  # fmt: skip
+        return SubwordCodec.from_tokenizer_json(
+            arm.tokenizer.path, arm.tokenizer.sha256, arm.specials, name=arm.id, check=check
+        )
     if arm.kind == "bytes":
         return ByteCodec(arm.specials, name=arm.id, check=check)
     return None
@@ -169,8 +173,10 @@ def main(argv: Sequence[str]) -> int:
             for arm in doc["arms"]:
                 p = arm["provenance"]
                 recipe = p.get("regex") or p.get("pretokenizer")
-                print(f"{arm['id']}\t{arm['tokenizer']['sha256']}\t{p['kind']} {recipe} vocab {p['vocab_size']}"
-                      + ("\tpinned" if arm["id"] in doc["pinned"] else ""))  # fmt: skip
+                print(
+                    f"{arm['id']}\t{arm['tokenizer']['sha256']}\t{p['kind']} {recipe} vocab {p['vocab_size']}"
+                    + ("\tpinned" if arm["id"] in doc["pinned"] else "")
+                )
         arms = load_arms(args.registry)
         for arm in arms:
             codec = codec_for(arm)

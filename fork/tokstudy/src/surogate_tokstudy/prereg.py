@@ -33,8 +33,20 @@ from .flops import CONVENTIONS
 from .schedule import SHAPES, WSD, wsd
 from .stream import MIN_K, check_mixture
 
-TOP_KEYS = {"format", "table", "budget", "context", "schedule", "stages", "mixture", "stream", "seeds",
-            "thresholds", "signature", "notes"}  # fmt: skip
+TOP_KEYS = {
+    "format",
+    "table",
+    "budget",
+    "context",
+    "schedule",
+    "stages",
+    "mixture",
+    "stream",
+    "seeds",
+    "thresholds",
+    "signature",
+    "notes",
+}
 DEFAULT_STAGES = {"decision": {"stop_after": None}}
 
 
@@ -140,5 +152,19 @@ def load_prereg(path: Path) -> Prereg:
         raise TokstudyError(f'{path}: stream.measure is "bytes" or an arm id')
     signature = _table(data, "signature", {"signed_by", "date"}, path)
     signed = bool(signature.get("signed_by")) and bool(signature.get("date"))
-    return Prereg(path, sha256_bytes(raw), table, convention, round(f_target), points, k_train, k_eval, schedule,
-                  stages, mixture, measure, signed, data)  # fmt: skip
+    return Prereg(
+        path,
+        sha256_bytes(raw),
+        table,
+        convention,
+        round(f_target),
+        points,
+        k_train,
+        k_eval,
+        schedule,
+        stages,
+        mixture,
+        measure,
+        signed,
+        data,
+    )

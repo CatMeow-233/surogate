@@ -44,8 +44,7 @@ def test_the_committed_registry_agrees_with_its_prereg_and_waits_for_its_tokeniz
             assert entry["tokenizer"]["sha256"] == arms.PLACEHOLDER
             path = (REGISTRIES[project].parent / entry["tokenizer"]["path"]).resolve()
             assert path.is_relative_to(REPO / "data" / "tokstudy" / project), path
-            ignored = subprocess.run(["git", "check-ignore", "-q", "--no-index", str(path.relative_to(REPO))],
-                                     cwd=REPO)  # fmt: skip
+            ignored = subprocess.run(["git", "check-ignore", "-q", "--no-index", str(path.relative_to(REPO))], cwd=REPO)
             assert ignored.returncode == 0, f"{path} would be committed"
         if entry["kind"] == "hnet":
             HNetConfig(**entry["model"]["hnet"])
@@ -59,8 +58,17 @@ def test_every_bilingual_arm_holds_a_row_of_k_train_positions():
     k_train = load_prereg(PREREGS["bilingual"]).k_train
     data = tomllib.loads(REGISTRIES["bilingual"].read_text(encoding="utf-8"))
     for entry in data["arm"]:
-        spec = arms.ArmSpec(entry["id"], "bilingual-B", entry["kind"], None, {}, entry["model"], "bilingual_trunk",
-                            tuple(entry["seeds"]), tuple(entry["stages"]))  # fmt: skip
+        spec = arms.ArmSpec(
+            entry["id"],
+            "bilingual-B",
+            entry["kind"],
+            None,
+            {},
+            entry["model"],
+            "bilingual_trunk",
+            tuple(entry["seeds"]),
+            tuple(entry["stages"]),
+        )
         assert positional_limit(spec) >= k_train, entry["id"]
 
 
@@ -99,8 +107,11 @@ def test_pin_writes_the_tlc_sha256_and_keeps_the_rest_of_the_file(tmp_path, tlc_
     assert doc["format"] == "tokstudy-handoff/1" and doc["table"] == "tlc-N" and doc["pinned"] == ["N0"]
     assert doc["registry_sha256"] == sha256_file(registry) and doc["other_arms"] == ["N1", "N2"]
     (n0,) = doc["arms"]
-    assert n0["tokenizer"] == {"path": "../../../data/tokstudy/tlc/tok/leader/tokenizer.json", "sha256": sha,
-                               "previous": "unpinned"}  # fmt: skip
+    assert n0["tokenizer"] == {
+        "path": "../../../data/tokstudy/tlc/tok/leader/tokenizer.json",
+        "sha256": sha,
+        "previous": "unpinned",
+    }
     assert n0["provenance"]["corpus"]["spec_sha256"] == sha256_file(spec) == doc["corpus"]["spec_sha256"]
     assert n0["provenance"]["kind"] == "bpe" and n0["provenance"]["vocab_size"] == 300
     # pinned: the check passes and writes nothing; a rebuilt tokenizer is refused until it is pinned again
@@ -141,8 +152,12 @@ def _bilingual_tokenizers(derived, root, *, split="seed_train"):
     from surogate_bilingual.data import tokenizer
 
     files = [derived.root / e["path"] for e in derived.files(split=split)]
-    recipes = {"B0": (400, "bytelevel"), "B1": (300, "bytelevel"), "B2": (400, "qwen2-digits"),
-               "B3": (400, "han-isolate")}  # fmt: skip
+    recipes = {
+        "B0": (400, "bytelevel"),
+        "B1": (300, "bytelevel"),
+        "B2": (400, "qwen2-digits"),
+        "B3": (400, "han-isolate"),
+    }
     for arm_id, (vocab, pre) in recipes.items():
         out = root / arm_id / "tokenizer.json"
         tokenizer.train_tokenizer(files, vocab, out, derived, split, pretokenizer=pre)
@@ -162,8 +177,9 @@ def test_pin_checks_every_bilingual_tokenizer_against_the_derived_manifest(tmp_p
         assert p["corpus"] == {"manifest_sha256": derived.sha256, "split": "seed_train"}
         assert arm["tokenizer"]["sha256"] == sha256_file(tok / arm["id"] / "tokenizer.json")
     loaded = {a.id: a for a in arms.load_arms(registry)}
-    assert [loaded[i].tokenizer.sha256 for i in ("B0", "B1", "B2", "B3")] == [a["tokenizer"]["sha256"]
-                                                                            for a in doc["arms"]]  # fmt: skip
+    assert [loaded[i].tokenizer.sha256 for i in ("B0", "B1", "B2", "B3")] == [
+        a["tokenizer"]["sha256"] for a in doc["arms"]
+    ]
     # a tokenizer that saw another split is refused, whatever the registry says
     shutil.rmtree(tok / "B1")
     from surogate_bilingual.data import tokenizer

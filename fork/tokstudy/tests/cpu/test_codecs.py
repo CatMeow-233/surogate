@@ -15,8 +15,9 @@ TLC = codecs.TLC_SPECIALS
 def trained(tmp_path_factory, bpe_writer, edge_texts):
     """A BBPE learned from the edge texts (GPT-2 regex) with the TLC special tokens."""
     texts = [t * 5 for t in edge_texts] + ["def total(values):\n    return sum(values) + 12345\n"] * 20
-    return bpe_writer(tmp_path_factory.mktemp("bbpe") / "tokenizer.json", specials=list(TLC), pre="gpt2",
-                      train_on=texts)  # fmt: skip
+    return bpe_writer(
+        tmp_path_factory.mktemp("bbpe") / "tokenizer.json", specials=list(TLC), pre="gpt2", train_on=texts
+    )
 
 
 @pytest.fixture(scope="module")

@@ -116,8 +116,13 @@ def test_drop_counts_by_filter_equal_hand_counts_through_a_pipeline():
     from collections import Counter
 
     drops = Counter(reason for keep, reason in map(pipeline, rows) if not keep)
-    assert drops == {"licence_permissive": 2, "not_vendor": 1, "utf8_valid": 1, "exact_dedup": 1,
-                     "non_latin_letter_ratio_max": 1}  # fmt: skip
+    assert drops == {
+        "licence_permissive": 2,
+        "not_vendor": 1,
+        "utf8_valid": 1,
+        "exact_dedup": 1,
+        "non_latin_letter_ratio_max": 1,
+    }
 
 
 @pytest.mark.parametrize("name", sorted(profiles.PROFILES))

@@ -109,9 +109,16 @@ def _handler(hub: FakeHub, host: str):
             for (r, rev, path), data in sorted(hub.files.items()):
                 if (r, rev) == (repo, revision) and path.rpartition("/")[0] == directory and path not in hub.hidden:
                     sha = hashlib.sha256(data).hexdigest()
-                    entries.append({"type": "file", "path": path, "size": len(data), "oid": sha[:40],
-                                    "lfs": {"oid": sha, "size": len(data), "pointerSize": 130},
-                                    "xetHash": "x" + sha[1:]})  # fmt: skip
+                    entries.append(
+                        {
+                            "type": "file",
+                            "path": path,
+                            "size": len(data),
+                            "oid": sha[:40],
+                            "lfs": {"oid": sha, "size": len(data), "pointerSize": 130},
+                            "xetHash": "x" + sha[1:],
+                        }
+                    )
             cursor = int(urllib.parse.parse_qs(url.query).get("cursor", ["0"])[0])
             page = entries[cursor : cursor + hub.page_size]
             headers = {"Content-Type": "application/json"}
@@ -210,21 +217,35 @@ def stack3_rows(n: int, offset: int = 0) -> list[dict[str, Any]]:
     rows = []
     for i in range(offset, offset + n):
         content = f"# {MARK} {i}\ndef f{i}(x):\n    return x + {i}\n"
-        rows.append({
-            "uuid": f"fixture-{i:06d}", "repo_name": f"fixture-org/repo{i % 7}", "relative_path": f"pkg/mod{i}.py",
-            "content": content, "category": "ALGO", "algo_rel_score": 0.95, "quality_score": 4.0,
-            "source_meta.github_metadata.branch": "main", "source_meta.github_metadata.commit_count": i,
-            "source_meta.github_metadata.repo_created_at": "2020-01-01", "source_meta.github_metadata.is_fork": False,
-            "source_meta.github_metadata.is_org_owned": True, "source_meta.github_metadata.forked_from": None,
-            "source_meta.github_metadata.stars": 1, "source_meta.github_metadata.forks": 0,
-            "source_meta.github_metadata.issues": 0, "source_meta.github_metadata.pull_requests": 0,
-            "source_meta.file_meta.content_id": f"cid{i}", "source_meta.file_meta.size_bytes": len(content.encode()),
-            "source_meta.file_meta.file_timestamp": 1700000000, "source_meta.file_meta.language": "Python",
-            "source_meta.file_meta.is_vendor": i % 5 == 4,
-            "source_meta.file_meta.license_type": "no_license" if i % 3 == 2 else "permissive",
-            "source_meta.file_meta.detected_licenses": [] if i % 3 == 2 else (["MIT"] if i % 2 else ["Apache-2.0"]),
-            "source_meta.commit_id": f"{i % 7:040x}",
-        })  # fmt: skip
+        rows.append(
+            {
+                "uuid": f"fixture-{i:06d}",
+                "repo_name": f"fixture-org/repo{i % 7}",
+                "relative_path": f"pkg/mod{i}.py",
+                "content": content,
+                "category": "ALGO",
+                "algo_rel_score": 0.95,
+                "quality_score": 4.0,
+                "source_meta.github_metadata.branch": "main",
+                "source_meta.github_metadata.commit_count": i,
+                "source_meta.github_metadata.repo_created_at": "2020-01-01",
+                "source_meta.github_metadata.is_fork": False,
+                "source_meta.github_metadata.is_org_owned": True,
+                "source_meta.github_metadata.forked_from": None,
+                "source_meta.github_metadata.stars": 1,
+                "source_meta.github_metadata.forks": 0,
+                "source_meta.github_metadata.issues": 0,
+                "source_meta.github_metadata.pull_requests": 0,
+                "source_meta.file_meta.content_id": f"cid{i}",
+                "source_meta.file_meta.size_bytes": len(content.encode()),
+                "source_meta.file_meta.file_timestamp": 1700000000,
+                "source_meta.file_meta.language": "Python",
+                "source_meta.file_meta.is_vendor": i % 5 == 4,
+                "source_meta.file_meta.license_type": "no_license" if i % 3 == 2 else "permissive",
+                "source_meta.file_meta.detected_licenses": [] if i % 3 == 2 else (["MIT"] if i % 2 else ["Apache-2.0"]),
+                "source_meta.commit_id": f"{i % 7:040x}",
+            }
+        )
     return rows
 
 
@@ -244,10 +265,17 @@ def ufw_rows(n: int, *, zh: bool, offset: int = 0, texts: Sequence[str] | None =
 
 def code_l2_rows(n: int) -> list[dict[str, Any]]:
     return [
-        {"uuid": f"l2-{i}", "repo_name": f"fixture-org/l2repo{i % 3}", "relative_path": f"m{i}.py",
-         "content": f"# {MARK} {i}\nprint({i})\n", "category": "TOOL", "algo_rel_score": 0.9, "quality_score": 3.5}
+        {
+            "uuid": f"l2-{i}",
+            "repo_name": f"fixture-org/l2repo{i % 3}",
+            "relative_path": f"m{i}.py",
+            "content": f"# {MARK} {i}\nprint({i})\n",
+            "category": "TOOL",
+            "algo_rel_score": 0.9,
+            "quality_score": 3.5,
+        }
         for i in range(n)
-    ]  # fmt: skip
+    ]
 
 
 def unpc_rows(n: int) -> list[dict[str, Any]]:
@@ -312,8 +340,9 @@ def write_rows_json(path: Path, source, rows: Sequence[Mapping[str, Any]], trunc
     return path
 
 
-def serve_source(hub: FakeHub, monkeypatch, source_id: str, files_rows: Sequence[Sequence[Mapping[str, Any]]],
-                 row_group_size: int):  # fmt: skip
+def serve_source(
+    hub: FakeHub, monkeypatch, source_id: str, files_rows: Sequence[Sequence[Mapping[str, Any]]], row_group_size: int
+):
     """Put one fixture file per entry of `files_rows` on the fake Hub under the source's real names, and make the
     registry's entry list exactly those files for the test. Returns (source, file bytes)."""
     from surogate_corpora import sources
@@ -325,8 +354,18 @@ def serve_source(hub: FakeHub, monkeypatch, source_id: str, files_rows: Sequence
     return source, blobs
 
 
-def export_fixture(hub: FakeHub, client_for, monkeypatch, out: Path, source_id: str, profile: str,
-                   files_rows: Sequence[Sequence[Mapping[str, Any]]], rg: int = 20, budget: int = 10**9, **kwargs):  # fmt: skip
+def export_fixture(
+    hub: FakeHub,
+    client_for,
+    monkeypatch,
+    out: Path,
+    source_id: str,
+    profile: str,
+    files_rows: Sequence[Sequence[Mapping[str, Any]]],
+    rg: int = 20,
+    budget: int = 10**9,
+    **kwargs,
+):
     """Serve `files_rows` as the source's fixture files, plan the profile over them (seed 3) and fetch into `out`;
     returns (plan, provenance, source)."""
     from surogate_corpora import profiles
