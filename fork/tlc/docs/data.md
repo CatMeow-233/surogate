@@ -150,14 +150,14 @@ owner 的决定（2026-11-03，原文）：「分詞器得對比效果要不然�
   | T0 | 自训 16,384 | `qwen2` | 参照（LR-PRE 在它上面调） |
   | T1 | freqtrim 16,384 | `qwen` | 默认路线 |
   | T2 | freqtrim 16,384 | `fine-a` 或 `fine-b`（事先定一种） | 默认倾向的细分正则 |
-  | T3 | 自训 16,384 | `python-digit` | 照跑；CPU 上测得的 BPM 跨边界率超过 5% 时只作对照臂，不可选（实验笔记 §3.5、§11 TOK-AB） |
+  | T3 | 自训 16,384 | `python-digit` | 照跑；CPU 上测得的 BPM 跨边界率超过 5% 时只作对照臂，不可选（实验笔记的 TOK-AB 规则：跨边界率高时它仍是有用的对照，只是 BPM 打分不够精确，不能被选中） |
   | F3 | 胜者的 8,192 | 胜者的 | 词表大小保持开放 |
 
   判定 [建议，在任何 pilot 结果之前签字；阈值与各臂的角色在 [fork/tokstudy/prereg/tlc-T.toml](../../tokstudy/prereg/tlc-T.toml)，由研究包的 `verdict` 读原生 `eval --dump-nll` 的文件执行]：默认 freqtrim（它让教师的 byte-prefix marginal 打分近乎精确）；自训 BPE 只在 Python BPB 相对好 ≥ 1%（等 FLOPs、超过 2σ、等字节视角同号、走向不缩小）、英文相对差不超过 1%、BPM 跨边界率 ≤ 5% 时取代它。预分词默认细分正则，比 Qwen 原版相对差 > 2% 或探针没有改善时取原版。8K 只在 Python 与英文 BPB 都不差 > 1% 且绑定探针的多片分层有改善时取代 16K。数字逐位不变。平局依次看 BPM 兼容性、绑定探针、标识符字节 NLL、解码成本。
 - **神经分词，在研究包中（PyTorch）。** H-Net 1-stage（字节输入，学习式动态分块）与平坦字节，与 A0 的 PyTorch 孪生（用 TOK-AB 当时领先臂的 tokenizer）在 [fork/tokstudy](../../tokstudy/README.md) 中以相同的训练 FLOPs 比较；按实验笔记规则 11 永不与原生的行同表。H-Net 只在 3 个种子上 Python BPB 好 ≥ 2%、英文不劣（≤ +0.5%）、走向不缩小、同一后端上的训练字节吞吐 ≥ 孪生的 0.5 倍、owner 接受集成清单时晋升；晋升之后、owner 选定集成路线（原生新 op，或全部行改到 PyTorch）之前，本项目仍用子词。阈值在 [fork/tokstudy/prereg/tlc.toml](../../tokstudy/prereg/tlc.toml)。
 - **交接。** 研究包只按路径与 sha256 读取这里建成的 `tokenizer.json`，并核对旁边的 `tokenizer_manifest.json` 记着同一份语料 spec 的 sha256、去污染记录与 train 划分（[tokstudy 的“tokenizer 交接”](../../tokstudy/README.md#tokenizer-交接)）。冻结的 tokenizer 的 sha256 进入每个模型目录、shard manifest 与运行记录。
 - BPM 打分时教师一侧关掉 Qwen 的 NFC（学生没有 normalizer），并记录语料中非 NFC 文档的数目；冻结的 tokenizer 在代码对齐行中非恒等全空白行超过 0.5% 时，后训练默认屏蔽全空白行 [建议]。
-- **GAP-01b 与特殊 token**（实验笔记 §3.5、§14 的 G-TOK 清单项；没有默认，owner 定）：题面与补全的边界路线必须在 G-TOK 之前定。(a) 由 tokenizer 保证唯一的 TLC 标记 token，作为 id 5 的特殊 token 加进学生词表（freqtrim 为 16,378 个 Qwen token 加 6 个特殊 token，自训路线同样加）；G-TOK 之后再加会改变 tokenizer 哈希，Phase 1b 及以后的全部运行作废。(b) orchestrator 传 prompt 长度的上游小补丁（ledger topic），不动 tokenizer。现在的 `train` 与 `freqtrim` 只建 id 0–4，没有 id 5 的选项：选 (a) 时先给两者加上它，再建 TOK-AB 各臂的 tokenizer 并 `--pin`，否则各臂的 sha256 在冻结前就要全部重来。
+- **GAP-01b 与特殊 token**（实验笔记中 G-TOK 清单的一项；没有默认，owner 定）：题面与补全的边界路线必须在 G-TOK 之前定。(a) 由 tokenizer 保证唯一的 TLC 标记 token，作为 id 5 的特殊 token 加进学生词表（freqtrim 为 16,378 个 Qwen token 加 6 个特殊 token，自训路线同样加）；G-TOK 之后再加会改变 tokenizer 哈希，Phase 1b 及以后的全部运行作废。(b) orchestrator 传 prompt 长度的上游小补丁（ledger topic），不动 tokenizer。现在的 `train` 与 `freqtrim` 只建 id 0–4，没有 id 5 的选项：选 (a) 时先给两者加上它，再建 TOK-AB 各臂的 tokenizer 并 `--pin`，否则各臂的 sha256 在冻结前就要全部重来。
 
 ### freqtrim
 
