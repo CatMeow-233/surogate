@@ -130,6 +130,7 @@ CPU 测试：`fork/dev test corpora` 117 项通过，约 10 秒（4 vCPU 容器�
 | Stack-v3 python，datasets-server 偏移 0、1M、5M、12M、24M 各 100 行，`tlc-python-permissive` | 嵌套 schema 一致；各块 no_license 占 94/95/97/95/96%（合计 477/500），保留的 23 篇都是 permissive 且非 vendor，导出字节等于输入字节 |
 | UN PC：真实 `plan`（预算 1 MB）与 `fetch` | 10 个 footer 共 11.76 MB（每个约 1.2 MB，每个文件 1746 个约 1000 行的 row group）；选 4 个 unit，抓取 4,000 对、1,088,252 文本字节，`verify` 干净 |
 | Stack-v3：真实 `plan --dry-run`（预算 30 MB） | 45 个文件、405 个 row group；3 个 unit 估计保留 35.3 MB，估计传输 273 MB，元数据取回 5.3 MB：保留字节约为传输的 13% |
+| `compose`（工作流 S5）：UN PC 真实 `plan`（预算 300 KB）、`fetch`、`verify`，再 `compose --project bilingual --root` | 2 个 unit、2,000 对、508,828 文本字节，取回 1,658,007 字节，`verify` 干净；合成的 spec 由双语的 `manifest` 读入 2,000 篇平行文档（方向 en>zh），`unverified_licences` 列出 `unpc-en-zh`；份额 parallel 1.0（2026-11-03，`fork/.venv-corpora`，manifest 一步用 `FORK_PY` 从检出目录导入） |
 
 与实现规格的出入：
 
