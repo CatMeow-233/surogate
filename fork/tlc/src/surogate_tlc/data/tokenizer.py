@@ -238,6 +238,41 @@ def special_ids(tokenizer: Tokenizer) -> dict[str, int]:
     return ids
 
 
+def _byte_of() -> dict[str, int]:
+    """GPT-2's bytes_to_unicode, inverted: the byte each ByteLevel alphabet character stands for."""
+    printable = [*range(ord("!"), ord("~") + 1), *range(ord("¡"), ord("¬") + 1), *range(ord("®"), ord("ÿ") + 1)]
+    chars = list(printable)
+    n = 0
+    for b in range(256):
+        if b not in printable:
+            printable.append(b)
+            chars.append(256 + n)
+            n += 1
+    return {chr(c): b for b, c in zip(printable, chars, strict=True)}
+
+
+BYTE_OF = _byte_of()
+
+
+def token_bytes(tokenizer: Tokenizer) -> list[bytes | None]:
+    """The bytes every id stands for (its byte-level token with the ByteLevel alphabet inverted), None for the
+    special tokens: they frame a document and stand for none of its text, so bits per byte counts no byte for them
+    (docs/training.md: 评测). ValueError for a token outside the byte-level alphabet or an id without a token."""
+    special = set(special_ids(tokenizer).values())
+    out: list[bytes | None] = [None] * tokenizer.get_vocab_size()
+    for token, i in tokenizer.get_vocab(with_added_tokens=True).items():
+        if i in special:
+            continue
+        try:
+            out[i] = bytes(BYTE_OF[c] for c in token)
+        except KeyError:
+            raise ValueError(f"token {i} ({token!r}) is not a byte-level token") from None
+    missing = [i for i, b in enumerate(out) if b is None and i not in special]
+    if missing:
+        raise ValueError(f"ids {missing[:5]} have no token")
+    return out
+
+
 def _first_difference(a: Sequence[int], b: Sequence[int]) -> int:
     return next((i for i, (x, y) in enumerate(zip(a, b, strict=False)) if x != y), min(len(a), len(b)))
 

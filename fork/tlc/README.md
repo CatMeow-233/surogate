@@ -32,7 +32,7 @@ TLC 代码不进任何其他 wheel：根目录 `pyproject.toml` 的原生 wheel 
 |---|---|
 | `init ROW OUT --tokenizer DIR --seed N` | 写出 P0 一行的模型目录及初始权重。`OUT` 必须不存在或为空 |
 | `train CONFIG [--stage S] [--microbatch B]` | 训练一个运行配置；再次运行时从最后一个 checkpoint 恢复，已完成的运行不再训练。退出码：0 完成；1 训练失败，失败报告在运行记录中；2 配置有问题，没有开始训练 |
-| `eval MODEL DATA [--split val] [--max-rows N] [--out FILE]` | teacher-forced 的 loss、按来源和按种类（代码、英文）的 loss 与 unigram 基线 |
+| `eval MODEL DATA [--split val] [--max-rows N] [--out FILE] [--dump-nll FILE --arm T1] [--corpus CORPUS.toml]` | teacher-forced 的 loss、按来源和按种类（代码、英文）的 loss 与 unigram 基线；按文档、按字节的 bits per byte（`py`、`en` 两个领域），`--dump-nll` 另写分词器研究的 `tokstudy-nll/1`（[training.md 的“评测”](docs/training.md#评测)） |
 | `probe MODEL DATA SUITE [--max-items N] [--out FILE]` | 在绑定探针套件上做候选打分；`--out` 另写每项的结果 |
 | `sample MODEL DATA [--max-new 64] [--out FILE]` | 固定 prompt 上的 greedy 样例 |
 | `export CHECKPOINT SOURCE OUT` | 从一个 step 目录导出干净的模型目录 |

@@ -210,6 +210,12 @@ def served_rows(shard: Shard, seq_len: int) -> tuple[np.ndarray, np.ndarray, np.
     return inputs, targets, np.asarray(shard.positions[: rows * seq_len]).reshape(shape)
 
 
+def shard_index(corpus: Corpus, doc: Document, split: str, train_files: int) -> int:
+    """The file a document goes to, <split>-<index>.bin: a train document by a hash of its key, so each of the
+    train files samples every source; val has one file."""
+    return unit_hash(corpus.seed, "shard\0" + doc.key) % train_files if split == "train" else 0
+
+
 def build_shards(
     corpus: Corpus, tokenizer_dir: Path, out: Path, *, seq_len: int = hf.CONTEXT_LENGTH, train_files: int = 1
 ) -> dict[str, Any]:
@@ -240,9 +246,7 @@ def build_shards(
         for doc, ids in encode(tokenizer, documents(corpus, dropped), special):
             split = split_of(corpus, doc)
             rows = windows(ids, seq_len)
-            writer = writers[
-                split, unit_hash(corpus.seed, "shard\0" + doc.key) % train_files if split == "train" else 0
-            ]
+            writer = writers[split, shard_index(corpus, doc, split, train_files)]
             for row in rows:
                 writer.add_row(row, doc.source.name)
             counted = {

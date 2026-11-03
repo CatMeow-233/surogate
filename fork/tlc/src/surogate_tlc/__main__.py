@@ -48,9 +48,20 @@ def _train(args: argparse.Namespace) -> int:
 
 
 def _eval(args: argparse.Namespace) -> int:
-    from .eval.loss import evaluate
+    from .eval.loss import NllDump, evaluate
 
-    result = evaluate(args.model, args.data, split=args.split, batch=args.batch, max_rows=args.max_rows)
+    if (args.dump_nll is None) != (args.arm is None):
+        raise SystemExit("--dump-nll and --arm go together: the per-document lines need the arm's label")
+    dump = None if args.dump_nll is None else NllDump(args.dump_nll, args.arm, args.table)
+    result = evaluate(
+        args.model,
+        args.data,
+        split=args.split,
+        batch=args.batch,
+        max_rows=args.max_rows,
+        corpus=args.corpus,
+        dump=dump,
+    )
     _write(args.out, result)
     _print(result)
     return 0
@@ -84,7 +95,7 @@ def _export(args: argparse.Namespace) -> int:
 COMMANDS: dict[str, tuple[Callable[[argparse.Namespace], int], str]] = {
     "init": (_init, "write a model directory of a P0 row, with its initial weights"),
     "train": (_train, "train one run configuration (fork/tlc/examples/p0.yaml)"),
-    "eval": (_eval, "teacher-forced loss on a shard split, against the unigram baseline"),
+    "eval": (_eval, "teacher-forced loss and bits per byte on a shard split, against the unigram baseline"),
     "probe": (_probe, "binding probes: candidate scoring on a suite file"),
     "sample": (_sample, "greedy samples at fixed prompts"),
     "export": (_export, "model directory from a checkpoint step directory"),
@@ -113,6 +124,12 @@ def _parser() -> argparse.ArgumentParser:
         sub[name].add_argument("--out", type=Path, help="also write the full result to this JSON file")
     sub["eval"].add_argument("--split", default="val", choices=["train", "val"])
     sub["eval"].add_argument("--max-rows", type=int, help="rows of the split to use")
+    sub["eval"].add_argument("--corpus", type=Path, help="the corpus spec of the shards: key documents by its keys")
+    sub["eval"].add_argument(
+        "--dump-nll", type=Path, help="also write the per-document NLL and bytes (tokstudy-nll/1) to this file"
+    )
+    sub["eval"].add_argument("--arm", help="the arm label the --dump-nll header records, e.g. T1")
+    sub["eval"].add_argument("--table", default="tlc-T", help="the table the --dump-nll header records")
     sub["probe"].add_argument(
         "suite", type=Path, help="suite file (dev.jsonl or test.jsonl of data.synth or data.natural)"
     )

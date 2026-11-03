@@ -45,6 +45,7 @@ from tokenizers import Tokenizer, models, pre_tokenizers
 from ..files import dump_json, file_sha256
 from .corpus import Corpus
 from .tokenizer import (
+    BYTE_OF,
     EDGE_CASES,
     MANIFEST_FILE,
     PRETOKENIZERS,
@@ -382,7 +383,7 @@ def check(directory: Path, teacher: Teacher, texts: Sequence[str] = EDGE_CASES) 
     model = tokenizer.model
     for char in pre_tokenizers.ByteLevel.alphabet():
         if [t.value for t in model.tokenize(char)] != [char] or char not in ordinary:
-            problems.append(f"byte {_BYTE_OF[char]} ({char!r}) does not encode as one token")
+            problems.append(f"byte {BYTE_OF[char]} ({char!r}) does not encode as one token")
     special_ids = set(range(len(SPECIAL_TOKENS)))
     tokenizer.encode_special_tokens = True  # document text: special-token strings are text
     for text in texts:
@@ -403,25 +404,9 @@ def check(directory: Path, teacher: Teacher, texts: Sequence[str] = EDGE_CASES) 
 def token_text(token: str) -> str | None:
     """The text of one byte-level token, or None when its bytes are not whole UTF-8 characters."""
     try:
-        return bytes(_BYTE_OF[c] for c in token).decode("utf-8")
+        return bytes(BYTE_OF[c] for c in token).decode("utf-8")
     except UnicodeDecodeError:
         return None
-
-
-def _byte_of() -> dict[str, int]:
-    """GPT-2's bytes_to_unicode, inverted: the byte each ByteLevel alphabet character stands for."""
-    printable = [*range(ord("!"), ord("~") + 1), *range(ord("¡"), ord("¬") + 1), *range(ord("®"), ord("ÿ") + 1)]
-    chars = list(printable)
-    n = 0
-    for b in range(256):
-        if b not in printable:
-            printable.append(b)
-            chars.append(256 + n)
-            n += 1
-    return {chr(c): b for b, c in zip(printable, chars, strict=True)}
-
-
-_BYTE_OF = _byte_of()
 
 
 def check_directory(directory: Path, teacher_path: Path) -> list[str]:

@@ -60,6 +60,14 @@ tlc:
 
 `python -m surogate_tlc eval MODEL DATA`（`surogate_tlc.eval.loss.evaluate()`）按原生 DataLoader 的读法（`served_rows()`）取 `DATA` 的 val 划分，用原生 `compute_logprobs(use_lora=False)` 打分；loss 是有效目标上的平均负对数概率。基线是 train 划分中目标 token 的 add-one 平滑 unigram 分布下的 loss：连 token 频率都没学到的模型谈不上训练过，所以 G3 要求验证 loss 低于它（输出中的 `below_unigram`）。模型目录的 tokenizer 必须与 shard 的一致。输出另有行数、有效目标数、困惑度、tokenizer 与数据 manifest 的 sha256，以及按来源（`by_source`）和按来源种类（`by_kind`：`code`、`text`）的有效目标数、loss 与困惑度；`by_kind.text` 的困惑度就是英文 PPL。每行的来源取自 shard manifest 中各来源的行区间。
 
+**按字节的 bits per byte（BPB）。** 不同 tokenizer 的 per-token loss 与困惑度不可比（词表越大，原始 loss 越高），分词器的比较（TOK-AB，见 [data.md 的“Tokenizer”](data.md#tokenizer)）只用 BPB。`eval` 同时按文档计算它：
+
+- 文档：每篇文档是从首 token 为 `<|bos|>` 的行开始的连续若干行（续接窗口以与上一窗口共享的 token 开头，从不以 `<|bos|>` 开头），文档中除首 token 外的每个 token 恰好是其中一行的一个有效目标，所以窗口不会重复计数。
+- 分子：目标 token 代表文本的那些位置的 NLL 之和（nats）；分母：这些 token 的字节数（`surogate_tlc.data.tokenizer.token_bytes()`：byte-level token 按 ByteLevel 字母表还原的字节，特殊 token 为 0 字节），等于文档各文本段的 UTF-8 字节数（`surogate_tlc.eval.loss.content_bytes()`：规范化换行之后，英文文档的 fence 行换成了代码标记、不算文本），与 tokenizer 无关。`<|eos|>` 目标的 NLL 另计（含 `<|eos|>` 的敏感性变体 `bpb_with_eos`），其他特殊 token 目标的 NLL 也另计，都不进分子。
+- 汇总：BPB(领域) = Σ nll_nats /(ln 2 × Σ 字节)，按字节加权；领域与分词器研究的 TLC 领域相同，代码来源为 `py`、文本来源为 `en`（合成的 `generated = true` 代码来源也算 `py`，`bpb_by_source` 按来源分开给出）。被 `--max-rows` 截断的文档记为 partial，不进 BPB。输出另有 `bpb`、`bpb_by_source` 与 `documents`（完整与 partial 的篇数）。
+- `--dump-nll FILE --arm T1`：另写每篇完整文档一行的 `tokstudy-nll/1`（分词器研究包 [fork/tokstudy](../../tokstudy/README.md) 的中立格式，表头 `backend = "native"`、`table` 默认 `tlc-T`，即原生 TOK-AB 的表；按笔记规则 11，它永不与 tokstudy 的 `tlc-N` 同表），供该包的统计读取；两个包互不导入，格式由两边的测试各自钉住。行的键默认是 `<shard 文件>:<序号>`（同一份语料 spec 与去污染报告下，各臂的文档顺序相同，所以键在各臂之间可配对，同一个键在任何 tokenizer 下字节数都相同）；给出 `--corpus CORPUS.toml`（构建这些 shard 的 spec，sha256 与去污染记录必须与 shard manifest 相同）时改用语料自己的文档键，并逐篇核对字节数。表头记下臂、`init_seed`、权重与 tokenizer 的 sha256、数据 manifest 与语料 spec 的 sha256、行长与行数。NLL 不是有限值（发散的 checkpoint）时拒绝写出。
+- 按字节对齐上下文：原生的上下文只是上限（`sequence_len ≤ max_position_embeddings` = 512），shard 接受任何 8 的倍数的 `--seq-len`，所以 TOK-AB 中压缩最差的臂用 512 个 token 的行，其余臂按各自实测的字节/token 取更短的行（`data.shards --seq-len`，训练配置的 `sequence_len` 取同一值），各臂每行覆盖大致相同的字节；超过 512 才需要改 `surogate_tlc.hf.CONTEXT_LENGTH`。
+
 按角色分层的 loss 需要 P1 的角色标签，自然代码中指向局部变量的标识符的 NLL、α-重命名不变性也在 P0 之后，见 [README 的“P0 之后”](../README.md#p0-之后)。
 
 ### 绑定探针
