@@ -82,3 +82,97 @@ def test_i4_d1_training_is_deterministic_and_records_its_inputs(data_pipeline, t
     assert meta["manifest_sha256"] == derived.sha256 and meta["tokenizer_sha256"] == T.tokenizer_sha256(path)
     assert meta["initial_alphabet"] == "bytelevel" and meta["normalization"] == "none"
     assert {i["path"] for i in meta["inputs"]} == {e["path"] for e in derived.files(split="seed_train")}
+
+
+# The tokenizer.json the I4-D1 fixture corpus gave before `tokenizer.pretokenizer` existed (tokenizers 0.23.3, the
+# version fork/bilingual/requirements-gpu.txt pins): the default must keep producing exactly this file.
+BYTELEVEL_REGRESSION_SHA256 = "ca52c03a796b8368dd3a30f3d1965c0d511682de42c7b3acf1c6b56ab3882687"
+
+
+def _is_han(c: str) -> bool:
+    import unicodedata
+
+    return unicodedata.name(c, "").startswith(("CJK UNIFIED IDEOGRAPH", "CJK COMPATIBILITY IDEOGRAPH"))
+
+
+@pytest.fixture(scope="module")
+def arms(data_pipeline, tmp_path_factory):
+    """The fixture corpus's tokenizer under each pre-tokenizer (1024 ids, as data_pipeline's)."""
+    derived = data_pipeline["derived"]
+    files = [derived.root / e["path"] for e in derived.files(split="seed_train")]
+    root = tmp_path_factory.mktemp("pretok")
+    paths = {n: T.train_tokenizer(files, 1024, root / n / "tokenizer.json", derived, pretokenizer=n)
+             for n in T.PRETOKENIZERS}  # fmt: skip
+    return {n: (path, T.load_tokenizer(path)) for n, path in paths.items()}
+
+
+def test_bytelevel_default_is_the_v10_recipe(data_pipeline, arms):
+    import tokenizers
+    from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
+
+    path, _ = arms["bytelevel"]
+    assert path.read_bytes() == data_pipeline["tokenizer_path"].read_bytes()  # the default is bytelevel
+    if tokenizers.__version__ == "0.23.3":
+        assert T.tokenizer_sha256(path) == BYTELEVEL_REGRESSION_SHA256
+    # The recipe as it was written before the option, rebuilt here: byte-identical on any tokenizers version.
+    old = Tokenizer(models.BPE(unk_token="<unk>"))
+    old.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    old.decoder = decoders.ByteLevel()
+    trainer = trainers.BpeTrainer(vocab_size=1024, min_frequency=2, special_tokens=list(SPECIAL_TOKENS),
+                                  initial_alphabet=pre_tokenizers.ByteLevel.alphabet(), show_progress=False)  # fmt: skip
+    derived = data_pipeline["derived"]
+    inputs = [(derived.root / e["path"], e) for e in derived.files(split="seed_train")]
+    old.train_from_iterator(T._texts(inputs, derived), trainer=trainer)
+    assert old.to_str().encode("utf-8") == path.read_bytes()
+    meta = json.loads(T.meta_path(path).read_text(encoding="utf-8"))
+    assert (meta["pretokenizer"], meta["pretokenizer_pattern"]) == ("bytelevel", None)
+
+
+@pytest.mark.parametrize("name", ["qwen2-digits", "han-isolate"])
+def test_study_pretokenizers_keep_the_d1_contract(arms, name):
+    path, tok = arms[name]
+    report = T.check_tokenizer(tok, n=500, seed=11)  # special ids, no <unk>, 500 random strings and the tags
+    assert report["ok"], report
+    assert T.encode_user_text(tok, "，") != T.encode_user_text(tok, ",")
+    assert tok.normalizer is None
+    meta = json.loads(T.meta_path(path).read_text(encoding="utf-8"))
+    assert (meta["pretokenizer"], meta["pretokenizer_pattern"]) == (name, T.PRETOKENIZERS[name])
+    data = json.loads(path.read_text(encoding="utf-8"))
+    split, byte_level = data["pre_tokenizer"]["pretokenizers"]
+    assert split["pattern"] == {"Regex": T.PRETOKENIZERS[name]} and split["behavior"] == "Isolated"
+    assert byte_level["use_regex"] is (name == "han-isolate")
+
+
+def test_qwen2_digits_isolates_every_digit(arms):
+    _, tok = arms["qwen2-digits"]
+    assert len(T.encode_user_text(tok, "1234567890")) == 10
+    pieces = [p for p, _ in tok.pre_tokenizer.pre_tokenize_str("x1 = 2026年3月")]
+    assert pieces == ["x", "1", "Ġ=", "Ġ", "2", "0", "2", "6", "å¹´", "3", "æľĪ"]
+    for i in range(tok.get_vocab_size()):
+        text = T.decode(tok, [i])
+        assert not (len(text) > 1 and any(c.isdigit() for c in text)), text
+
+
+def test_han_isolate_gives_every_han_character_its_own_piece(data_pipeline, arms):
+    _, tok = arms["han-isolate"]
+    text = "".join(d.text for d in data_pipeline["derived"].iter_docs(split="seed_train"))
+    text += "扩展B：𠀀𠀁𪚥，兼容：豈"  # CJK Extension B (4-byte UTF-8) and a compatibility ideograph
+    han = [c for c in text if _is_han(c)]
+    assert any(ord(c) >= 0x20000 for c in han)
+    pieces = tok.pre_tokenizer.pre_tokenize_str(text)
+    isolated = [text[a:b] for _, (a, b) in pieces if any(_is_han(c) for c in text[a:b])]
+    assert isolated == han  # each Han character alone, in order, none merged with a neighbour
+    for i in range(tok.get_vocab_size()):
+        assert sum(map(_is_han, T.decode(tok, [i]))) <= 1
+    assert T.round_trips(tok, "扩展B：𠀀𠀁𪚥")
+
+
+def test_unknown_pretokenizer_is_refused(data_pipeline, tmp_path, capsys):
+    derived = data_pipeline["derived"]
+    files = [derived.root / e["path"] for e in derived.files(split="seed_train")]
+    with pytest.raises(T.TokenizerError, match="pretokenizer must be one of"):
+        T.train_tokenizer(files, 1024, tmp_path / "t.json", derived, pretokenizer="gpt2")
+    assert not (tmp_path / "t.json").exists()
+    with pytest.raises(SystemExit):  # the command line offers only the three names
+        T.main(["train", "--manifest", str(tmp_path / "m.json"), "--pretokenizer", "gpt2", "--out", str(tmp_path)])
+    assert "invalid choice: 'gpt2'" in capsys.readouterr().err

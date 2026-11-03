@@ -171,6 +171,7 @@ name.encode("utf-8") + b"\0" + str(dtype).encode() + b"\0" + json(list(shape)).e
 | `data.window` | `packed`、`doc_aligned` | `packed`（文档间以 `<eos>` 分隔） | IMPL-07 | `doc_aligned` 推迟 |
 | `data.seed_mix` | 比例 | 0.80 / 0.12 / 0.05 / 0.03 | B-O7 | 自然文本 / Track S / 混语与平行 / 带标签文档 |
 | `tokenizer.normalization` | `none`、`nfkc` | `none` | B-O11 | |
+| `tokenizer.pretokenizer` | `bytelevel`、`qwen2-digits`、`han-isolate` | `bytelevel` | B-O11 的分词器研究臂（新增） | `bytelevel` 即 v1.0 的配方（ByteLevel 自带的 GPT-2 正则），输出与新增本项之前逐字节相同；`qwen2-digits` 按 Qwen2 正则切分（每个数字单独成片，汉字串整体成片），再做不带正则的字节映射；`han-isolate` 先让每个汉字（`\p{Han}`，含扩展 B）单独成片，其余部分再用 GPT-2 正则，所以没有一个 token 含两个汉字。值记入 `tokenizer.meta.json`（`pretokenizer`、`pretokenizer_pattern`）；命令行为 `tokenizer train --pretokenizer`。B-O11 的选择由分词器研究（`fork/tokstudy`）按效果比较决定，本项只提供候选 |
 | `eval.length_norm` | `sum`、`mean`、`auto` | `auto`（候选 token 长度全部相等时 `sum`，否则 `mean`） | 手稿 §9.1 | |
 | `registry.allow_dirty` | 布尔 | `false` | | 记入 `run.json` |
 | `data.seed_mix_parallel_fraction` | 0–1 | 0.5 | [建议]（I4 新增） | `codeswitch_parallel` 的 token 中由拼接平行对占的份额，其余为混语文本 |

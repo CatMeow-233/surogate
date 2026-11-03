@@ -4,6 +4,11 @@
   (v1.0 trained without it: 176 of the 256 byte symbols were missing and prompts decoded to `<unk>`).
 - No normalizer by default (`tokenizer.normalization = "none"`): "，" and "," stay different tokens, because
   punctuation variants are a test condition. `"nfkc"` is the one alternative.
+- The pre-tokenizer (`tokenizer.pretokenizer`, the tokenizer study's arms of B-O11): `"bytelevel"`, the default and
+  v1.0's recipe, is ByteLevel with its GPT-2 regex; `"qwen2-digits"` splits on Qwen2's regex (every digit a piece
+  of its own; Han runs stay together, as words) and then maps bytes without a regex; `"han-isolate"` first makes
+  every Han character a piece of its own and then applies the ByteLevel GPT-2 regex to the rest, so no token holds
+  more than one Han character.
 - The special tokens of v1.0, in v1.0 order, hold ids 0..4: `<unk>`, `<eos>`, `<|zh|>`, `<|en|>`, `<|bridge|>`.
 - It trains only on files of the manifest's `seed_train` split: every input file must be listed there with a
   matching sha256, and anything else is refused.
@@ -30,21 +35,43 @@ from .manifest import Manifest, load_manifest
 
 META_FORMAT = "bilingual-tokenizer/1"
 NORMALIZATIONS = ("none", "nfkc")
+# Split patterns by pre-tokenizer name; None is ByteLevel's own GPT-2 regex. Qwen2's pattern verbatim, as in
+# Qwen2's tokenizer.json (and fork/tlc's "qwen2"); \p{Han} is the Unicode Script property, Extension B included.
+PRETOKENIZERS = {
+    "bytelevel": None,
+    "qwen2-digits": (
+        r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}"
+        r"| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
+    ),
+    "han-isolate": r"\p{Han}",
+}
 
 
 class TokenizerError(ValueError):
     pass
 
 
-def _new_tokenizer(normalization: str):
-    from tokenizers import Tokenizer, decoders, models, normalizers, pre_tokenizers
+def _pre_tokenizer(name: str):
+    from tokenizers import Regex, pre_tokenizers
+
+    if name not in PRETOKENIZERS:
+        raise TokenizerError(f"pretokenizer must be one of {tuple(PRETOKENIZERS)}: {name!r}")
+    if name == "bytelevel":
+        return pre_tokenizers.ByteLevel(add_prefix_space=False)
+    split = pre_tokenizers.Split(Regex(PRETOKENIZERS[name]), behavior="isolated")
+    byte_level = pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=name == "han-isolate")
+    return pre_tokenizers.Sequence([split, byte_level])
+
+
+def _new_tokenizer(normalization: str, pretokenizer: str = "bytelevel"):
+    from tokenizers import Tokenizer, decoders, models, normalizers
 
     if normalization not in NORMALIZATIONS:
         raise TokenizerError(f"normalization must be one of {NORMALIZATIONS}: {normalization!r}")
     tok = Tokenizer(models.BPE(unk_token="<unk>"))
     if normalization == "nfkc":
         tok.normalizer = normalizers.NFKC()
-    tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    tok.pre_tokenizer = _pre_tokenizer(pretokenizer)
     tok.decoder = decoders.ByteLevel()
     return tok
 
@@ -85,6 +112,7 @@ def train_tokenizer(
     split: str = "seed_train",
     *,
     normalization: str | None = None,
+    pretokenizer: str | None = None,
     min_frequency: int = 2,
 ) -> Path:
     from tokenizers import __version__ as tokenizers_version
@@ -92,10 +120,11 @@ def train_tokenizer(
 
     manifest = manifest if isinstance(manifest, Manifest) else load_manifest(manifest)
     normalization = normalization or DEFAULTS["tokenizer"]["normalization"]
+    pretokenizer = pretokenizer or DEFAULTS["tokenizer"]["pretokenizer"]
+    tok = _new_tokenizer(normalization, pretokenizer)
     inputs = _training_files(files, manifest, split)
     if vocab < len(SPECIAL_TOKENS) + 256:
         raise TokenizerError(f"vocab {vocab} cannot hold the {len(SPECIAL_TOKENS)} specials and 256 byte symbols")
-    tok = _new_tokenizer(normalization)
     trainer = trainers.BpeTrainer(
         vocab_size=int(vocab),
         min_frequency=int(min_frequency),
@@ -117,6 +146,8 @@ def train_tokenizer(
             "vocab_requested": int(vocab),
             "min_frequency": int(min_frequency),
             "normalization": normalization,
+            "pretokenizer": pretokenizer,
+            "pretokenizer_pattern": PRETOKENIZERS[pretokenizer],
             "initial_alphabet": "bytelevel",
             "special_tokens": list(SPECIAL_TOKENS),
             "split": split,
@@ -221,6 +252,7 @@ def main(argv: Sequence[str]) -> int:
     t.add_argument("--manifest", required=True, type=Path, help="a derived manifest whose files carry their split")
     t.add_argument("--split", default="seed_train")
     t.add_argument("--vocab", type=int, default=DEFAULTS["tokenizer"]["vocab_size"])
+    t.add_argument("--pretokenizer", choices=tuple(PRETOKENIZERS), default=DEFAULTS["tokenizer"]["pretokenizer"])
     t.add_argument("--files", nargs="*", type=Path, help="default: every file of the split")
     t.add_argument("--out", type=Path)
     t.add_argument("--dry-run", action="store_true", help="check the inputs against the manifest; train nothing")
@@ -245,7 +277,7 @@ def main(argv: Sequence[str]) -> int:
             return 0
         if args.out is None:
             ap.error("--out is required unless --dry-run")
-        out = train_tokenizer(files, args.vocab, args.out, manifest, args.split)
+        out = train_tokenizer(files, args.vocab, args.out, manifest, args.split, pretokenizer=args.pretokenizer)
     except (TokenizerError, ValueError) as err:
         print(f"tokenizer: {err}", file=sys.stderr)
         return 1

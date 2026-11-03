@@ -105,6 +105,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "vocab_size": 32768,
         "initial_alphabet": "bytelevel",  # the 256-byte ByteLevel alphabet
         "normalization": "none",  # B-O11
+        "pretokenizer": "bytelevel",  # B-O11 study arms: bytelevel | qwen2-digits | han-isolate (data.tokenizer)
         "special_tokens": list(SPECIAL_TOKENS),
     },
     "eval": {
