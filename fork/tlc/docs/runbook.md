@@ -49,7 +49,7 @@ mkdir -p "$TLC_RUNS/env" "$TLC_RUNS/corpus" "$TLC_RUNS/goldens" "$TLC_RUNS/bench
 
    预期 2 个测试通过：在仓库之外的工作目录中新开的解释器（与 `python -m surogate_tlc` 相同）从本检出导入 `surogate._surogate` 和 `fork/tlc/src` 中的 `surogate_tlc`（不是装进 `.venv-tlc` 的副本），GPU 的计算能力为 (12, 0)，指纹中提交、原生扩展与 `libsurogate-common.so`（运行时与 kernel 所在的共享库）的 sha256、驱动版本齐全。每个运行记录都带同样的指纹。
 
-4. 合成数据、去污染与 T3 套件。三条命令依次运行，每条之后按说明改 spec，不要整段粘贴。要重跑某一条，先删除它的输出（`suites/synth`、`corpus/decontam.json` 或 `suites/natural`）：工具不覆盖已有输出。
+4. 合成数据、去污染与 T3 套件。语料 spec `$TLC_RUNS/corpus/corpus.toml` 由 fork/corpora 的 `compose` 从 UltraData 的导出写出（[data.md 的“UltraData 来源”](data.md#语料)）。三条命令依次运行，每条之后按说明改 spec，不要整段粘贴。要重跑某一条，先删除它的输出（`suites/synth`、`corpus/decontam.json` 或 `suites/natural`）：工具不覆盖已有输出。
 
    ```bash
    SYNTH_CHARS=$($PY -c 'import sys; from surogate_tlc.data import corpus as c; spec = c.load_corpus(sys.argv[1], decontam=False); print(round(sum(len(d.text) for d in c.documents(spec) if not d.source.generated) * 0.05 / 0.95))' "$TLC_RUNS/corpus/corpus.toml")
@@ -97,7 +97,7 @@ mkdir -p "$TLC_RUNS/env" "$TLC_RUNS/corpus" "$TLC_RUNS/goldens" "$TLC_RUNS/bench
    )
    ```
 
-   - 预分词和词表还没有选定（[data.md 的“Tokenizer”](data.md#tokenizer)）。owner 在 A0 之前定下，四行共用同一个 tokenizer 和同一个 `--seed`；A0 与 A0-split 用同一个种子，得到同一份权重（G1(d)）。
+   - 预分词和词表还没有选定，按 [data.md 的“怎么选”](data.md#怎么选) 的效果比较（原生 TOK-AB 加研究包的神经分词臂）在 A0 之前冻结；这里的 `train --pretokenizer qwen2` 只是占位，冻结之后换成胜出的那一个 tokenizer 目录。四行共用同一个 tokenizer 和同一个 `--seed`；A0 与 A0-split 用同一个种子，得到同一份权重（G1(d)）。
    - `check`：预期输出 `consistent on N texts`，退出码 0；有差异时停止，不建 shard。`test_data_native.py`：预期 5 个测试通过（三个预分词候选的原生一致性、原生 DataLoader 读出的行，以及从保存的位置恢复的 DataLoader 逐位接着读下去）。
    - `data.shards` 输出各划分的 `pad_fraction`，以及单核构建速率（`real_tokens_per_cpu_second`，G0.5 的数据流水线速率）；`pad_fraction` 超过约 25% 时记下来，pilot 照常进行。
    - `--train-files`：每个 train 文件少于 2³¹ 个 token（含 pad），所以每约 15 亿个真实 train token 用一个文件（按实测约 5% 的 padding 留余量）：`ceil(train 的真实 token 数 / 1.5e9)`，P0 的小语料用 1。超出时构建在写到上限处报错。

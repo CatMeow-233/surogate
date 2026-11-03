@@ -33,6 +33,17 @@ filters = ["..."]      # 下载之后、入库之前做过的过滤；可以为�
 - 文本文档中 markdown 代码块的判定只有一处实现（`surogate_tlc.data.corpus.fences`）：去掉缩进后以 ``` 开头的行打开代码块，代码块内恰为 ``` 的行关闭它，文档结束时仍未关闭的代码块在末尾关闭；行只在 `\n` 处结束（U+2028 等不算）。shard 的框定和去污染的代码扫描都用它，所以去污染当作代码扫描的，正是训练时框成代码的部分。
 - 配比（70% Python、30% 英文）在准备输入文件时决定；shard manifest 按来源记录实际的 token 数和 train 中的占比，供核对。
 
+**UltraData 来源。** owner 已定：语料取自 MiniCPM 的 UltraData 家族（openbmb）。默认 [建议，备料之前由 owner 签字]：
+
+| 角色 | 来源 | 选取 | 不用的 |
+|---|---|---|---|
+| Python | `openbmb/UltraData-Stack-v3-L2` 的 python split，固定 revision | `license_type == "permissive"` 且 `is_vendor == false`，合法 UTF-8，按正文精确去重，非拉丁字母占字母的比例不超过 10%（阈值在 Phase 0 冻结）；`group = repo_name`，每个仓库的 SPDX 与 commit 写进署名清单 `attribution.jsonl` | `no_license` 文件（owner 备选）；UltraData-Code-L2（没有逐文件许可，只作数据来源消融）；UltraData-Code-L3（模型合成，不进入预训练流） |
+| 英文 | `openbmb/Ultra-FineWeb` 的 en split，固定 revision | 合法 UTF-8，精确去重，默认不加 `score` 门槛；不设 group | `l1_en_hq`、`en_v1_4` |
+
+- 备料由 [fork/corpora](../../corpora/README.md) 完成：按 row group 从全部文件中选取（绝不取开头的行），导出成本节的 JSONL，再用 `compose` 把几个导出合成这份 spec（文件路径相对 spec 所在目录，`license`、`revision`、`downloaded`、`filters` 照导出写入）。步骤与预算见 [分词器研究的运行手册第 1 步](../../tokstudy/docs/runbook.md#1-备料owner-主机forkvenv-corpora)。合成绑定程序的来源与去污染报告之后照常加进 spec（运行手册 G0 第 4 步）。
+- 配比按字节定：输入文件的字节比由各来源的备料预算决定（`compose` 打印按种类的保留字节与份额），所有 tokenizer 臂读同一批文件，各臂实际的 token 占比由 shard manifest 记录。
+- UltraData 的发布数据都没有声明做过 HumanEval/MBPP 去污染，所以下一节的去污染必须做；Stack v3 的 permissive 标签可能沿目录传播，依赖它之前抽查。
+
 ## 去污染
 
 ```bash
@@ -119,7 +130,7 @@ python -m surogate_tlc.data.tokenizer freqtrim-check OUT_DIR --teacher QWEN/toke
   | `python` | 实验笔记的 pyaware2 改用 `\p{L}`、`\p{N}`：标识符（含 `_`）、常见的多字符运算符、换行连同其后的缩进、整个数字（含小数和指数）各成一片 | 实验笔记的候选 | std::regex 回退 |
   | `python-digit` | `python` 的逐位变体：数字分支换成 `\p{N}`，标识符分支也去掉 `\p{N}`，所以每个数字单独成片（`x1` 切成 `x` 与 `1`，与 `qwen2` 相同）；其余与 `python` 相同 | 实验笔记：数字逐位时自训路线可选的两个正则之一 | std::regex 回退 |
 
-  - 还没有选定，owner 在 A0 之前定下，四行共用同一个 tokenizer。实验笔记的选择规则看 Python 加英文的总 token 数、跨词素率和多角色率：比较总 token 数时，用各候选分别建 shard，对比 manifest 中每个来源的 `characters` 与 `real_tokens`；跨词素率和多角色率要用 P1 的对齐与角色标注来算。
+  - 还没有选定：按下面“怎么选”的效果比较定下，A0 之前冻结，四行共用同一个 tokenizer。实验笔记原来的结构读数（Python 加英文的总 token 数、跨词素率、多角色率）照常记录，只用于解释：总 token 数用各候选分别建的 shard 的 manifest（每个来源的 `characters` 与 `real_tokens`），跨词素率和多角色率要用 P1 的对齐与角色标注来算。
   - 只改标识符分支是因为：实验笔记只要求把数字分支换成 `\p{N}`，但 `python` 的标识符分支允许数字，`x1` 仍是一片，BPE 可以学出 `x1` 这个 token，违反“数字逐位”；`test_python_digit_splits_every_digit` 钉住这一点。
   - 实验笔记的另一个候选"严格按 Python 词法切分"没有实现：它不是正则预分词，原生 tokenizer 推理时做不到。
   - `model_type` 为 `tlc` 时，原生 tokenizer 从 `tokenizer.json` 读取 split 正则，没有时用 GPT-2 的。`qwen2` 与 GPT-2 的正则各有手写实现；其他正则（包括 `python`、`python-digit` 和 freqtrim 的 `fine-a`、`fine-b`）走 std::regex 回退，用之前必须通过下面的一致性检查（G-TOK 时在 ≥10k 篇文档上；CPU 上只用替身验证了检查本身）。CPU 的 pin 测试钉住这几点。
@@ -127,6 +138,25 @@ python -m surogate_tlc.data.tokenizer freqtrim-check OUT_DIR --teacher QWEN/toke
 - chat template：`<|bos|>` 加各条消息的内容，不要求生成提示时最后加 `<|eos|>`。prompt 就是文档的开头，与 shard 的框定一致。
 - 输出目录：`tokenizer.json`、`tokenizer_config.json` 和 `tokenizer_manifest.json`（配方、`tokenizer_sha256`、语料 spec 的 sha256、各来源的 provenance 和参与训练的文档数）。tokenizer 的身份是 `tokenizer.json` 的 sha256（`surogate_tlc.data.tokenizer.tokenizer_sha256()`），shard 的 manifest 也记录它。同样的语料与参数训练出逐字节相同的文件。
 - 一致性检查：`compare()` 比较本 tokenizer 与原生 tokenizer 的特殊 id 和词表大小，并逐段比较普通编码、带特殊 token 的编码，以及两侧对普通编码 id 的解码。文本是固定的边界用例（`EDGE_CASES`：CRLF、单独的 CR、tab、CJK 标识符、emoji、f-string、字符串中的 U+2028、特殊 token 字符串等）加语料样本。CPU 测试用替身检查 harness 能发现各类差异；与真实原生 tokenizer 的比较在 GPU 主机上进行（G0 的 `check` 命令与 `fork/tlc/tests/gpu/test_data_native.py`）。原生 tokenizer 在 CPU 上编译需要 CMake 拉取的头文件依赖（fmt、nlohmann/json、minja），fork CI 的 CPU lane 没有它们，所以这一比较放在有原生构建的主机上；上游同步时，pin 测试盯住 split 正则的名单和手写 splitter 覆盖的正则。
+
+### 怎么选
+
+owner 已定：分词器按训练后的效果比较，不按压缩率或词表大小这类内在指标选（内在指标只作 CPU 初筛）；比较做得成，学习式的“神经网络分词”就作为参与比较的候选，而不是替代比较。指标是等预算训练之后、按语言（Python、英文）分开的 bits per byte（[training.md 的“评测”](training.md#评测)）。门槛 G-TOK 拆成两半，两半都关闭（或 owner 豁免第二半）之后冻结 tokenizer：
+
+- **子词之间，在本训练器上（TOK-AB）。** 各臂的 tokenizer 都由本节的命令在去污染后的 train 划分上建成，shard 的行长按字节对齐（压缩最差的臂 512 个 token，其余按比例更短）：
+
+  | 臂 | 词表 | 预分词 | 角色 |
+  |---|---|---|---|
+  | T0 | 自训 16,384 | `qwen2` | 参照（LR-PRE 在它上面调） |
+  | T1 | freqtrim 16,384 | `qwen` | 默认路线 |
+  | T2 | freqtrim 16,384 | `fine-a` 或 `fine-b`（事先定一种） | 默认倾向的细分正则 |
+  | T3 | 自训 16,384 | `python-digit` | 条件：CPU 上测得的 BPM 跨边界率 ≤ 5% 才跑 |
+  | F3 | 胜者的 8,192 | 胜者的 | 词表大小保持开放 |
+
+  判定 [建议，在任何 pilot 结果之前签字]：默认 freqtrim（它让教师的 byte-prefix marginal 打分近乎精确）；自训 BPE 只在 Python BPB 相对好 ≥ 1%（等 FLOPs、超过 2σ、等字节视角同号、走向不缩小）、英文相对差不超过 1%、BPM 跨边界率 ≤ 5% 时取代它。预分词默认细分正则，比 Qwen 原版相对差 > 2% 或探针没有改善时取原版。8K 只在 Python 与英文 BPB 都不差 > 1% 且绑定探针的多片分层有改善时取代 16K。数字逐位不变。平局依次看 BPM 兼容性、绑定探针、标识符字节 NLL、解码成本。
+- **神经分词，在研究包中（PyTorch）。** H-Net 1-stage（字节输入，学习式动态分块）与平坦字节，与 A0 的 PyTorch 孪生（用 TOK-AB 当时领先臂的 tokenizer）在 [fork/tokstudy](../../tokstudy/README.md) 中以相同的训练 FLOPs 比较；按实验笔记规则 11 永不与原生的行同表。H-Net 只在 3 个种子上 Python BPB 好 ≥ 2%、英文不劣（≤ +0.5%）、走向不缩小、同一后端上的训练字节吞吐 ≥ 孪生的 0.5 倍、owner 接受集成清单时晋升；晋升之后、owner 选定集成路线（原生新 op，或全部行改到 PyTorch）之前，本项目仍用子词。阈值在 [fork/tokstudy/prereg/tlc.toml](../../tokstudy/prereg/tlc.toml)。
+- **交接。** 研究包只按路径与 sha256 读取这里建成的 `tokenizer.json`，并核对旁边的 `tokenizer_manifest.json` 记着同一份语料 spec 的 sha256、去污染记录与 train 划分（[tokstudy 的“tokenizer 交接”](../../tokstudy/README.md#tokenizer-交接)）。冻结的 tokenizer 的 sha256 进入每个模型目录、shard manifest 与运行记录。
+- BPM 打分时教师一侧关掉 Qwen 的 NFC（学生没有 normalizer），并记录语料中非 NFC 文档的数目；冻结的 tokenizer 在代码对齐行中非恒等全空白行超过 0.5% 时，后训练默认屏蔽全空白行 [建议]。
 
 ### freqtrim
 

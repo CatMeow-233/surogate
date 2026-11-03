@@ -32,8 +32,43 @@
 | B-O5 | 双路臂的 `routing.gate_policy` | `"dual_const"`，每个 token 上 g = (0.5, 0.5)；`"dual_window"`（w = 32）为次要 |
 | B-O9 | `train.expert_decay`、`train.weight_decay` | 专家 `"none"`（wd 0）；种子 wd 0.1；norm 与嵌入永不衰减 |
 | B-O10 | `train.global_batch_tokens` 与调度 | 每步 65,536 token（16 × 1024 × accum 4）；warmup 2%；cosine 衰减到峰值的 10% |
-| B-O11 | `tokenizer.*` | byte-level BPE，词表 32,768，256 字节初始字母表，normalization `"none"`，特殊 token 沿用 v1.0 的顺序 |
+| B-O11 | `tokenizer.*` | byte-level BPE，词表 32,768，256 字节初始字母表，normalization `"none"`，预分词 `bytelevel`，特殊 token 沿用 v1.0 的顺序。这是分词器研究的参照臂 B0；研究按效果比较之后才可能换掉它，见下一节 |
 | B-O13 | `train.bridge_variant` | `"c"`：源语言前缀走冻结的源语言专家，损失只算目标段 |
+
+## 语料与分词器：B-O11、B-O12 的现状
+
+owner 的决定（2026-11-03，原文）：「分詞器得對比效果要不然就搞另類神經網絡分詞 語料用minicpm的ultradata那些的」。本项目的落实如下；研究的代码在 [fork/tokstudy](../../tokstudy/README.md)（臂、预注册与运行手册）与 [fork/corpora](../../corpora/README.md)（备料），本包不导入它们。
+
+**B-O11（分词器）：按训练后的效果比较。** 全部臂在研究包中经本包真实的 trunk（`RoutedLM.forward_hidden`/`logits`）以相同的训练 FLOPs 训练，主指标是按语言分开的 bits per byte，Track S 的连续读数为次要指标（长度归一按字节，`eval.length_unit = byte`）。默认 [建议]：B0 不变。
+
+| 臂 | 定义 | 本包中的来源 |
+|---|---|---|
+| B0 | BBPE 32,768，`bytelevel`，无 normalizer（今天的默认） | `tokenizer train` |
+| B1 | BBPE 16,384 | `tokenizer train --vocab 16384` |
+| B2 | BBPE 32,768，`qwen2-digits`（数字逐位） | `tokenizer train --pretokenizer qwen2-digits` |
+| B3 | BBPE 32,768，`han-isolate`（每个汉字单独一个 pre-token） | `tokenizer train --pretokenizer han-isolate` |
+| B4 | H-Net 1-stage，字节输入（学习式动态分块，即“另類神經網絡分詞”），trunk 为主网络 | 研究包；晋升时 `hnet.py`、`mamba2.py` 整文件移入本包 |
+| B5 | 平坦字节 Transformer，只作下限 | 研究包 |
+
+- 判定 [建议，在任何 pilot 结果之前签字，阈值在 [fork/tokstudy/prereg/bilingual.toml](../../tokstudy/prereg/bilingual.toml)]：某臂取代 B0 须两种语言都不劣（Δ ≤ +max(0.005 bit/byte, 0.5%)）、至少一种语言相对好 ≥ 1% 且超过 2σ、Track S dev 不低于 B0 − 1σ、两种预算视角同号且走向不缩小；B4 另需训练字节吞吐 ≥ B0 的 0.5 倍且 owner 接受集成设计（分块器属于 θ_S，种子指纹与 pack 增加 `chunker.*` 键，导入边界默认改为可选、带保护地导入 `mamba_ssm`）。平局归 B0。先以 0.4B token 的算力初筛，再以 0.8B（S_I 的预算）判定 B0 与至多两个入围臂。
+- 所有 BBPE 臂都只在 `seed_train` 上训练；研究包按 `tokenizer.meta.json` 核对这一点和派生 manifest 的 `manifest_sha256`，再把 sha256 写进臂登记。
+- **冻结**：在 G1′ 与 S_I 之前。选出的 `tokenizer.json` 复制到运行手册使用的 `data/tokenizer/tokenizer.json`，其 sha256 必须等于研究的交接记录中该臂的 sha256；它进入此后每个运行 id 与种子指纹。冻结的 sha256：待定。
+- **研究期间的去污染**：文档集固定为 `en_word13 + zh_han25` 的结果（`decontam` 不给 `--tokenizer`；`token13` 依赖 tokenizer，会让各臂删掉的文档不同）；B-O11 冻结之后用冻结的 tokenizer 照常跑 `token13`。
+
+**B-O12（自然语料来源）：UltraData 家族。** 默认 [建议]，标“必须签”的在备料之前由 owner 签字：
+
+| 项 | 默认 | 状态 |
+|---|---|---|
+| zh 与 en | `openbmb/Ultra-FineWeb` 的 zh、en split，固定 revision，按 row group 选取（zh 的行按上游来源成簇，绝不取开头的行） | 来源已定 |
+| zh 来源池（必须签） | 网页池：CCI3、ChineseWebText、IndustryCorpus（HF 标签均为 Apache-2.0，占 zh 文档的 36.1%）；备选：加 Tele（全部 Apache 标签来源）或全部 8 个来源 | 待签 |
+| WanJuan、WuDao、MiChao | 排除，直到 owner 读过条款 | 条款未读 |
+| 许可记录 | 每个上游来源一个 `[[source]]`，各有 SPDX 式许可 id，`licence_verified = false`，manifest 的 `unverified_licences` 列出它们；未核实的来源不得合并分发（手稿 §6.1） | 已由 fork/corpora 的导出写出 |
+| 繁体 | 保留原样，不做繁简转换，也不做 NFKC；导出为每篇文档记录简繁标记字符数（`meta.script`），数据卡报告占比（样本中约 0.4% 以繁体为主） | 默认 |
+| 平行数据（必须签） | UN PC en-zh，UltraData 之外的例外（UltraData 家族没有中英平行语料）；FLORES 只用于评测；Tatoeba 暂缓 | 待签；平行数据的清洗（手稿 §6.1）仍未实现 |
+| 重复 | 3 个重复共用一个池 | 默认 |
+| en 与 zh 的可比性 | 按 `score` 的分位数匹配，再按字节长度匹配，以领域分类器检查为门；门不过时回落到 FineWeb-2 `cmn_Hani`（UltraData 之外，须 owner 签字） | 匹配工具未实现 |
+
+备料的命令与预算见 [分词器研究的运行手册第 1 步](../../tokstudy/docs/runbook.md#1-备料owner-主机forkvenv-corpora)：导出由 fork/corpora 的 `compose` 合成 `data/corpus/spec.toml`（Track S 的 D_seed 成分作为 `kind = "synthetic"` 的来源一并写入），之后照 [运行手册 G1′ 的数据准备](runbook.md#g1-可测性-pilot) 继续。
 
 ## 仓库规则的落实
 
@@ -631,3 +666,4 @@ I4-D7 的各项：
 - **逐位相等。** 逐位检查只在单线程 CPU 上成立；CUDA 上每个相等检查都是声明的容差。
 - **Track S。** Track S 测的是种子已经学过的格式的保持与组合（手稿 §6.2），不能支持“组合能力由组装涌现”的主张。
 - **预算。** 3 个重复可能不足以给 H_C 足够的功效；扩展规则与成本见手稿 §9.5 与 §13。
+- **语料。** zh 与 en 的来源类型不同（en 全是 FineWeb 网页；zh 有 47% 来自 TeleChat-PTD，含书籍与官方媒体），网页池只缓解一部分；领域检查不过时要离开 UltraData。网页池中 IndustryCorpus 与 CCI3 的上游 gated 条款经 Ultra-FineWeb 的副本使用时是否同样约束，未核实。

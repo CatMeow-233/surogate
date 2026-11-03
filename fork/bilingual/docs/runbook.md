@@ -103,7 +103,7 @@ fork/.venv-bilingual/bin/python -m surogate_bilingual bench --family swiglu --re
 
 `mech8` profile，3 个重复，约 3–11 小时 [估计]。先由 Track S 生成规格生成数据（`synth`），再按 pilot 行配置运行 `g1p-*` 各阶段（`train`）：每个重复（r0–r2）种子 0.3B、ZH 与 EN 各 0.1B、B2 0.2B、B12a 0.2B token。
 
-**数据准备（CPU 即可）。** 先生成 Track S，再处理自然语料。自然语料的来源与许可要 owner 先选定并核实（B-O12），在此之前只能运行第一条命令。语料目录中的 spec 由 owner 编写：每个来源一个 `[[source]]`（字段见 [spec 的“语料 manifest 与划分”](spec.md#数据契约摘要)），其中 Track S 的 D_seed 成分作为 `kind = "synthetic"` 的来源列入（files 为 `track_s/seed/*.jsonl`），这样它进入 `seed_train`，tokenizer 也在它上面训练；D_zh、D_en、D_parallel 的 Track S 成分不进 manifest，写 shard 时用 `--add` 加入。自然语料来源的 glob 不要匹配到 `track_s/` 下的文件。
+**数据准备（CPU 即可）。** 先生成 Track S，再处理自然语料。自然语料的来源已定为 UltraData 家族（B-O12，见 [spec 的“语料与分词器”](spec.md#语料与分词器b-o11b-o12-的现状)）：zh 来源池与 UN PC 例外要 owner 先签字，在此之前只能运行第一条命令；各来源的许可条款仍未核实，`licence_verified` 为 false。语料目录中的 spec 由 fork/corpora 的 `compose` 从导出写出（[分词器研究的运行手册第 1 步](../../tokstudy/docs/runbook.md#1-备料owner-主机forkvenv-corpora)），owner 只写 Track S 那一个 `[[source]]`，用 `compose --include` 加入（字段见 [spec 的“语料 manifest 与划分”](spec.md#数据契约摘要)）：Track S 的 D_seed 成分作为 `kind = "synthetic"` 的来源列入（files 为 `track_s/seed/*.jsonl`），这样它进入 `seed_train`，tokenizer 也在它上面训练；D_zh、D_en、D_parallel 的 Track S 成分不进 manifest，写 shard 时用 `--add` 加入。自然语料来源的 glob 不要匹配到 `track_s/` 下的文件。
 
 ```bash runbook
 PY=fork/.venv-bilingual/bin/python
@@ -121,12 +121,16 @@ $PY -m surogate_bilingual shard --manifest data/splits/manifest.json --split en_
 $PY -m surogate_bilingual shard --manifest data/splits/manifest.json --split zh_train,en_train --tokenizer data/tokenizer/tokenizer.json --add data/corpus/track_s/zh/track_s.jsonl data/corpus/track_s/en/track_s.jsonl --exclude data/overlap_token.json --out data/shards/zh_en
 ```
 
+分词器（B-O11）在 G1′ 之前由分词器研究按效果比较决定（[spec 的“语料与分词器”](spec.md#语料与分词器b-o11b-o12-的现状)）：研究期间的文档集就是上面 `decontam`（不给 `--tokenizer`）与 `split materialize` 的结果；冻结之后，`tokenizer train` 一行换成把选出的 `tokenizer.json` 复制到 `data/tokenizer/tokenizer.json` 并核对 sha256，其后各行照旧（`token13` 用冻结的 tokenizer）。
+
 判据：`synth` 以退出码 0 结束并写出 `datacard.json`（任何一项检查失败时它报错、不写数据卡）；数据卡的 `status` 全部为 true；`tokenizer check` 报告 0 个 `<unk>` 与 0 个往返失败；D_seed shard 的头中 `extra.seed_mix.max_share_error` ≤ 0.005，`mixed_window_fraction.value` 高于下限 0.01。zh_en shard 是 D_zh ∪ D_en，供 B2、B12a（和 T3″）用。Bridge 各臂的平行 shard 用 `shard --bridge` 写（源语言段走其语言的路由、loss 0，目标段走 bridge 路由、loss 1）：T2 用两个方向都有的 parallel，T1′ 用 `--direction zh>en` 与 `--direction en>zh` 的 parallel_zh_en、parallel_en_zh，T3′ 用 `--unpair-seed` 的 parallel_unpaired（路径见 pilot_rows.toml）；Bridge 的运行属于 P1，不在 G0–G3 之内。把 `datacard.json`、`data/split.json`、tokenizer 与各 shard 头的 sha256 记入实测记录；test 文件的 sha256 在任何 test 评测之前写入签名的预注册锁定提交（手稿 §9.7）。完整规模的 `synth` 在本机 C1 上约 5.5 分钟、1.1 GB [CPU 实测，见实测记录]；自然语料各步在完整规模上的耗时没有测过。
 
 | 项目 | 结果 | 主机 | 提交 | 日期 |
 |---|---|---|---|---|
 | Track S 完整构建（种子 20261102）与数据卡 sha256 | 未运行（GPU 主机）；C1 上的一次构建见实测记录 | | | |
-| 自然语料的来源与许可核实（B-O12） | 未开始 | | | |
+| 自然语料的来源（B-O12）：UltraData 家族已定；zh 来源池与 UN PC 例外待签；许可条款未核实 | 未签 | | | |
+| 备料与 `compose`（[分词器研究的运行手册](../../tokstudy/docs/runbook.md)第 1 步） | 未运行 | | | |
+| 分词器研究与冻结（B-O11，同上第 2–7 步） | 未运行 | | | |
 | tokenizer、各 shard 与它们的 sha256 | 未运行 | | | |
 
 **pilot 运行。** 行配置在 [pilot_rows.toml](../examples/pilot_rows.toml) 中，每个阶段一个运行，`-r0`…`-r2` 是重复。每个阶段先 `--dry-run`（读入并校验全部输入，不写文件），再运行；中断后用同一条命令恢复。r1、r2 把下面的 `r0` 换掉即可。
