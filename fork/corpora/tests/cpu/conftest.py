@@ -24,3 +24,34 @@ import surogate_corpora  # noqa: E402
 
 if Path(surogate_corpora.__file__).resolve().parent != SRC / "surogate_corpora":
     raise RuntimeError(f"surogate_corpora was imported from {surogate_corpora.__file__}, not from {SRC}")
+
+import pytest  # noqa: E402
+
+HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.append(str(HERE))  # corpora_fixtures, the shared test helpers
+
+
+@pytest.fixture
+def fake_hub(monkeypatch):
+    """A started FakeHub (corpora_fixtures) with no files; tests fill `hub.files` before the client lists them.
+    Requests to 127.0.0.1 bypass any proxy of the environment."""
+    from corpora_fixtures import FakeHub
+
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.setenv(name, "127.0.0.1,localhost")
+    for name in ("http_proxy", "HTTP_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    hub = FakeHub(files={}).start()
+    yield hub
+    hub.stop()
+
+
+@pytest.fixture
+def client_for():
+    """client_for(hub, token=None) -> a HubClient on the fake Hub that never sleeps between retries."""
+    from surogate_corpora.hub import HubClient
+
+    return lambda hub, token=None: HubClient(
+        token=token, endpoint=hub.endpoint, timeout=10, retries=2, sleep=lambda s: None
+    )
