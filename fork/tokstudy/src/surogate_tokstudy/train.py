@@ -3,8 +3,8 @@ the decay branches at the budget points (spec §5.4; STUDY M4, M5, M8).
 
 **Progress.** pi = cumulative realized training FLOPs / F_target (flops.py, the prereg's convention): a token row
 costs its positions, an H-Net row its bytes through the outer stage plus its realized chunks through the main
-network. The learning rate (schedule.WSD, read at the F before each step), the stable checkpoints and the stop are
-functions of F, so every arm of a table ends at F_target within one step, whatever its bytes per token or chunk
+network. The learning rate (the prereg's schedule: schedule.WSD, or schedule.Cosine for the twin gates; read at the F
+before each step), the stable checkpoints and the stop are functions of F, so every arm of a table ends at F_target within one step, whatever its bytes per token or chunk
 ratio; a cheaper arm simply reads further into the same stream (refused at the start when the stream is too short
 at the arm's nominal FLOPs per byte, and stopped with a message, its checkpoints kept, if it runs out).
 
@@ -21,7 +21,8 @@ in fp32 inside the model), "fp32" and "fp64" run without autocast (CPU tests use
 **Checkpoints.** `ckpt/step-<n>.pt` every `checkpoint_every` steps (the latest `keep_last` kept), `stable/E<e>.pt`
 after the step that reaches round(decay_start * round(e * F_target)) for every budget point e, `final.pt` at
 F_target: each holds the trainable weights, the optimiser, the RNG states (torch CPU and CUDA, numpy, python), the
-stream cursor, the step and F, written atomically. A run resumes from its latest checkpoint, bit-identically on one
+stream cursor, the step, F and the text bytes trained on so far (`bytes`, the equal-bytes view of the verdict),
+written atomically. A run resumes from its latest checkpoint, bit-identically on one
 CPU thread (tests/cpu/test_train.py); a run directory whose run.json names another run id is refused.
 
 **Stages.** A stage's `stop_after = e` halts the main run at budget point e's stable checkpoint (a bilingual
@@ -31,6 +32,13 @@ under a stage without a stop continues the same run (same run id) to F_target.
 **Branches.** `branch(run_dir, endpoint=e)` starts from stable/E<e>.pt and decays over [D_e, E_e] (schedule.wsd),
 writing branches/E<e>/ (its own metrics, checkpoints and final.pt). It equals a run whose F_target is E_e with the
 same absolute warmup.
+
+**Prereg.** A run continues (resume, branch) and is evaluated only under the prereg it started with or one the
+table's prereg lock accepted after it (registry.lock_prereg with `since`); another prereg needs `--amend REASON`,
+which is appended to the lock. The prereg fields that change the computation (F_target, the schedule, the FLOP
+convention and the budget points) are in the run id, so an amendment that changes them cannot continue a run: it
+starts other runs. A prereg that is not signed is accepted, with a warning on stderr, and the run record carries
+`signed = false`; the verdict refuses unsigned tables unless asked for a draft.
 """
 
 from __future__ import annotations
@@ -60,7 +68,7 @@ from .codecs import ByteCodec, Codec
 from .models.build import build_model, flop_spec, positional_limit
 from .models.hnet import HNetLM
 from .prereg import Prereg, load_prereg
-from .schedule import WSD
+from .schedule import WSD, Cosine
 from .stream import Row, StreamManifest, bytes_per_token, open_stream, rows_for_arm, t_arm
 
 BACKEND = "tokstudy-torch"
@@ -166,10 +174,17 @@ def setup(
     model = model.to(dev, devices.PRECISIONS[config.precision])
     spec = flop_spec(model)
     out = _Setup(arm, codec, model, spec, stream, prereg, config, seed, dev)
-    schedule = prereg.wsd(config.lr).to_json()
+    schedule = prereg.lr_schedule(config.lr).to_json()
     code = dict(code) if code is not None else registry.code_identity()
     rid = registry.run_id(
-        arm_sha256(arm), stream.sha256, config.sha256(), code["commit"], seed, prereg.f_target, schedule
+        arm_sha256(arm),
+        stream.sha256,
+        config.sha256(),
+        code["commit"],
+        seed,
+        prereg.f_target,
+        schedule,
+        prereg.budget(),
     )
     c_arm = bytes_per_token(stream, codec) if arm.kind == "subword" else 1.0
     out.record = {
@@ -183,6 +198,7 @@ def setup(
             "seed": seed,
             "f_target": prereg.f_target,
             "schedule": schedule,
+            "budget": prereg.budget(),
         },
         "backend": BACKEND,
         "table": arm.table,
@@ -206,7 +222,7 @@ def setup(
         "f_target": prereg.f_target,
         "convention": prereg.convention,
         "budget_points": list(prereg.points),
-        "stable_flops": {_label(e): _stable_flops(prereg, e) for e in prereg.points},
+        "stable_flops": prereg.stable_flops(),
         "schedule": schedule,
         "c_arm": c_arm,
         "t_arm": t_arm(stream.k_train, c_arm),
@@ -220,11 +236,6 @@ def setup(
 
 def _label(e: float) -> str:
     return f"E{e:g}"
-
-
-def _stable_flops(prereg: Prereg, e: float) -> int:
-    end = prereg.f_target if e == 1 else round(e * prereg.f_target)
-    return round(prereg.schedule["decay_start"] * end)
 
 
 def _check_stream_length(s: _Setup, c_arm: float) -> None:
@@ -296,6 +307,7 @@ def save_checkpoint(path: Path, s: _Setup, opt: torch.optim.Optimizer, state: di
         "kind": kind,
         "step": state["step"],
         "flops": state["flops"],
+        "bytes": state["bytes"],
         "cursor": list(state["cursor"]),
         "model": s.model.state_dict(),
         "optimizer": opt.state_dict(),
@@ -322,7 +334,12 @@ def _restore(s: _Setup, opt: torch.optim.Optimizer, payload: dict[str, Any]) -> 
     s.model.load_state_dict(payload["model"])
     opt.load_state_dict(payload["optimizer"])
     _set_rng_state(payload["rng"])
-    return {"step": int(payload["step"]), "flops": int(payload["flops"]), "cursor": tuple(payload["cursor"])}
+    return {
+        "step": int(payload["step"]),
+        "flops": int(payload["flops"]),
+        "bytes": int(payload["bytes"]),
+        "cursor": tuple(payload["cursor"]),
+    }
 
 
 def latest_checkpoint(out: Path) -> Path | None:
@@ -395,7 +412,7 @@ def _loop(
     state: dict[str, Any],
     *,
     out: Path,
-    schedule: WSD,
+    schedule: WSD | Cosine,
     end: int,
     stable: dict[str, int],
     stop_at: int | None,
@@ -445,9 +462,14 @@ def _loop(
                     flops.row_train_flops(s.spec, len(r.ids), convention=s.prereg.convention) for r in batch
                 )
             before = state["flops"]
-            state = {"step": state["step"] + 1, "flops": before + step_flops, "cursor": batch[-1].next_cursor}
-            seconds = time.perf_counter() - started
             text_bytes = sum(r.text_bytes for r in batch)
+            state = {
+                "step": state["step"] + 1,
+                "flops": before + step_flops,
+                "bytes": state["bytes"] + text_bytes,
+                "cursor": batch[-1].next_cursor,
+            }
+            seconds = time.perf_counter() - started
             line = {
                 "step": state["step"],
                 "flops": state["flops"],
@@ -457,6 +479,7 @@ def _loop(
                 "positions": n_positions,
                 "targets": n_targets,
                 "bytes": text_bytes,
+                "train_bytes": state["bytes"],
                 "ce": ce,
                 "loss": ce + (s.model.cfg.alpha * parts["ratio"] if s.arm.kind == "hnet" else 0.0),
                 "grad_norm": norm,
@@ -579,17 +602,19 @@ def train(
         found = registry.read_run(out)
         if found["run_id"] != rid:
             raise TokstudyError(f"{out} holds run {found['run_id']}; these inputs make run {rid} (refused)")
-        registry.lock_prereg(runs, prereg, amend=amend)
+        registry.lock_prereg(runs, prereg, amend=amend, since=found["prereg"]["sha256"])
     else:
         if out.exists() and any(out.iterdir()):
             raise TokstudyError(f"{out} exists without a run record")
         registry.lock_prereg(runs, prereg, amend=amend)
         registry.write_run(out, s.record)
+    _warn_unsigned(prereg)
     opt = optimizer(s)
     header = {"format": METRICS_FORMAT, "run_id": rid, "arm": arm.id, "kind": "main"}
-    state, _ = _start_or_resume(s, out, opt, header, {"step": 0, "flops": 0, "cursor": (0, 0)}, runtime, "main")
-    stop_at = None if stop_after is None else _stable_flops(prereg, stop_after)
-    stable = {_label(e): _stable_flops(prereg, e) for e in prereg.points}
+    initial = {"step": 0, "flops": 0, "bytes": 0, "cursor": (0, 0)}
+    state, _ = _start_or_resume(s, out, opt, header, initial, runtime, "main")
+    stable = prereg.stable_flops()
+    stop_at = None if stop_after is None else stable[_label(stop_after)]
     unfinished = state["flops"] < prereg.f_target and (stop_at is None or state["flops"] < stop_at)
     if unfinished or (state["flops"] >= prereg.f_target and not (out / "final.pt").is_file()):
         state = _loop(
@@ -597,7 +622,7 @@ def train(
             opt,
             state,
             out=out,
-            schedule=prereg.wsd(config.lr),
+            schedule=prereg.lr_schedule(config.lr),
             end=prereg.f_target,
             stable=stable,
             stop_at=stop_at,
@@ -614,8 +639,34 @@ def _state_json(state: dict[str, Any], prereg: Prereg) -> dict[str, Any]:
         "step": state["step"],
         "flops": state["flops"],
         "progress": state["flops"] / prereg.f_target,
+        "bytes": state["bytes"],
         "cursor": list(state["cursor"]),
     }
+
+
+def _warn_unsigned(prereg: Prereg) -> None:
+    if not prereg.signed:
+        print(
+            f"warning: {prereg.path.name} ({prereg.sha256[:12]}) is not signed: this run counts only for a draft "
+            "verdict (verdict --draft); sign the prereg before any run that should decide (docs/runbook.md, 4)",
+            file=sys.stderr,
+        )
+
+
+def accept_prereg(run_dir: Path, record: dict[str, Any], prereg: Prereg, *, amend: str | None = None) -> None:
+    """An existing run accepts only the prereg it started with or one the table's lock accepted after it (module
+    docstring); `amend` appends another one to the lock with that reason."""
+    recorded = record["prereg"]["sha256"]
+    if prereg.sha256 == recorded:
+        return
+    table_dir = Path(run_dir).resolve().parent
+    lock = table_dir / registry.LOCK_FILE
+    if table_dir.name != prereg.table or not lock.is_file():
+        raise TokstudyError(
+            f"{run_dir}: the run started under prereg {recorded}, {prereg.path} has sha256 {prereg.sha256}, and "
+            f"there is no prereg lock of table {prereg.table} next to the run ({lock}) to accept it"
+        )
+    registry.lock_prereg(table_dir.parent, prereg, amend=amend, since=recorded)
 
 
 def reopen(
@@ -627,12 +678,14 @@ def reopen(
     device: str | None = None,
     verify_stream: bool = True,
     same_code: bool = True,
+    amend: str | None = None,
 ) -> _Setup:
     """The setup of an existing run from its record (inputs at their recorded paths unless given), the run id
     recomputed from them (so every input is checked: tokenizer sha256s, the stream manifest, the prereg's budget and
     schedule, the config, the code); `verify_stream` also re-hashes the stream's parts (evaluation reads none).
     Continuing a run (resume, branch) needs the same code commit; evaluation passes same_code=False, which takes the
-    recorded commit for the id and leaves the evaluating commit to the NLL header."""
+    recorded commit for the id and leaves the evaluating commit to the NLL header. The prereg must be the run's or one
+    its table's lock accepted after it (accept_prereg; `amend` accepts another one)."""
     record = registry.read_run(run_dir)
     registry_path = Path(arms or (record["arm"]["registry"] or {}).get("path", ""))
     if not registry_path.is_file():
@@ -656,8 +709,9 @@ def reopen(
     if s.record["run_id"] != record["run_id"]:
         raise TokstudyError(
             f"{run_dir}: run {record['run_id']}, but its inputs now make run {s.record['run_id']} "
-            "(arm, stream, prereg schedule, config or code changed)"
+            "(arm, stream, prereg budget or schedule, config or code changed)"
         )
+    accept_prereg(run_dir, record, p, amend=amend)
     return s
 
 
@@ -669,12 +723,16 @@ def branch(
     arms: Path | None = None,
     stream: Path | None = None,
     prereg: Path | None = None,
+    amend: str | None = None,
 ) -> dict[str, Any]:
     """The decay branch of a run at budget point `endpoint` (< 1), from its stable checkpoint (module docstring)."""
     runtime = runtime or Runtime()
     run_dir = Path(run_dir)
-    s = reopen(run_dir, arms=arms, stream=stream, prereg=prereg, device=runtime.device)
+    s = reopen(run_dir, arms=arms, stream=stream, prereg=prereg, device=runtime.device, amend=amend)
     p = s.prereg
+    if p.kind != "wsd":
+        raise TokstudyError(f"{p.path}: a {p.kind} schedule has no decay branches")
+    _warn_unsigned(p)
     if endpoint not in p.points[:-1]:
         raise TokstudyError(f"a branch ends at a budget point below 1 ({list(p.points[:-1])}), got {endpoint}")
     label = _label(endpoint)
@@ -682,7 +740,7 @@ def branch(
     if not source.is_file():
         raise TokstudyError(f"{run_dir}: no stable checkpoint {source.name} yet (the run has not reached it)")
     out = run_dir / "branches" / label
-    schedule = p.wsd(s.config.lr, endpoint=endpoint)
+    schedule = p.lr_schedule(s.config.lr, endpoint=endpoint)
     end = schedule.end_flops
     opt = optimizer(s)
     info = {
@@ -714,7 +772,7 @@ def branch(
             runtime=runtime,
             kind=f"branch/{label}",
         )
-    _event(out, "branch-done", s, state)
+    _event(out, "branch-done", s, state, prereg_sha256=p.sha256)
     return {**info, "dir": str(out), "state": _state_json(state, p), "done": state["flops"] >= end}
 
 
@@ -806,6 +864,7 @@ def branch_main(argv: Sequence[str]) -> int:
     parser.add_argument("--arms", type=Path, help="the arm registry, when it moved")
     parser.add_argument("--stream", type=Path, help="the stream directory, when it moved")
     parser.add_argument("--prereg", type=Path, help="the prereg, when it moved")
+    parser.add_argument("--amend", help="accept a prereg the table's lock does not hold for this run, with this reason")
     _runtime_args(parser)
     args = parser.parse_args(list(argv))
     try:
@@ -815,6 +874,7 @@ def branch_main(argv: Sequence[str]) -> int:
             arms=args.arms,
             stream=args.stream,
             prereg=args.prereg,
+            amend=args.amend,
             runtime=Runtime(checkpoint_every=args.checkpoint_every, device=args.device),
         )
     except (TokstudyError, ValueError) as err:

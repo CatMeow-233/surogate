@@ -15,8 +15,17 @@ run's trajectory exactly at its stable checkpoint (the state after the first ste
 equals a run whose F_target is E_e with the same absolute warmup (tests/cpu/test_train.py). The rate of a step is
 read at its F before the step.
 
-**Cosine** (`cosine_at`): warmup then a cosine to floor * peak over the rest, the production schedule of the
-bilingual loop (surogate_bilingual.train.schedule) on FLOP progress, for the twin gates TW-2 and TW-3.
+**Cosine** (`Cosine`, `cosine_at`; prereg `[schedule] kind = "cosine"`): warmup then a cosine to floor * peak over
+the rest, in integer FLOP bounds W = round(warmup * F_target) and E = F_target:
+
+    F <  W:          peak * F / W
+    W <= F < E:      floor * peak + (1 - floor) * peak * (1 + cos(pi * (F - W) / (E - W))) / 2
+    F >= E:          floor * peak
+
+This is the production schedule of TLC's native trainer (`lr_scheduler_type: cosine`, `final_lr_fraction`) and of
+the bilingual loop (surogate_bilingual.train.schedule) on FLOP progress instead of steps, for the twin gates TW-2 and
+TW-3 (docs/runbook.md, step 5.3). It has no stable phase, so a cosine run has no stable checkpoints and no decay
+branches: its prereg has the one budget point 1.0.
 """
 
 from __future__ import annotations
@@ -26,6 +35,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 SHAPES = ("linear", "cosine")
+KINDS = ("wsd", "cosine")
 
 
 @dataclass(frozen=True)
@@ -62,6 +72,42 @@ class WSD:
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class Cosine:
+    peak: float
+    warmup_flops: int
+    end_flops: int
+    floor: float = 0.1
+    kind: str = "cosine"
+
+    def __post_init__(self):
+        if not self.peak > 0:
+            raise ValueError(f"the peak learning rate must be positive, got {self.peak}")
+        if not 0 <= self.warmup_flops < self.end_flops:
+            raise ValueError(f"a cosine schedule needs 0 <= warmup < end, got {self.to_json()}")
+        if not 0 <= self.floor <= 1:
+            raise ValueError(f"the floor is a fraction of the peak in [0, 1], got {self.floor}")
+        if self.kind != "cosine":
+            raise ValueError(f"a Cosine schedule has kind 'cosine', got {self.kind!r}")
+
+    def lr(self, flops: int) -> float:
+        if flops < self.warmup_flops:
+            return self.peak * flops / self.warmup_flops
+        if flops >= self.end_flops:
+            return self.peak * self.floor
+        frac = (flops - self.warmup_flops) / (self.end_flops - self.warmup_flops)
+        low = self.peak * self.floor
+        return low + (self.peak - low) * (1 + math.cos(math.pi * frac)) / 2
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def cosine(f_target: int, *, peak: float, warmup: float = 0.02, floor: float = 0.1) -> Cosine:
+    """The cosine schedule of a run with F_target (module docstring)."""
+    return Cosine(peak, round(warmup * f_target), f_target, floor)
 
 
 def wsd(

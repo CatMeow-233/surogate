@@ -149,13 +149,28 @@ $K -m surogate_tokstudy align --teacher "$QWEN/tokenizer.json@$QWEN_SHA" --token
    ```
 
    训练开始时 `train` 在流的前 2,000 篇上实测 c_arm 并记入 `run.json`；与这里用的值相差超过 3% 时，在参照臂第一次运行之后、H-Net 臂第一次运行之前重新匹配。
-4. 提交两个登记文件与签了字的 prereg（同一个签名提交）。之后改动任何一个都改变臂的 sha256 或 prereg 的 sha256：评测集与运行登记会拒绝旧的运行，prereg 的改动要 `train --amend "<原因>"`。
+4. 提交两个登记文件与签了字的 prereg（同一个签名提交）。之后改动任何一个都改变臂的 sha256 或 prereg 的 sha256：评测集与运行登记会拒绝旧的运行；prereg 的改动要 `train --amend "<原因>"`（已有运行的衰减分支用 `branch --amend "<原因>"`；评测只接受运行开始时的 prereg 或之后被锁接受的 prereg）。改了 F_target、调度、FLOP 口径或预算点的 prereg 会给出另一个运行 id，旧运行不能在它之下继续，只能重跑。没签字的 prereg 能训练（stderr 警告），但只能进 `verdict --draft`。
 
 ## 5. G0-ts、G0.5-ts 与孪生门（GPU）
 
 1. **G0-ts。** sm_120 可见，记录 torch wheel。`triton` 路线：mamba-ssm 2.3.2.post1 的 `__init__` 无条件导入 CUDA 扩展，`MAMBA_SKIP_CUDA_BUILD=TRUE` 装出的包用不了（[README 的“模型与内核”](../README.md#模型与内核)）；要么在 sm_120 上完整编译 mamba-ssm，要么用 `torch` 后端并记录。用 `triton` 时，`kernels.ssd(backend="triton")` 在 fp32 下前向与反向都必须与 `torch` 后端相对差 ≤ 1e-4。bf16 autocast 下重复前向的 H-Net 边界相同。本包的 GPU 测试目录还没有建（S17）。
 2. **G0.5-ts。** 对 N0、N1、N2、B0、B4、B5 在计划的形状、微批 {4, 8, 16} 下测字节/秒、FLOP/秒与峰值显存（`bench` 命令属于 S17，未落地；在它之前用 `train` 的 `metrics.jsonl` 中的 `bytes_per_s`、`flops_per_s` 与峰值显存）。H-Net 臂低于其子词参照的 0.25 倍、或双语臂放不下微批 × K_train 时停下并报告。重算预算（下文）。
 3. **孪生门。** TW-1（A0 孪生的 logits 与 `ref_mamba2.py` 一致）已在 CPU 测试中通过。TW-2：N0 用原生的调度、TOK-AB 的数据与预算在本包中训练，Python 与英文 BPB 与原生 A0（`python -m surogate_tlc eval … --dump-nll`）相对差 ≤ 1%。TW-3：B0 经 `surogate_bilingual.train.loop`（cosine、1 个种子、0.4B）与本包中同调度的 B0，每种语言相差 ≤ 1%。门不过时该表只能内部比较（判定标为 internal-only），由 owner 决定。
+   - **配方。** 孪生运行用自己的 prereg（[prereg/tlc-twin.toml](../prereg/tlc-twin.toml)、[prereg/bilingual-twin.toml](../prereg/bilingual-twin.toml)：`[schedule] kind = "cosine"`，即原生与双语生产调度按 FLOP 进度的版本；预算点只有 1.0）和自己的运行根目录（prereg 锁按表与运行根目录记，孪生的 prereg 不能与判定用的 prereg 共用一个根目录）。TW-2 的 prereg 没有 `[mixture]`：流读原生 train 划分的全部文档，与原生 shard 相同；F_target、K_train 与 warmup 是 [待定]，按原生领先臂那次运行的训练 token 数、shard 行长（`seq_len` × 实测字节/token）与 `warmup_steps / max_steps` 填好再签字。TW-3 的混合与判定用的相同（B0 token 计的中英平衡）。
+
+     ```bash
+     K=fork/.venv-tokstudy/bin/python
+     TW=data/tokstudy/twin-runs
+     $K -m surogate_tokstudy stream --prereg fork/tokstudy/prereg/tlc-twin.toml --tlc "$TLC_RUNS/corpus/corpus.toml" --out data/tokstudy/tlc/twin-stream
+     $K -m surogate_tokstudy train --arms fork/tokstudy/arms/tlc.toml --arm N0 --seed 0 --stream data/tokstudy/tlc/twin-stream \
+         --prereg fork/tokstudy/prereg/tlc-twin.toml --runs "$TW" --lr "$LR_NATIVE"
+     $K -m surogate_tokstudy eval score "$TW/tlc-N/N0-s0-$RUN_ID" --evalset data/tokstudy/tlc/evalset --out data/tokstudy/tlc/twin/N0.nll
+     # the native side: the TOK-AB run of the same tokenizer, scored by TLC's own eval
+     PY=fork/.venv-tlc/bin/python
+     $PY -m surogate_tlc eval "$TLC_RUNS/models/T_LEADER" "$TLC_RUNS/data" --dump-nll data/tokstudy/tlc/twin/native.nll --arm T_LEADER --corpus "$TLC_RUNS/corpus/corpus.toml"
+     ```
+
+     双语同理：`--prereg fork/tokstudy/prereg/bilingual-twin.toml --arm B0 --measure fork/tokstudy/arms/bilingual.toml:B0`，另一边是双语运行手册的生产循环（0.4B、1 个种子、同一个 tokenizer），用 `eval-tasks`/`eval` 的 `--dump-nll` 写同一种 NLL 文件 [待定：双语生产循环的按文档 NLL 输出未落地，先比较两边各自报告的按语言 BPB]。比较两边每个领域的 BPB，相对差 ≤ `twin_rel_max`（1%），结果按主机、提交、日期记入实测记录。
    - TW-2 的两边评测上下文不同：原生按 512 token 的窗口给整篇文档打分，本包按评测集的公共字节前缀（K_eval）一次打分；差值里含有这部分 [待定]，记录两边各自的文档数与字节数。
 
 ## 6. 训练流、评测集与运行

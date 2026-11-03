@@ -130,9 +130,11 @@ H-Net 一行的 FLOPs = 外层（编码器、路由、残差投影、解码器�
 
 - **进度**：π = 累计实际训练 FLOPs / F_target（prereg 的口径）。学习率（`schedule.WSD`，按每步之前的 F 取值）、稳定检查点与停止都是 F 的函数，所以一张表的所有臂都在 F_target 处停下（误差不超过一步），与字节/token 或 chunk 比无关；便宜的臂在同一个流中读得更远。开始时按该臂的名义每字节 FLOPs 检查流够不够长，不够即拒绝；运行中流用尽时报错停止，检查点保留。
 - **WSD**：边界取整数 FLOPs（W = round(warmup × F_target)，D = round(decay_start × F_target)），F < W 时线性预热（第一步的学习率为 0，只填充 Adam 的矩），W ≤ F < D 时为峰值，之后线性（或余弦）衰减到 floor × 峰值。预算点 e 的衰减分支保留 W，终点 E_e = round(e × F_target)，衰减起点 D_e = round(decay_start × E_e)，从稳定检查点（到达 D_e 的那一步之后的状态）出发。测试确认：分支与一个 F_target = E_e、绝对预热相同（warmup 分数乘以 1/e）的运行逐位相同。
-- **数据与损失**：每步 `batch_rows` 行，按 `micro_rows` 分成微批，微批内右侧补齐；目标是每行第一个之后的所有 id（含特殊 token）。损失 = 本步目标 NLL 之和 / 本步目标数（微批划分不改变它）；H-Net 另加 α × ratio loss，按微批位置数加权。
+- **余弦调度**（prereg 的 `[schedule] kind = "cosine"`，`schedule.Cosine`）：预热到峰值后按 FLOP 进度余弦衰减到 floor × 峰值，即 TLC 原生训练器与双语训练循环的生产调度（它们按步数，这里按 F）；只给孪生门 TW-2、TW-3 用。它没有稳定阶段，所以 prereg 的预算点只能是 [1.0]，没有稳定检查点，`branch` 被拒绝。
+- **数据与损失**：每步 `batch_rows` 行，按 `micro_rows` 分成微批，微批内右侧补齐；目标是每行第一个之后的所有 id（含特殊 token），补齐位置的目标不进损失。损失 = 本步目标 NLL 之和 / 本步目标数（微批划分不改变它）；H-Net 另加 α × ratio loss，按微批位置数加权。测试确认：一步的交叉熵在 1 行与整批两种微批下都等于逐行、不补齐算出的逐目标交叉熵，H-Net 的 ratio 项等于各微批 ratio loss 按位置份额的加权和。
 - **优化器与精度**：AdamW，β = (0.9, 0.95)，梯度裁剪 1.0；权重衰减只作用于矩阵（嵌入即 tied 头除外），norm、向量与嵌入不衰减；H-Net 外层的学习率乘以 `lambda_outer`。`bf16` 为 fp32 主权重上的 bf16 autocast（路由与残差投影在模型内保持 fp32），`fp32`、`fp64` 不用 autocast。损失或梯度范数非有限时停止。
-- **检查点**（`tokstudy-ckpt/1`，原子写入）：每 `checkpoint_every` 步一个 `ckpt/step-<n>.pt`（保留最近两个），每个预算点 e 在到达 D_e 的那一步之后写 `stable/E<e>.pt`，到达 F_target 时写 `final.pt`；内容为可训练权重、优化器、RNG 状态（torch CPU 与 CUDA、numpy、python）、流游标、步数与 F。从最近的检查点续训；测试确认在 0、1、7 步后中断（以及从早于中断点的检查点续训，被重算的那一步的指标行被替换）与不中断的运行逐位相同（单线程 CPU）。
+- **检查点**（`tokstudy-ckpt/1`，原子写入）：每 `checkpoint_every` 步一个 `ckpt/step-<n>.pt`（保留最近两个），每个预算点 e 在到达 D_e 的那一步之后写 `stable/E<e>.pt`，到达 F_target 时写 `final.pt`；内容为可训练权重、优化器、RNG 状态（torch CPU 与 CUDA、numpy、python）、流游标、步数、F 与至此训练过的文本字节（判定的等字节视角用它）。从最近的检查点续训；测试确认在 0、1、7 步后中断（以及从早于中断点的检查点续训，被重算的那一步的指标行被替换）与不中断的运行逐位相同（单线程 CPU）。
+- **运行的 prereg**：一个已存在的运行（续训、衰减分支、评测）只接受它开始时的 prereg，或表的 prereg 锁在它之后接受的 prereg；别的 prereg（包括原地改过的文件）要 `--amend 原因`（`train` 与 `branch` 都有），追加进锁。改变计算的字段（F_target、调度、FLOP 口径、预算点）都在运行 id 里，所以改了它们的 prereg 即使给了 `--amend` 也不能继续旧运行，只能开新运行。prereg 没有签字时训练照常进行，但在 stderr 警告：这样的运行只能进 `verdict --draft`。
 - **阶段**：prereg 的 `[stages.<名>] stop_after = e` 让主运行停在预算点 e 的稳定检查点（双语初筛：F_target = F_dec，取 0.25、0.5 两个分支，花费 0.525 F_dec）；以没有停止点的阶段再次运行同一臂、同一种子，就是同一个运行（同一个运行 id）继续到 F_target。臂只能参加它在登记中列出的阶段，种子必须是登记中的种子。
 - **记录**：`metrics.jsonl`（`tokstudy-metrics/1`：每步的 F、π、学习率、行、位置、目标、字节、交叉熵、损失、梯度范数、字节/秒与 FLOP/秒、峰值显存、游标；H-Net 另有 ratio loss、F、G、chunk 数、各领域的位置/chunk）与 `events.jsonl`（开始、续训、停止、完成及当时的环境）。
 
@@ -144,8 +146,8 @@ H-Net 一行的 FLOPs = 外层（编码器、路由、残差投影、解码器�
 
 ## 运行登记与预注册
 
-- **预注册**（`prereg.py`，`tokstudy-prereg/1`）：[prereg/tlc.toml](prereg/tlc.toml) 与 [prereg/bilingual.toml](prereg/bilingual.toml) 写入了预算口径、F_target、预算点 {0.25, 0.5, 1.0}、K_train/K_eval、WSD 参数、阶段、混合与其单位、每臂种子数，以及判定阈值（STUDY §8.4(e)、§9.2；由 S16 的判定读取）。全部是 [建议]，`[signature]` 为空，等 owner 签字。F_target：TLC 为 A0 在 0.8B token 处（3 × `ir.flops_per_token` × 8e8 = 1.642e17），双语为 B0（种子几何，T = 1024）在 0.8B token 处（6 × MACs × 8e8 = 5.222e17）；测试由两个项目的公式重算。文件字节的 sha256 是它的身份，记入每个运行记录。
-- **运行登记**（`registry.py`）：运行目录为 `<runs>/<表>/<臂>-s<种子>-<运行 id>/`；运行 id 取 {arm_sha256, stream_sha256, config_hash, code_commit, seed, f_target, schedule} 规范 JSON 的 sha256 前 16 位，任何一项改变都是另一个运行（测试逐项确认），指向另一个运行 id 的目录被拒绝；代码的 dirty 标志记在 `run.json`（`tokstudy-run/1`），不进 id。`<runs>/<表>/prereg-lock.json` 记下该表第一次运行所用的 prereg sha256；之后换了 prereg 而不给 `--amend 原因` 即拒绝，给了就把新 sha256 与原因追加进历史；接受过的 prereg 再次被接受。`list_runs` 列出一张表的全部运行记录并重算它们的 id。
+- **预注册**（`prereg.py`，`tokstudy-prereg/1`）：[prereg/tlc.toml](prereg/tlc.toml) 与 [prereg/bilingual.toml](prereg/bilingual.toml) 写入了预算口径、F_target、预算点 {0.25, 0.5, 1.0}、K_train/K_eval、WSD 参数、阶段、混合与其单位、每臂种子数，以及判定阈值（STUDY §8.4(e)、§9.2；由 S16 的判定读取）。全部是 [建议]，`[signature]` 为空，等 owner 签字。F_target：TLC 为 A0 在 0.8B token 处（3 × `ir.flops_per_token` × 8e8 = 1.642e17），双语为 B0（种子几何，T = 1024）在 0.8B token 处（6 × MACs × 8e8 = 5.222e17）；测试由两个项目的公式重算。文件字节的 sha256 是它的身份，记入每个运行记录。孪生门另有 [prereg/tlc-twin.toml](prereg/tlc-twin.toml)（TW-2）与 [prereg/bilingual-twin.toml](prereg/bilingual-twin.toml)（TW-3）：余弦调度、只有预算点 1.0，用自己的运行根目录（运行手册第 5 步）。
+- **运行登记**（`registry.py`）：运行目录为 `<runs>/<表>/<臂>-s<种子>-<运行 id>/`；运行 id 取 {arm_sha256, stream_sha256, config_hash, code_commit, seed, f_target, schedule, budget} 规范 JSON 的 sha256 前 16 位（budget 为 prereg 的 FLOP 口径与预算点：前者决定每一步的 F，后者决定稳定检查点的位置；阈值、种子数、阶段与签字不进 id），任何一项改变都是另一个运行（测试逐项确认），指向另一个运行 id 的目录被拒绝；代码的 dirty 标志记在 `run.json`（`tokstudy-run/1`），不进 id。`<runs>/<表>/prereg-lock.json` 记下该表第一次运行所用的 prereg sha256；之后换了 prereg 而不给 `--amend 原因` 即拒绝，给了就把新 sha256 与原因追加进历史；新运行可以用接受过的任何 prereg，已存在的运行只接受它自己的或在它之后接受的（锁按目录布局找：运行目录旁边的 `prereg-lock.json`；不在该布局中的运行只接受它自己的 prereg）。`list_runs` 列出一张表的全部运行记录并重算它们的 id。
 
 ## 与实现规格的出入（S4）
 

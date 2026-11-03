@@ -1,0 +1,38 @@
+# Preregistration of the twin gate TW-2 (STUDY §8.2; spec §10.5): N0, the PyTorch twin of the native A0 with the
+# native TOK-AB leader's tokenizer, trained in this package on the native TOK-AB data with the native schedule and
+# budget, against the native A0 run of that tokenizer (`python -m surogate_tlc eval ... --dump-nll`). Python and
+# English BPB within 1 % relative, or the tlc-N table is internal-only (docs/runbook.md, step 5.3).
+# Its own runs root (the prereg lock is per table and runs root): data/tokstudy/twin-runs. Every value is a
+# proposal until the owner signs [signature]; [待定] values are set from the native run before the gate runs.
+format = "tokstudy-prereg/1"
+table = "tlc-N"
+notes = "TW-2 only: no [mixture] (every document of the native train split, as the native shards); cosine schedule."
+
+[budget]
+convention = "matmul"
+# [待定] the native leader run's training tokens x 3 x surogate_tlc.ir.flops_per_token(A0, 512); here 0.5B tokens
+# (the upper TOK-AB budget, STUDY §11): 205,258,752 x 5e8.
+F_target = 102_629_376_000_000_000
+points = [1.0]
+
+[context]
+K_train = 2048  # [待定] the native leader's row length in bytes: its shard seq_len x its measured bytes per token
+K_eval = 2048
+
+[schedule]
+kind = "cosine"
+# [待定] the native run's warmup_steps / max_steps: 30 / 30,518 at 0.5B tokens and 16,384 tokens per update
+warmup = 0.001
+floor = 0.1     # fork/tlc/examples/p0.yaml final_lr_fraction
+
+[stages.decision]
+
+[seeds]
+N0 = 1
+
+[thresholds]  # read by `verdict twin`
+twin_rel_max = 0.01  # |BPB(N0) / BPB(native A0) - 1| <= 1 % in Python and in English
+
+[signature]
+signed_by = ""
+date = ""

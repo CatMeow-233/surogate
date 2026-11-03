@@ -1,0 +1,41 @@
+# Preregistration of the twin gate TW-3 (STUDY §9.1; spec §10.5): B0 trained by the bilingual production loop
+# (surogate_bilingual.train.loop: cosine, 1 seed, 0.4B tokens) against B0 trained in this package with the same
+# schedule on FLOP progress; per-language BPB within 1 % relative, or the bilingual-B table is internal-only
+# (docs/runbook.md, step 5.3). Its own runs root: data/tokstudy/twin-runs. Proposals until the owner signs.
+format = "tokstudy-prereg/1"
+table = "bilingual-B"
+notes = "TW-3 only: the production loop's warmup 2 % and cosine to 10 % (MS §8.1), on training FLOPs."
+
+[budget]
+convention = "matmul"
+# B0 (the pilot seed geometry, T = 1024) at 0.4B tokens: 6 x macs_per_token = 652,738,560 x 4e8.
+F_target = 261_095_424_000_000_000
+points = [1.0]
+
+[context]
+K_train = 4096
+K_eval = 4096
+
+[schedule]
+kind = "cosine"
+warmup = 0.02
+floor = 0.1
+
+[stages.decision]
+
+[mixture]  # as prereg/bilingual.toml: D_seed's zh/en balance in B0 tokens
+zh = 0.5
+en = 0.5
+
+[stream]
+measure = "B0"
+
+[seeds]
+B0 = 1
+
+[thresholds]  # read by `verdict twin`
+twin_rel_max = 0.01
+
+[signature]
+signed_by = ""
+date = ""

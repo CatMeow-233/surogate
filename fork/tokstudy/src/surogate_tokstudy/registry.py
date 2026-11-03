@@ -5,14 +5,20 @@
                                                 events.jsonl, ckpt/, stable/, final.pt, branches/E<e>/
 
 **Run id.** The first 16 hex of the sha256 of the canonical JSON of {arm_sha256, stream_sha256, config_hash,
-code_commit, seed, f_target, schedule}: the arm (its tokenizer by sha256), the stream, the training configuration,
-the code, the seed, the table's budget and schedule. Any change gives another run; resuming a run directory under
-another id is refused. The code commit is `git rev-parse HEAD` of the checkout this package runs from (null outside
-a git checkout); the dirty flag is recorded in the run record, not in the id, and a verdict may refuse dirty runs.
+code_commit, seed, f_target, schedule, budget}: the arm (its tokenizer by sha256), the stream, the training
+configuration, the code, the seed, the table's F_target and learning-rate schedule, and the prereg's other fields
+that change what a run computes (`budget`: the FLOP convention every step's F is counted in, and the budget points
+that place the stable checkpoints). The prereg's thresholds, seeds, stages and signature are not in it: they do not
+change a run. Any change gives another run; resuming or branching a run directory under another id is refused. The
+code commit is `git rev-parse HEAD` of the checkout this package runs from (null outside a git checkout); the dirty
+flag is recorded in the run record, not in the id, and a verdict may refuse dirty runs.
 
 **Prereg lock.** The first run of a table records its prereg's sha256. A later run with another prereg is refused
 unless it names an amendment reason, which is appended with the new sha256 (spec §3.4: changing the thresholds
-after the first run needs `--amend "<reason>"`); a prereg that was accepted before is accepted again.
+after the first run needs `--amend "<reason>"`); a prereg that was accepted before is accepted again for a new run.
+An existing run (resume, decay branch, evaluation) accepts only the prereg it started with or one accepted after it
+(`since`, the run record's prereg sha256): an earlier or unrecorded prereg needs `--amend` as well, and the lock is
+the one of the registry layout, `<runs>/<table>/prereg-lock.json` next to the run directory.
 """
 
 from __future__ import annotations
@@ -28,7 +34,7 @@ from .canonical import TokstudyError, atomic_write_json, read_json, sha256_json
 
 RUN_FILE = "run.json"
 LOCK_FILE = "prereg-lock.json"
-ID_KEYS = ("arm_sha256", "stream_sha256", "config_hash", "code_commit", "seed", "f_target", "schedule")
+ID_KEYS = ("arm_sha256", "stream_sha256", "config_hash", "code_commit", "seed", "f_target", "schedule", "budget")
 
 
 def run_id(
@@ -39,14 +45,10 @@ def run_id(
     seed: int,
     f_target: int,
     schedule: Mapping[str, Any],
+    budget: Mapping[str, Any],
 ) -> str:
-    inputs = dict(
-        zip(
-            ID_KEYS,
-            (arm_sha256, stream_sha256, config_hash, code_commit, int(seed), int(f_target), dict(schedule)),
-            strict=True,
-        )
-    )
+    values = (arm_sha256, stream_sha256, config_hash, code_commit, int(seed), int(f_target), dict(schedule))
+    inputs = dict(zip(ID_KEYS, (*values, dict(budget)), strict=True))
     return sha256_json(inputs)[:16]
 
 
@@ -81,10 +83,17 @@ def now() -> str:
     return datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
 
 
-def lock_prereg(root: Path, prereg, *, amend: str | None = None) -> dict[str, Any]:
-    """Accept `prereg` for its table under `root` (module docstring); returns the lock document."""
-    path = Path(root) / prereg.table / LOCK_FILE
+def lock_path(root: Path, table: str) -> Path:
+    return Path(root) / table / LOCK_FILE
+
+
+def lock_prereg(root: Path, prereg, *, amend: str | None = None, since: str | None = None) -> dict[str, Any]:
+    """Accept `prereg` for its table under `root` (module docstring); returns the lock document. With `since` (the
+    prereg sha256 an existing run started with) only that prereg and the ones accepted after it are accepted."""
+    path = lock_path(root, prereg.table)
     if not path.exists():
+        if since is not None:
+            raise TokstudyError(f"{path}: no prereg lock, but a run of table {prereg.table} exists (under {since})")
         lock = {
             "format": "tokstudy-prereg-lock/1",
             "table": prereg.table,
@@ -95,12 +104,18 @@ def lock_prereg(root: Path, prereg, *, amend: str | None = None) -> dict[str, An
     lock = read_json(path, "prereg-lock")
     if lock.get("table") != prereg.table:
         raise TokstudyError(f"{path}: the lock of table {lock.get('table')!r}, not {prereg.table!r}")
-    if prereg.sha256 in {entry["sha256"] for entry in lock["history"]}:
+    history = [entry["sha256"] for entry in lock["history"]]
+    if since is not None:
+        if since not in history:
+            raise TokstudyError(f"{path}: the lock does not hold the prereg {since} the run started with")
+        history = history[history.index(since) :]
+    if prereg.sha256 in history:
         return lock
     if not amend:
+        what = "the run started with or accepted after it" if since is not None else "accepted for the table"
         raise TokstudyError(
-            f"{prereg.path}: sha256 {prereg.sha256} differs from the prereg the table {prereg.table} "
-            f"was first run with ({lock['history'][-1]['sha256']}); a change needs --amend REASON"
+            f"{prereg.path}: sha256 {prereg.sha256} is not a prereg {what} (latest {history[-1]}); "
+            "a change needs --amend REASON"
         )
     lock["history"].append({"sha256": prereg.sha256, "file": prereg.path.name, "reason": amend, "at": now()})
     atomic_write_json(path, lock)

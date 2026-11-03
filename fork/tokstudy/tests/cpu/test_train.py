@@ -178,7 +178,7 @@ def test_every_arm_learns_and_stops_at_f_target_within_one_step(table, runs):
 
 def test_the_rate_is_the_wsd_of_the_flops_before_each_step(table, runs):
     prereg = load_prereg(table["prereg"])
-    wsd = prereg.wsd(CONFIG.lr)
+    wsd = prereg.lr_schedule(CONFIG.lr)
     for result in runs[1].values():
         before = 0
         for line in metrics(Path(result["dir"])):
@@ -373,7 +373,7 @@ def test_prereg_identity_and_signature(table, tmp_path):
     )
     q = load_prereg(signed)
     assert q.signed and q.sha256 != p.sha256 and q.f_target == p.f_target
-    w = p.wsd(1.0, endpoint=0.25)
+    w = p.lr_schedule(1.0, endpoint=0.25)
     assert (w.warmup_flops, w.end_flops) == (round(0.02 * p.f_target), round(0.25 * p.f_target))
     assert w.decay_start_flops == round(0.9 * round(0.25 * p.f_target))
 
@@ -457,3 +457,162 @@ def test_the_tables_preregs_load_and_their_budgets_are_the_analytic_ones(tlc_def
         "B0",
     )
     assert bilingual.stop_after("screen") == 0.5 and bilingual.stop_after("decision") is None
+    # the twin gates' preregs (TW-2, TW-3): the production cosine on FLOP progress, one budget point
+    tlc_twin, bilingual_twin = (load_prereg(prereg_dir / f"{name}-twin.toml") for name in ("tlc", "bilingual"))
+    assert (tlc_twin.kind, bilingual_twin.kind, tlc_twin.points, bilingual_twin.points) == (
+        "cosine",
+        "cosine",
+        (1.0,),
+        (1.0,),
+    )
+    assert tlc_twin.f_target == 3 * ir.flops_per_token(cfg, 512) * 500_000_000 and tlc_twin.mixture is None
+    assert bilingual_twin.f_target == 6 * macs_per_token(seed, "single", T=1024) * 400_000_000
+    assert bilingual_twin.mixture == bilingual.mixture and bilingual_twin.measure == "B0"
+
+
+# --- the prereg of an existing run (code review: branch and evaluation under another prereg) -------------------------
+
+
+def test_the_budget_fields_of_the_prereg_are_in_the_run_id(table, tmp_path):
+    """The FLOP convention (every step's F) and the budget points (where the stable checkpoints sit) change what a
+    run computes, so they enter the run id like F_target and the schedule; thresholds and seeds do not."""
+    arm, stream = table["arms"]["N2"], table["stream"]
+    ids = {}
+    for name, kw in {
+        "base": {},
+        "params": {"convention": "params"},
+        "points": {"points": (0.5, 1.0)},
+        "thresholds": {"extra": "[thresholds]\nn1_python_rel_gain = 0.05\n"},
+    }.items():
+        convention = kw.pop("convention", "matmul")
+        path = write_prereg(tmp_path / f"{name}.toml", f_target=table["f_target"], **kw)
+        path.write_text(path.read_text().replace('convention = "matmul"', f'convention = "{convention}"'))
+        ids[name] = T.setup(arm, stream=stream, prereg=load_prereg(path), seed=0, config=CONFIG).record["run_id"]
+    assert len({ids["base"], ids["params"], ids["points"]}) == 3 and ids["thresholds"] == ids["base"]
+
+
+def test_a_branch_or_an_evaluation_under_another_prereg_needs_the_lock(table, tmp_path):
+    """The review's reproduction: a branch under a prereg with another FLOP convention used to run (and count its
+    FLOPs under that convention) without --amend. Now a computation-changing prereg is refused with or without
+    --amend (it makes another run id), a prereg the lock does not hold for the run is refused, and a thresholds-only amendment is
+    accepted once it is in the lock; an in-place edit of the recorded file is caught the same way."""
+    prereg = tmp_path / "prereg.toml"
+    prereg.write_bytes(table["prereg"].read_bytes())
+    runs_root = tmp_path / "runs"
+    result = run(table, "N2", runs_root, prereg=prereg)
+    run_dir = Path(result["dir"])
+    lock_file = runs_root / "tlc-N" / registry.LOCK_FILE
+    before = lock_file.read_text()
+
+    params = tmp_path / "params.toml"
+    params.write_text(prereg.read_text().replace('convention = "matmul"', 'convention = "params"'))
+    with pytest.raises(TokstudyError, match="prereg budget or schedule"):
+        T.branch(run_dir, endpoint=0.25, prereg=params)
+    with pytest.raises(TokstudyError, match="prereg budget or schedule"):
+        T.branch(run_dir, endpoint=0.25, prereg=params, amend="another convention")
+    assert lock_file.read_text() == before and not (run_dir / "branches").exists()
+
+    thresholds = tmp_path / "thresholds.toml"
+    thresholds.write_text(prereg.read_text() + "[thresholds]\nn1_python_rel_gain = 0.03\n")
+    with pytest.raises(TokstudyError, match="needs --amend"):
+        T.branch(run_dir, endpoint=0.25, prereg=thresholds)
+    done = T.branch(run_dir, endpoint=0.25, prereg=thresholds, amend="threshold raised")
+    assert done["done"]
+    history = json.loads(lock_file.read_text())["history"]
+    assert [h["reason"] for h in history] == ["first run", "threshold raised"]
+    assert registry.read_events(run_dir / "branches" / "E0.25")[-1]["prereg_sha256"] == load_prereg(thresholds).sha256
+    T.branch(run_dir, endpoint=0.5, prereg=thresholds)  # accepted after the run's prereg: no amendment needed
+
+    prereg.write_text(prereg.read_text() + "# edited in place\n")  # the recorded path, another sha256
+    with pytest.raises(TokstudyError, match="needs --amend"):
+        T.branch(run_dir, endpoint=0.5)
+    with pytest.raises(TokstudyError, match="needs --amend"):
+        T.reopen(run_dir, same_code=False, verify_stream=False)
+    assert (
+        T.reopen(run_dir, prereg=thresholds, same_code=False, verify_stream=False).prereg.sha256 == history[1]["sha256"]
+    )
+
+
+def test_a_run_outside_the_registry_layout_accepts_only_its_own_prereg(table, tmp_path):
+    result = run(table, "N2", tmp_path / "runs")
+    moved = tmp_path / "elsewhere" / "run"
+    moved.parent.mkdir()
+    Path(result["dir"]).rename(moved)
+    T.reopen(moved, same_code=False, verify_stream=False)  # its own prereg: fine anywhere
+    other = tmp_path / "other.toml"
+    other.write_text(table["prereg"].read_text() + "[thresholds]\nx = 1\n")
+    with pytest.raises(TokstudyError, match="no prereg lock of table tlc-N next to the run"):
+        T.reopen(moved, prereg=other, same_code=False, verify_stream=False, amend="moved")
+
+
+# --- the cosine schedule of the twin gates (TW-2, TW-3) --------------------------------------------------------------
+
+
+def test_a_cosine_prereg_trains_on_flop_progress_without_stable_checkpoints(table, tmp_path):
+    path = tmp_path / "cosine.toml"
+    path.write_text(
+        'format = "tokstudy-prereg/1"\ntable = "tlc-N"\n[budget]\nconvention = "matmul"\n'
+        f"F_target = {table['f_target']}\npoints = [1.0]\n[context]\nK_train = {K}\nK_eval = 64\n"
+        '[schedule]\nkind = "cosine"\nwarmup = 0.1\nfloor = 0.1\n',
+        encoding="utf-8",
+    )
+    prereg = load_prereg(path)
+    assert prereg.kind == "cosine" and prereg.stable_flops() == {}
+    result = run(table, "N2", tmp_path / "runs", prereg=path)
+    run_dir = Path(result["dir"])
+    assert result["done"] and result["schedule"]["kind"] == "cosine" and not (run_dir / "stable").exists()
+    cos = prereg.lr_schedule(CONFIG.lr)
+    lines = metrics(run_dir)
+    flops_before = [0] + [x["flops"] for x in lines[:-1]]
+    assert [x["lr"] for x in lines] == [cos.lr(f) for f in flops_before]
+    middle = next(x for x in lines if x["progress"] > 0.5)
+    assert middle["lr"] == pytest.approx(
+        schedule.cosine_at(flops_before[lines.index(middle)] / table["f_target"], peak=CONFIG.lr, warmup=0.1)
+    )
+    with pytest.raises(TokstudyError, match="no decay branches"):
+        T.branch(run_dir, endpoint=0.5)
+    bad = path.read_text().replace("points = [1.0]", "points = [0.5, 1.0]")
+    for body, message in ((bad, "points must be \\[1.0\\]"), (path.read_text() + "decay_start = 0.9\n", "unknown")):
+        path.write_text(body)
+        with pytest.raises(TokstudyError, match=message):
+            load_prereg(path)
+
+
+# --- the loss of one step (code review: pad targets and the ratio-loss weights were untested) ------------------------
+
+
+@pytest.mark.parametrize("arm", ["N0", "N1"])
+def test_the_step_loss_is_the_per_target_ce_whatever_the_micro_batch(table, arm):
+    """One step's CE over micro batches of 1 row and of the whole batch (right padding) equals the CE computed row by
+    row without padding; the H-Net ratio term is the ratio loss of each micro batch weighted by its share of the
+    step's positions."""
+    from torch.nn import functional as F
+
+    rows = []
+    for row in S.rows_for_arm(table["stream"], T._codec(table["arms"][arm])):
+        if not rows or len(row.ids) != len(rows[0].ids):
+            rows.append(row)
+        if len(rows) == 4:
+            break
+    assert len({len(r.ids) for r in rows}) == 4  # every row a different length: padding is exercised
+    n_targets = sum(len(r.ids) - 1 for r in rows)
+    n_positions = sum(len(r.ids) for r in rows)
+    s = T.setup(table["arms"][arm], stream=table["stream"], prereg=load_prereg(table["prereg"]), seed=0, config=CONFIG)
+    manual_ce, manual_ratio = 0.0, 0.0
+    with torch.no_grad():
+        for r in rows:
+            ids, forced, valid = T._tensors([r], s.device)
+            out = s.model(ids, forced, valid) if arm == "N1" else None
+            logits = out.logits if out is not None else s.model(ids)
+            manual_ce += float(F.cross_entropy(logits[0, :-1].float(), ids[0, 1:], reduction="sum"))
+            if out is not None:
+                manual_ratio += float(out.ratio_loss) * len(r.ids) / n_positions
+    for micro in (1, 4):
+        parts = {"ce_sum": 0.0, "ratio": 0.0}
+        for k in range(0, len(rows), micro):
+            got = T.step_losses(s, rows[k : k + micro], n_targets, n_positions)
+            parts["ce_sum"] += got["ce_sum"]
+            parts["ratio"] += got.get("ratio", 0.0)
+        assert parts["ce_sum"] / n_targets == pytest.approx(manual_ce / n_targets, rel=1e-5)
+        if arm == "N1" and micro == 1:
+            assert parts["ratio"] == pytest.approx(manual_ratio, rel=1e-6)

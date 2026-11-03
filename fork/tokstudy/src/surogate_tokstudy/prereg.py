@@ -7,7 +7,9 @@ needs an amendment with a reason).
     table = "tlc-N"
     [budget]       convention = "matmul", F_target = 1.642e17, points = [0.25, 0.5, 1.0]
     [context]      K_train = 2048, K_eval = 2048           # byte positions per training row; text bytes per eval doc
-    [schedule]     warmup = 0.02, decay_start = 0.9, floor = 0.1, shape = "linear"
+    [schedule]     warmup = 0.02, decay_start = 0.9, floor = 0.1, shape = "linear"   # WSD (default kind)
+                   kind = "cosine", warmup = 0.02, floor = 0.1     # the twin gates' production schedule; then
+                                                                   # points = [1.0] (no stable phase, no branches)
     [stages.<name>] stop_after = 0.5                        # optional: the main run halts at that point's stable
                                                             # checkpoint (screening); default stage "decision"
     [mixture]      py = 0.7, en = 0.3                       # optional: the stream's shares by domain
@@ -30,7 +32,7 @@ from typing import Any
 from .arms import TABLES
 from .canonical import TokstudyError, check_format, sha256_bytes
 from .flops import CONVENTIONS
-from .schedule import SHAPES, WSD, wsd
+from .schedule import KINDS, SHAPES, WSD, Cosine, cosine, wsd
 from .stream import MIN_K, check_mixture
 
 TOP_KEYS = {
@@ -67,8 +69,32 @@ class Prereg:
     signed: bool
     doc: Mapping[str, Any] = field(repr=False)
 
-    def wsd(self, peak: float, endpoint: float = 1.0) -> WSD:
+    @property
+    def kind(self) -> str:
+        return self.schedule.get("kind", "wsd")
+
+    def lr_schedule(self, peak: float, endpoint: float = 1.0) -> WSD | Cosine:
+        """The run's schedule (endpoint 1) or, for WSD, the decay branch's at budget point `endpoint`."""
+        if self.kind == "cosine":
+            if endpoint != 1:
+                raise TokstudyError(f"{self.path}: a cosine schedule has no decay branches")
+            return cosine(self.f_target, peak=peak, warmup=self.schedule["warmup"], floor=self.schedule["floor"])
         return wsd(self.f_target, peak=peak, endpoint=endpoint, **self.schedule)
+
+    def stable_flops(self) -> dict[str, int]:
+        """{"E<e>": F} of the stable checkpoint of each budget point: the step that reaches decay_start * E_e
+        (none under a cosine schedule)."""
+        if self.kind == "cosine":
+            return {}
+        out = {}
+        for e in self.points:
+            end = self.f_target if e == 1 else round(e * self.f_target)
+            out[f"E{e:g}"] = round(self.schedule["decay_start"] * end)
+        return out
+
+    def budget(self) -> dict[str, Any]:
+        """The prereg's fields besides F_target and the schedule that change a run (registry: run id)."""
+        return {"convention": self.convention, "points": list(self.points)}
 
     def stop_after(self, stage: str) -> float | None:
         if stage not in self.stages:
@@ -124,16 +150,30 @@ def load_prereg(path: Path) -> Prereg:
     for name, value, low in (("K_train", k_train, MIN_K), ("K_eval", k_eval, 1)):
         if isinstance(value, bool) or not isinstance(value, int) or value < low:
             raise TokstudyError(f"{path}: context.{name} must be an integer >= {low}, got {value!r}")
-    schedule = {"warmup": 0.02, "decay_start": 0.9, "floor": 0.1, "shape": "linear"}
-    schedule |= _table(data, "schedule", set(schedule), path)
-    for name in ("warmup", "decay_start", "floor"):
-        schedule[name] = _number(schedule[name], f"{path}: schedule.{name}")
-    if not 0 <= schedule["warmup"] < schedule["decay_start"] < 1 or not 0 <= schedule["floor"] <= 1:
-        raise TokstudyError(f"{path}: schedule needs 0 <= warmup < decay_start < 1 and floor in [0, 1]: {schedule}")
-    if schedule["shape"] not in SHAPES:
-        raise TokstudyError(f"{path}: schedule.shape must be one of {SHAPES}")
-    if round(schedule["decay_start"] * points[0] * f_target) < round(schedule["warmup"] * f_target):
-        raise TokstudyError(f"{path}: the first budget point's decay would start inside the warmup")
+    kind = data.get("schedule", {}).get("kind", "wsd") if isinstance(data.get("schedule"), Mapping) else "wsd"
+    if kind not in KINDS:
+        raise TokstudyError(f"{path}: schedule.kind must be one of {KINDS}, got {kind!r}")
+    if kind == "cosine":
+        schedule = {"warmup": 0.02, "floor": 0.1}
+        schedule |= {k: v for k, v in _table(data, "schedule", {*schedule, "kind"}, path).items() if k != "kind"}
+        for name in ("warmup", "floor"):
+            schedule[name] = _number(schedule[name], f"{path}: schedule.{name}")
+        if not 0 <= schedule["warmup"] < 1 or not 0 <= schedule["floor"] <= 1:
+            raise TokstudyError(f"{path}: a cosine schedule needs 0 <= warmup < 1 and floor in [0, 1]: {schedule}")
+        if points != (1.0,):
+            raise TokstudyError(f"{path}: a cosine schedule has no stable phase: budget.points must be [1.0]")
+        schedule = {"kind": "cosine", **schedule}
+    else:
+        schedule = {"warmup": 0.02, "decay_start": 0.9, "floor": 0.1, "shape": "linear"}
+        schedule |= {k: v for k, v in _table(data, "schedule", {*schedule, "kind"}, path).items() if k != "kind"}
+        for name in ("warmup", "decay_start", "floor"):
+            schedule[name] = _number(schedule[name], f"{path}: schedule.{name}")
+        if not 0 <= schedule["warmup"] < schedule["decay_start"] < 1 or not 0 <= schedule["floor"] <= 1:
+            raise TokstudyError(f"{path}: schedule needs 0 <= warmup < decay_start < 1 and floor in [0, 1]: {schedule}")
+        if schedule["shape"] not in SHAPES:
+            raise TokstudyError(f"{path}: schedule.shape must be one of {SHAPES}")
+        if round(schedule["decay_start"] * points[0] * f_target) < round(schedule["warmup"] * f_target):
+            raise TokstudyError(f"{path}: the first budget point's decay would start inside the warmup")
     stages = dict(DEFAULT_STAGES) if "stages" not in data else {}
     for name, stage in data.get("stages", {}).items():
         stage = _table(data["stages"], name, {"stop_after"}, path)
