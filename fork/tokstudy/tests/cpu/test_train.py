@@ -457,6 +457,7 @@ def test_the_tables_preregs_load_and_their_budgets_are_the_analytic_ones(tlc_def
         "B0",
     )
     assert bilingual.stop_after("screen") == 0.5 and bilingual.stop_after("decision") is None
+    assert tlc.measure == "N0"  # M9: the 70/30 is by tokens of the reference arm (STUDY §3.3)
     # the twin gates' preregs (TW-2, TW-3): the production cosine on FLOP progress, one budget point
     tlc_twin, bilingual_twin = (load_prereg(prereg_dir / f"{name}-twin.toml") for name in ("tlc", "bilingual"))
     assert (tlc_twin.kind, bilingual_twin.kind, tlc_twin.points, bilingual_twin.points) == (

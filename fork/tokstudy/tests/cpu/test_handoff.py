@@ -20,6 +20,7 @@ from surogate_tokstudy.handoff import handoff
 from surogate_tokstudy.models.build import positional_limit
 from surogate_tokstudy.models.hnet import HNetConfig
 from surogate_tokstudy.prereg import load_prereg
+from surogate_tokstudy.stats import load_rules
 
 TOKSTUDY = Path(__file__).resolve().parents[2]
 REPO = TOKSTUDY.parents[1]
@@ -36,10 +37,15 @@ def test_the_committed_registry_agrees_with_its_prereg_and_waits_for_its_tokeniz
     prereg = load_prereg(PREREGS[project])
     assert data["table"] == prereg.table
     entries = {a["id"]: a for a in data["arm"]}
-    seeds = tomllib.loads(PREREGS[project].read_text(encoding="utf-8"))["seeds"]
-    assert set(entries) == set(seeds)  # every preregistered arm, nothing else
+    rules = load_rules(PREREGS[project])
+    planned = {arm for stage in rules.seeds.values() for arm in stage}
+    assert set(entries) - planned <= ({"B1", "B2", "B3"} if project == "bilingual" else set())  # decided by rank
+    assert planned <= set(entries)  # every preregistered arm is registered
     for arm_id, entry in entries.items():
-        assert len(entry["seeds"]) >= seeds[arm_id] and set(entry["stages"]) <= set(prereg.stages)
+        most = max(table.get(arm_id, 0) for table in rules.seeds.values())
+        if entry["kind"] != "bytes":  # M6 may add seeds up to seed_max; a flat-bytes floor never gets more
+            most = max(most, int(rules.extension["seed_max"]), *rules.by_rank.get("decision", ()))
+        assert len(entry["seeds"]) >= most and set(entry["stages"]) <= set(prereg.stages)
         if entry["kind"] == "subword":
             assert entry["tokenizer"]["sha256"] == arms.PLACEHOLDER
             path = (REGISTRIES[project].parent / entry["tokenizer"]["path"]).resolve()

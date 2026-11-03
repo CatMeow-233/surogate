@@ -32,13 +32,25 @@ en = 0.5
 [stream]
 measure = "B0"
 
-[seeds]
+[seeds.screen]  # STUDY §9.1, screening seeds
 B0 = 3
 B1 = 2
 B2 = 2
 B3 = 2
 B4 = 2
 B5 = 1
+
+[seeds.decision]  # STUDY §9.1: B0 3; B4 2 -> 3 if shortlisted; B1-B3 "按排名" (by screening rank) [建议]: the
+# first-ranked survivor 3 (as many as B0), the second 2 (M6 adds a third when |Delta| < 3 sigma)
+B0 = 3
+B4 = 3
+by_rank = [3, 2]
+
+[extension]  # M6 and M10, as in prereg/tlc.toml
+seed_sigma = 3.0
+seed_max = 3
+lr_resweep_gap = 0.02
+lr_resweep_points = 3
 
 [thresholds]  # read by the verdict (step S16); STUDY §9.2
 noninferior_abs = 0.005          # Delta <= +max(0.005 bit/byte, 0.5 % relative) in both languages

@@ -1,0 +1,46 @@
+# Preregistration of the native TOK-AB table tlc-T (STUDY §8.1, §8.4(a)-(d); TLC notebook §3.5, §11): the subword
+# arms trained on Surogate's native trainer and scored by `python -m surogate_tlc eval ... --dump-nll` (backend
+# "native"). Only `verdict` reads this file: the native runs are not trained by this package. Every value is a
+# proposal (the study's [建议]) until the owner signs [signature] before any pilot result, together with O-10.
+format = "tokstudy-prereg/1"
+table = "tlc-T"
+backend = "native"
+notes = """One checkpoint per native run at equal training data (the native primary view, equal bytes). The native NLL
+headers carry no training FLOPs or budget points: the equal-FLOPs view and the trend (§8.4(a)2-3) are recorded as
+unavailable and the rules read the equal-bytes view [待定 until the native writer records them]. The BPM
+cross-boundary rates come from `align` on the train split (evidence.bpm_cross_boundary)."""
+
+[roles]
+reference = "T0"     # own-qwen2: LR-PRE is tuned on it
+freqtrim = "T1"      # freqtrim, Qwen2 regex as is: route (a)
+fine = "T2"          # freqtrim, the fine regex (one variant, fixed before TOK-AB): route (b), the default lean
+own = ["T0", "T3"]   # own BPE: T0 own-qwen2, T3 own-python-digit (above bpm_cross_boundary_max a control arm only)
+vocab = {T0 = "F3", T1 = "F3", T2 = "F3", T3 = "F3"}  # F3: the winner's 8,192 (only while O-10(c) is open)
+
+[seeds]  # STUDY §8.1
+T0 = 3
+T1 = 2
+T2 = 2
+T3 = 2
+F3 = 2
+
+[extension]  # M6 and M10 (the notebook's TOK-AB rule: within 2 %, 3 more LR points each)
+seed_sigma = 3.0
+seed_max = 3
+lr_resweep_gap = 0.02
+lr_resweep_points = 3
+
+[thresholds]  # STUDY §8.4
+own_python_rel_gain = 0.01       # (a)1: own BPE at least 1 % better in Python BPB ...
+sigma_multiple = 2.0             # (a)2: ... and beyond 2 sigma_Delta
+own_english_rel_max_loss = 0.01  # (a)4: English not worse than +1 % relative
+bpm_cross_boundary_max = 0.05    # (a)5: an own BPE above 5 % cross-boundary BPM rate is a control, never selected
+pretok_max_loss = 0.02           # (b): the fine regex unless its Python BPB is > 2 % worse or its probes do not improve
+vocab_max_loss = 0.01            # (c): 8K only if neither language is > 1 % worse and EV-BIND improves
+narrowing_fraction = 0.5         # the trend rule (unavailable on native headers, see notes)
+bootstrap_resamples = 10000
+bootstrap_seed = 0
+
+[signature]
+signed_by = ""
+date = ""

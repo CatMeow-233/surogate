@@ -24,10 +24,10 @@
 | TLC 的 Python 来源与许可政策（必须签） | Stack-v3-L2 python，`permissive` 且非 vendor（profile `tlc-python-permissive`）；备选 `tlc-python-all`（加 `no_license`）或 Code-L2 消融 | 第 1 步 |
 | 双语 zh 来源池（B-O12，必须签） | 网页池 CCI3 + ChineseWebText + IndustryCorpus（`bilingual-zh-web`）；备选加 Tele（`bilingual-zh-apache`）或全部 8 个来源 | 第 1 步 |
 | 双语平行数据（B-O12，必须签） | UN PC en-zh（UltraData 之外的例外，`bilingual-parallel-unpc`） | Bridge 数据（不在本研究内） |
-| 两张表的阈值、预算与种子（必须签） | [prereg/tlc.toml](../prereg/tlc.toml)、[prereg/bilingual.toml](../prereg/bilingual.toml) 中的 [建议] 值，签在 `[signature]`，在任何 pilot 结果出来之前 | 第 6 步 |
-| TLC 流的混合 | prereg 的 `[mixture]` 现在是按字节 py 0.7 / en 0.3；研究的 70/30 是按 token 定的，用默认 freqtrim 的估计字节/token 折成字节约为 63/37 [估计]。签字前二选一 | 第 5 步 |
+| 三张表的阈值、预算、种子与扩展规则（必须签） | [prereg/tlc.toml](../prereg/tlc.toml)、[prereg/bilingual.toml](../prereg/bilingual.toml)、原生 TOK-AB 表的 [prereg/tlc-T.toml](../prereg/tlc-T.toml) 中的 [建议] 值（研究 §8.4(a)–(e)、§9.2 的阈值；M6：\|Δ\| < 3σ_Δ 时补一个种子、至多 3 个；M10：与参照相差 < 2% 时各补 3 点 LR 再判；双语按阶段的种子：判定阶段 B0 3、B4 3、按初筛排名的第一名 3、第二名 2），签在 `[signature]`，在任何 pilot 结果出来之前；孪生门的 [prereg/tlc-twin.toml](../prereg/tlc-twin.toml)、[prereg/bilingual-twin.toml](../prereg/bilingual-twin.toml) 一并签 | 第 5、6 步 |
+| TLC 流的混合 | prereg 的 `[mixture]` 是 py 0.7 / en 0.3，按参照臂 N0 的 token 计（`[stream] measure = "N0"`，研究 M9 与 §3.3：70/30 按 token 定，由一个参照 tokenizer 定下文档清单，所有臂共用）；按第 1 步的备料预算约等于按字节 63/37 [估计]。另一读法是按字节 0.63/0.37（`measure = "bytes"`，依赖默认 freqtrim 的估计字节/token），签字时可改 | 第 6 步 |
 | 双语研究期间的去污染 | 文档集固定为 `en_word13 + zh_han25`（不依赖 tokenizer）；B-O11 冻结之后恢复 `token13` | 第 2 步 |
-| Track S 长度归一的单位 | 研究中按字节（`eval-tasks --length-unit byte`） | 探针（S15，未落地） |
+| Track S 长度归一的单位 | 研究中按字节（`eval-tasks --length-unit byte`；本包的 `probe` 只按字节） | 第 7 步 |
 
 ## 1. 备料（owner 主机，`fork/.venv-corpora`）
 
@@ -55,7 +55,7 @@ $C -m surogate_corpora compose --project tlc --export "$D/tlc-python" --export "
     --seed 0 --val-fraction 0.01 --out "$TLC_RUNS/corpus/corpus.toml"
 ```
 
-- `compose` 打印按种类的保留文本字节与份额：TLC 的配比在这里按字节定下（上表的预算给出约 63/37），与 prereg 的 `[mixture]` 对照；不符就调预算重做计划，不要在流里重新加权。
+- `compose` 打印按种类的保留文本字节与份额：上表的预算给出约 63/37（按字节），即按 N0 的 token 约 70/30 [估计]。研究的流（第 6 步）按 prereg 的 `[mixture]` 以 N0 的 token 计数，取最稀缺的领域决定总量：按字节的份额与 63/37 相差太多时，被丢掉的是多余领域的文档，原生 TOK-AB 的 shard 却会全部用上，所以这时先调预算重做计划，再建流。
 - TLC 语料 spec 的位置决定英文文档的键（`来源名/相对路径:行号`），也就决定了划分：spec 一旦写定，只能连同它引用的目录整体移动。合成绑定程序与去污染报告按 [TLC 运行手册 G0 第 4 步](../../tlc/docs/runbook.md#g0-环境) 加进这份 spec。
 - 双语：先按双语运行手册生成 Track S（`synth --out data/corpus/track_s`），把 Track S 的 D_seed 成分写成一个 `[[source]]` 文件（`name = "track-s-seed"`、`kind = "synthetic"`、`files = ["track_s/seed/*.jsonl"]`、`licence = "LicenseRef-generated"`、`licence_verified = true`），再导出到语料根目录下并合成：
 
@@ -177,7 +177,8 @@ $K -m surogate_tokstudy align --teacher "$QWEN/tokenizer.json@$QWEN_SHA" --token
 
 ```bash
 K=fork/.venv-tokstudy/bin/python
-$K -m surogate_tokstudy stream --prereg fork/tokstudy/prereg/tlc.toml --tlc "$TLC_RUNS/corpus/corpus.toml" --out data/tokstudy/tlc/stream
+$K -m surogate_tokstudy stream --prereg fork/tokstudy/prereg/tlc.toml --tlc "$TLC_RUNS/corpus/corpus.toml" \
+    --measure fork/tokstudy/arms/tlc.toml:N0 --out data/tokstudy/tlc/stream
 $K -m surogate_tokstudy eval prefix --arms fork/tokstudy/arms/tlc.toml --prereg fork/tokstudy/prereg/tlc.toml --tlc "$TLC_RUNS/corpus/corpus.toml" --out data/tokstudy/tlc/evalset
 $K -m surogate_tokstudy stream --prereg fork/tokstudy/prereg/bilingual.toml --bilingual data/splits/manifest.json \
     --measure fork/tokstudy/arms/bilingual.toml:B0 --out data/tokstudy/bilingual/stream
@@ -206,7 +207,30 @@ $K -m surogate_tokstudy train --arms fork/tokstudy/arms/bilingual.toml --arm B2 
 
 ## 7. 判定与冻结
 
-**判定**（`verdict`，S16）：统计与判定未落地，命令以退出码 2 报出所属步骤。判定规则在 prereg 中（TLC：N1 晋升的五个条件；双语：两种语言都不劣、至少一种语言好 ≥ 1% 且超过 2σ、Track S 不低于 B0 − 1σ、两种预算视角同号且走向不缩小，平局归 B0）。
+**判定**（`verdict`，S16；规则见 [README 的“统计与判定”](../README.md#统计与判定)）。每张表一次，读该表签了字的 prereg 与全部 NLL 文件；没签字的 prereg 被拒绝（`--draft` 只给草稿）。
+
+```bash
+K=fork/.venv-tokstudy/bin/python
+R=data/tokstudy/runs
+# 孪生门（第 5 步）：TW-2 / TW-3 的记录
+$K -m surogate_tokstudy verdict twin --prereg fork/tokstudy/prereg/tlc-twin.toml --tokstudy data/tokstudy/tlc/twin/N0.nll \
+    --production data/tokstudy/tlc/twin/native.nll --out data/tokstudy/tlc/twin.json
+# tlc-N：N1 晋升与否（证据文件写 owner 的集成签字；吞吐从 --runs 的 metrics 读）
+$K -m surogate_tokstudy verdict --prereg fork/tokstudy/prereg/tlc.toml --nll data/tokstudy/tlc/nll/*.nll --runs "$R" \
+    --twin data/tokstudy/tlc/twin.json --evidence data/tokstudy/tlc/evidence.toml --out data/tokstudy/tlc/verdict.json
+# 双语：先初筛，再用初筛的 shortlist 判定（Track S 探针每个运行一份）
+$K -m surogate_tokstudy probe "$R/bilingual-B/B2-s0-$RUN_ID" --bilingual-items data/corpus/track_s/items/E1.dev.jsonl --bilingual-items data/corpus/track_s/items/E3ctx.dev.jsonl --out data/tokstudy/bilingual/probe/B2-s0.probe
+$K -m surogate_tokstudy verdict --prereg fork/tokstudy/prereg/bilingual.toml --stage screen --nll data/tokstudy/bilingual/nll/*E0.5.nll \
+    --runs "$R" --twin data/tokstudy/bilingual/twin.json --out data/tokstudy/bilingual/screen.json
+$K -m surogate_tokstudy verdict --prereg fork/tokstudy/prereg/bilingual.toml --stage decision --nll data/tokstudy/bilingual/nll/*.nll \
+    --probe data/tokstudy/bilingual/probe/*.probe --runs "$R" --twin data/tokstudy/bilingual/twin.json \
+    --evidence data/tokstudy/bilingual/evidence.toml --out data/tokstudy/bilingual/verdict.json
+# 原生 TOK-AB（tlc-T）：TLC 的 eval --dump-nll 文件；BPM 跨边界率来自第 3 步的 align
+$K -m surogate_tokstudy verdict --prereg fork/tokstudy/prereg/tlc-T.toml --nll data/tokstudy/tlc/native-nll/*.nll \
+    --evidence data/tokstudy/tlc/native-evidence.toml --out data/tokstudy/tlc/tok-ab.json
+```
+
+证据文件（TOML 或 JSON）只放本包的文件里没有的东西：`integration_signoff`（owner 接受集成清单）、`throughput`（不给 `--runs` 时的吞吐比）、`bpm_cross_boundary`（各 own-BPE 臂的跨边界率）、`probe_improved`、`evbind_improved`、`lr_resweep_done`（M10 补扫过的臂）、`shortlist`（双语判定阶段：初筛结果的 `decision.shortlist`）。判定结果为 `extend` 时按其理由补种子（M6）、补 LR 点（M10）或延长（走向缩小），再重跑判定；`tie` 归参照。
 
 **冻结（交接的反方向）。** 研究包从不写进项目；获胜臂的 tokenizer 本来就是项目自己建的文件，冻结是项目的步骤，`handoff.json` 记下它必须有的 sha256：
 

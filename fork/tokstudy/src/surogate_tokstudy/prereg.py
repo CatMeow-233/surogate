@@ -14,7 +14,7 @@ needs an amendment with a reason).
                                                             # checkpoint (screening); default stage "decision"
     [mixture]      py = 0.7, en = 0.3                       # optional: the stream's shares by domain
     [stream]       measure = "bytes"                        # the mixture's unit: bytes, or a subword arm's tokens
-    [seeds], [thresholds], [signature], notes               # read by the verdict (S16); kept as data here
+    [seeds], [extension], [thresholds], [signature], notes  # read by the verdict (stats.load_rules)
 
 This module checks the parts training and evaluation read; the thresholds are the verdict's. A prereg is signed when
 `signature.signed_by` and `signature.date` are both set; run records carry the flag, so the verdict can refuse
@@ -36,6 +36,7 @@ from .schedule import KINDS, SHAPES, WSD, Cosine, cosine, wsd
 from .stream import MIN_K, check_mixture
 
 TOP_KEYS = {
+    "extension",
     "format",
     "table",
     "budget",

@@ -18,16 +18,16 @@
 | S11–S12 | SSD/EMA/卷积 kernel、Mamba-2、A0 孪生（TW-1）、H-Net、LM 包装、双语 trunk 适配器、由臂构建模型 | — | CPU 上已落地（见下文“模型与内核”）；`triton` 路线与 G0-ts 未在 GPU 上运行 |
 | S13 | FLOPs 与 H-Net 配置匹配 | `flops` | 已落地（见下文“FLOPs”） |
 | S14 | 训练循环（按 FLOP 进度的 WSD 与衰减分支） | `train`、`branch` | CPU 上已落地（见下文“训练”）；GPU 上未运行 |
-| S15 | 评测（公共字节前缀上的 BPB）与探针 | `eval`、`probe` | BPB 部分已落地（见下文“评测”）；探针 `probe` 与分段带状态打分未落地 |
-| S16 | 统计、预注册与判定 | `verdict` | 运行登记、预注册文件的读取与锁定已落地（见下文“运行登记与预注册”）；统计与判定 `verdict` 未落地 |
+| S15 | 评测（公共字节前缀上的 BPB）与探针 | `eval`、`probe` | 已落地（见下文“评测”“探针”）；“分段带状态打分与一次打分相同”未落地（每篇评测文档都在 K_eval 内一次打分，没有路径需要它） |
+| S16 | 统计、预注册与判定 | `verdict`、`verdict twin` | 已落地（见下文“运行登记与预注册”“统计与判定”）；在合成的 NLL 集上测过，没有真实运行 |
 | S17 | GPU：G0-ts、G0.5-ts、kernel 一致性、孪生门 | `bench` | 未运行；步骤见 [运行手册](docs/runbook.md) |
 | 接线（工作流 S5） | 导出 → 项目语料 spec（[fork/corpora](../corpora/README.md) 的 `compose`）、tokenizer 交接（`arms --pin`）、运行手册与实测记录、各项目文档中的 owner 决定 | `arms --pin`、`arms --tlc/--bilingual` | 已落地；备料与 GPU 步骤未运行 |
 
-未落地的命令以退出码 2 报出所属步骤（`python -m surogate_tokstudy` 列出全部命令）。
+未落地的命令（现在只剩 S17 的 `bench`）以退出码 2 报出所属步骤（`python -m surogate_tokstudy` 列出全部命令）。
 
 工作流的 S2（“tokenizer 构建器与内在指标”）对应实现规格的 S6、S7 中的 tokenizer 构建器部分，以及 S8、S10；S9 当时只落地了 S10 需要的文档类型。工作流的 S3（“字节级动态分块模型与子词 LM，同一后端，CPU 验证”）对应实现规格的 S11、S12，以及 S7 中双语的 `forward_hidden`/`logits`；臂到模型的构建（`models.build`）是规格未单列、训练步骤（S14）要用的入口。工作流的 S4（“pilot 训练器、BPB 评测、运行登记”）对应实现规格 S9 的其余部分（按项目分帧、截断、训练流）、S13、S14、S15 中的 BPB 部分，以及 S16 中的运行登记与预注册的读取、锁定；S15 的探针、S16 的统计与判定、S6 中 TLC 原生的按字节 BPB、S7 中双语的 `eval.length_unit` 不在其中。
 
-工作流的 S5（“按项目接线：导出到两个项目的语料格式与 tokenizer 交接；文档、运行手册与各项目文档中的 owner 决定”）对应实现规格 S6 中 TLC 原生的按字节 BPB（`surogate_tlc.eval.loss`）、S7 中双语的 `eval.length_unit` 与研究期间的去污染规则（文档），§1.3 的 tokenizer 交接（`handoff.py`、两张表的登记），§10 的运行手册（[docs/runbook.md](docs/runbook.md)）与 [docs/measurements.md](docs/measurements.md)；另加规格没有的 `surogate_corpora compose`。S15 的探针、S16 的统计与判定仍未落地。
+工作流的 S5（“按项目接线：导出到两个项目的语料格式与 tokenizer 交接；文档、运行手册与各项目文档中的 owner 决定”）对应实现规格 S6 中 TLC 原生的按字节 BPB（`surogate_tlc.eval.loss`）、S7 中双语的 `eval.length_unit` 与研究期间的去污染规则（文档），§1.3 的 tokenizer 交接（`handoff.py`、两张表的登记），§10 的运行手册（[docs/runbook.md](docs/runbook.md)）与 [docs/measurements.md](docs/measurements.md)；另加规格没有的 `surogate_corpora compose`。S15 的探针与 S16 的统计与判定在代码审查之后落地（`probes.py`、`stats.py`），同时补上三张表 prereg 中的 M6、M10 规则与按阶段的种子数，以及原生 TOK-AB 表的 [prereg/tlc-T.toml](prereg/tlc-T.toml)。
 
 ## 测量契约
 
@@ -144,6 +144,26 @@ H-Net 一行的 FLOPs = 外层（编码器、路由、残差投影、解码器�
 
 `eval score` 给一个运行的一个预算点打分（1 为 `final.pt`，其余为对应分支的 `final.pt`），写 `tokstudy-nll/1`：首行为表头（表、后端 `tokstudy-torch`、臂与其 sha256、运行 id、种子、预算点、检查点及其 sha256、步数、F、π、K_eval、评测集 sha256、精度），之后每篇文档一行：文本字节、来自文本段的目标的 NLL 之和（nats）与个数，另列 `<eos>` 目标（敏感性变体）与其他特殊 token 目标的 NLL。每篇文档一次前向（按长度分批、右侧补齐；因果，补齐不影响真实位置）；要求第一个位置是特殊 token，并核对文本 token 的字节之和等于文档的文本字节。BPB(领域) = Σ nll_nats /(ln 2 × Σ 字节)，按字节加权；双语只在同一语言内比较。评测不要求与训练时相同的代码 commit：运行 id 用记录中的 commit 重算（其余输入照样核对），表头另记评测时的 commit；续训与衰减分支则要求同一 commit。测试：均匀 logits 的模型在两张表的六种模型上都给出 n_text_targets · ln V /(ln 2 · 字节)；零合并 BPE 上的 `SubwordLM` 与权重相同（行按 BPE 的 id 重排）的 `ByteLM` 给出相同的逐文档 NLL；分批与单篇结果相同；公共前缀等于暴力枚举的最大可行边界。
 
+## 探针
+
+`probe`（`probes.py`，`tokstudy-probe/1`）给一个运行的一个预算点在候选题上打分。题目（`tokstudy-probe-items/1`）是上下文、候选所续写的文本 `stem` 与候选；候选的文档是“上下文 + 一段 stem + 候选”，各段分别编码，所以 token 不会跨过上下文的特殊 token 合并。双语 Track S 的排序题（`bilingual-item/1`，用项目自己的 `surogate_bilingual.eval.items.load_items` 读，`--bilingual-items`）换成同样的形式：`<eos>`、问题之前的提示段、问题作 stem、`answer_sep + 候选` 作候选，领域是答案语言；生成题（E4）没有候选，跳过。
+
+- **可打分**：在该臂的编解码器下，stem + 候选的编码以 stem 的编码开头且更长，每个候选都如此；有合并跨过边界时该题对该臂不可打分并记下原因。字节与 H-Net 臂总是可打分。判定只在表中每个臂都可打分的题上比较，覆盖率按臂报告。
+- **分数**：每个候选的 token NLL 之和（nats）与字节数；候选字节数相同按总和排序，不同按每字节，token 数从不进入（M7：按字节归一）；`gold_logprob_per_byte` 是判定读的连续读数。
+- 测试：构造的跨边界合并恰好不可打分；均匀 logits 下候选 NLL 是 token 数 × ln V；子词、字节与 H-Net 三种真实的小模型上，候选 NLL 等于“stem + 候选”与“stem”两篇文档的 NLL 之差（`score_documents`）；Track S 题的转换；`probe` 命令给训练过的运行打分。
+
+## 统计与判定
+
+`verdict`（`stats.py`，`tokstudy-verdict/1`）读一张表签了字的 prereg 与该表全部 NLL 文件，给出每个臂的判定（`replace`、`keep`、`tie`、`extend`、`eliminated`、`floor-only`）、全部条件与理由，以及表的结论；`verdict twin` 写孪生门记录（`tokstudy-twin/1`）。
+
+- **拒绝**：混了表或后端、不是 prereg 的表；不同评测集（`evalset_sha256`）或不同文档；同一（臂、种子、预算点）有两份；文件的训练或评测 prereg 不被接受（不给 `--runs` 时只接受判定所用的 prereg；给了 `--runs` 时接受该表 prereg 锁的历史，且判定所用的必须是最新的）；prereg 没签字（`--draft` 只给标为 draft 的草稿）。本包的表没有孪生门记录或门没过，标为 internal-only；原生表不需要孪生门。
+- **统计**（M6）：每个运行每个领域 BPB = Σ nll /(ln 2 × Σ 字节)。挑战臂对参照臂：种子均值、Δ 与相对 Δ；合并的种子 SD（所有至少两个种子的臂）给 σ_seed = s_p × √(1/n_X + 1/n_R)；文档 bootstrap（所有运行用同一组重抽的文档，次数与种子来自 prereg，生成器按比较的名字定种）给 σ_boot；σ = √(σ_seed² + σ_boot²)。
+- **视角**（M5、M8）：等 FLOPs 直接比较各预算点；等字节把各臂（训练字节，BPB）按 log-log 在参照臂 F_target 处的训练字节上插值，在预算点范围外记为不可用；两种视角符号相反判 `tie`；最后两个预算点之间领先缩小超过 `narrowing_fraction` 判 `extend`。原生表每个运行只有一个检查点，表头没有训练 FLOPs：它的主视角是等字节，等 FLOPs 视角与走向记为不可用。
+- **扩展规则**（prereg 的 `[extension]`）：M6，决定性比较的 |Δ| < 3σ 且某臂少于 3 个种子时补一个；M10，挑战臂与参照相差 < 2% 时先各补 3 点 LR（证据 `lr_resweep_done`）；种子少于 prereg 计划数也是 `extend`。
+- **各表的规则**：tlc-N（研究 §8.4(e)）：H-Net 臂对 N0，Python 好 ≥ 2% 且超过 2σ、英文不差于 +0.5%、走向不缩小、等字节同号、吞吐 ≥ 0.5 倍、owner 集成签字；字节臂只作下限；表的结论 `promote` 只列晋升的臂，集成路线由 owner 定（§8.5）。bilingual-B（§9.2）：初筛淘汰在某种语言上差 > 2% 且超过 2σ 的臂，shortlist 为 B4（未被淘汰时）加排名靠前的存活臂，至多两个；判定阶段两种语言都不劣（Δ ≤ max(0.005, 0.5% × BPB_B0)）、至少一种语言好 ≥ 1% 且超过 2σ、Track S（`--probe`）不低于 B0 − 1σ、等字节同号、走向不缩小，B4 另需吞吐与签字；多臂通过时平均增益最大者胜，平局归 B0。tlc-T（§8.4(a)–(c)，原生）：(b) 细分正则臂 T2 是 freqtrim 的选择，除非它的 Python BPB 比 Qwen 原版正则 T1 差 > 2% 或探针没有改善；(a) own-BPE（T0、T3）取代该 freqtrim 臂要 Python 好 ≥ 1% 且超过 2σ、英文不差于 +1%、BPM 跨边界率 ≤ 5%（超过者只作对照，不可选）；(c) 8K 臂 F3 只在两种语言都不差于 1% 且 EV-BIND 改善时取代 16K；(d) 数字逐位不变。
+- **证据文件**：本包的文件里没有的输入（owner 签字、BPM 跨边界率、探针与 EV-BIND 是否改善、M10 是否补扫、双语判定阶段的 shortlist、不给 `--runs` 时的吞吐比）；给 `--runs` 时吞吐是各臂主运行 `metrics.jsonl` 中 bytes/s 的中位数之比。
+- 测试（合成的 NLL 集，效应已知）：各规则给出预期的判定（replace、keep、tie、extend、eliminated、floor-only，原生表的 (a)–(c)、双语的 Track S）；bootstrap 可复现、换种子即变；合并种子 SD 等于手算值；插值是 log-log；各种拒绝；修订过的 prereg 经锁接受；孪生门不过或没跑时标 internal-only；命令行。
+
 ## 运行登记与预注册
 
 - **预注册**（`prereg.py`，`tokstudy-prereg/1`）：[prereg/tlc.toml](prereg/tlc.toml) 与 [prereg/bilingual.toml](prereg/bilingual.toml) 写入了预算口径、F_target、预算点 {0.25, 0.5, 1.0}、K_train/K_eval、WSD 参数、阶段、混合与其单位、每臂种子数，以及判定阈值（STUDY §8.4(e)、§9.2；由 S16 的判定读取）。全部是 [建议]，`[signature]` 为空，等 owner 签字。F_target：TLC 为 A0 在 0.8B token 处（3 × `ir.flops_per_token` × 8e8 = 1.642e17），双语为 B0（种子几何，T = 1024）在 0.8B token 处（6 × MACs × 8e8 = 5.222e17）；测试由两个项目的公式重算。文件字节的 sha256 是它的身份，记入每个运行记录。孪生门另有 [prereg/tlc-twin.toml](prereg/tlc-twin.toml)（TW-2）与 [prereg/bilingual-twin.toml](prereg/bilingual-twin.toml)（TW-3）：余弦调度、只有预算点 1.0，用自己的运行根目录（运行手册第 5 步）。
@@ -154,7 +174,9 @@ H-Net 一行的 FLOPs = 外层（编码器、路由、残差投影、解码器�
 - **行的长度**：规格写“子词行携带 t_arm 个 token”，同时要求两臂的行覆盖同样的字节区间；两者只能择一。这里取后者：行是所有臂共用的 K_train 位置字节窗口，t_arm 作为名义平均长度记录（显存规划用它的上界 K_train）。
 - **FLOPs 口径**：规格的 652,889,088（双语种子每 token）是 `params` 口径；默认的 `matmul` 口径（与 TLC 原生的 `ir.flops_per_token` 一致、F_target 用它）给出 652,738,560，差的是 norm 参数。prereg 记录所用口径。
 - **`stop_after`** 停在该预算点的稳定检查点（0.9·e），即规格所说初筛花费 0.525 F_dec 的读法；分支与“F_target = E 的运行”逐位相同的前提是绝对预热相同。
-- **未落地**：S15 的探针与“分段带状态打分与一次打分相同”（每篇评测文档都在 K_eval 内一次打分，现在没有需要它的路径）；S16 的统计与判定；TLC 的 `force_lexeme_starts` 消融。S6 中 TLC 原生的按字节 BPB 与 `--dump-nll`、S7 中双语的 `eval.length_unit` 随工作流的 S5 落地。
+- **未落地**：S15 的“分段带状态打分与一次打分相同”（每篇评测文档都在 K_eval 内一次打分，现在没有需要它的路径）；TLC 的 `force_lexeme_starts` 消融。S6 中 TLC 原生的按字节 BPB 与 `--dump-nll`、S7 中双语的 `eval.length_unit` 随工作流的 S5 落地。
+- **原生表的视角**：规格要原生 TOK-AB 报告插值出的等 FLOPs 视角（M5），但 TLC 的 `--dump-nll` 表头没有训练 FLOPs 与预算点；判定在原生表上只读等字节视角，等 FLOPs 视角与走向记为不可用 [待定：原生写出器补上这两项之后再加]。
+- **双语判定阶段的排名**：prereg 的 `by_rank` 种子数按初筛排名给出；判定阶段从证据文件的 `shortlist`（初筛判定的结论）读排名。
 - **双语的 D_seed**：双语项目的 D_seed 混合（Track S、带标签文档等，`surogate_bilingual.data.mixture`）只在写 shard 时生成，不输出文档清单；本包的双语流目前读 `seed_train` 的文档并按中英平衡混合，要与 D_seed 完全一致，需要项目先导出该混合的文档清单 [待定]。
 - **新增**：`stream` 命令（规格的文件树里有 `stream.py` 但命令表中没有）、评测集格式 `tokstudy-evalset/1`、prereg 锁 `tokstudy-prereg-lock/1`、prereg 的 `[stream] measure`。
 
@@ -195,6 +217,7 @@ CPU 测试 `fork/dev test tokstudy` 用 `FORK_PY`（默认根目录 `.venv`）�
 | `surogate_tokstudy.kernels` | 另加 `mamba_ssm`，只能在 `try/except ImportError` 中 | — |
 | `surogate_tokstudy.docs` | 另加 `surogate_tlc.data.corpus`、`surogate_bilingual.data.docs`、`surogate_bilingual.data.manifest`（派生 manifest 用项目自己的 `load_manifest` 读，按内容重算 `manifest_sha256`） | 项目的其他模块 |
 | `surogate_tokstudy.models.trunk_bilingual` | 另加 `surogate_bilingual.model.lm`、`surogate_bilingual.config` | 项目的其他模块 |
+| `surogate_tokstudy.probes` | 另加 `surogate_bilingual.eval.items`（Track S 题用项目自己的 `load_items` 读） | 项目的其他模块 |
 | 测试 | 另可按路径加载 `fork/tlc/prototypes/ref_mamba2.py`，并导入 `surogate_tlc.ir`、两个项目的 tokenizer 与 shard 模块；TLC 模型目录由 TLC 自己的代码在独立的解释器中写出（它的初始化要用仓库里的 Python `surogate` 包编译 IR，本进程从不导入该包） | — |
 
 `tests/cpu/test_scaffold.py` 按 AST 检查这张表，并用埋入的违规样例确认检查本身有效；两个项目的 `test_scaffold.py` 各有一条检查确认它们从不导入本包或 `surogate_corpora`。

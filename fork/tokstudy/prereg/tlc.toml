@@ -1,5 +1,6 @@
 # Preregistration of the tokstudy table tlc-N (N0 twin of the native leader, N1 H-Net, N2 flat bytes).
-# Every value is a proposal (TOKENIZER_CORPUS_STUDY §7, §8.2, §8.4(e), §10) until the owner signs [signature].
+# Every value is a proposal (TOKENIZER_CORPUS_STUDY §7, §8.2, §8.4(e), §10) until the owner signs [signature], before
+# any pilot result. The native TOK-AB table's rules (§8.4(a)-(d)) are in prereg/tlc-T.toml.
 # The sha256 of this file enters every run record and verdict; after the first run of the table a change needs
 # `train --amend "<reason>"` (fork/tokstudy/README.md, 运行登记).
 format = "tokstudy-prereg/1"
@@ -24,17 +25,25 @@ shape = "linear"
 
 [stages.decision]
 
-[mixture]  # by bytes of the stream (M9: the native 70/30)
+[mixture]  # M9 and STUDY §3.3: the native 70/30 is by tokens; counted here in the reference arm N0's tokens, so the
+# stream's document list is fixed by one reference tokenizer and every arm reads it (stream --measure arms/tlc.toml:N0).
+# At the runbook's staging budgets (2.6 GB Python, 1.5 GB English) this keeps about 63/37 by bytes [估计].
 py = 0.7
 en = 0.3
 
 [stream]
-measure = "bytes"
+measure = "N0"
 
-[seeds]  # per arm, as the arm registry lists them
+[seeds]  # planned seeds per arm (STUDY §8.2); the arm registry lists every seed an arm may get (M6)
 N0 = 3
 N1 = 3
 N2 = 1
+
+[extension]  # read by the verdict, which answers "extend" until they are met
+seed_sigma = 3.0         # M6: a deciding pair with |Delta| < 3 sigma_Delta gets one more seed per arm ...
+seed_max = 3             # ... up to 3 seeds
+lr_resweep_gap = 0.02    # M10: a challenger within 2 % (relative) of N0 re-sweeps the LR ...
+lr_resweep_points = 3    # ... with 3 more points for both families before it is decided
 
 [thresholds]  # read by the verdict (step S16); STUDY §8.4(e)
 n1_python_rel_gain = 0.02       # N1 Python BPB at least 2 % better than N0 on 3 seeds, equal FLOPs

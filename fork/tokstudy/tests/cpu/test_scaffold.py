@@ -109,6 +109,7 @@ DEPENDENCIES = {"numpy", "torch", "tokenizers", "safetensors"}
 PROJECT_ALLOWED = {
     "docs": {"surogate_tlc.data.corpus", "surogate_bilingual.data.docs", "surogate_bilingual.data.manifest"},
     "models.trunk_bilingual": {"surogate_bilingual.model.lm", "surogate_bilingual.config"},
+    "probes": {"surogate_bilingual.eval.items"},
 }
 GUARDED = {"kernels": {"mamba_ssm"}}
 PATH_LOADERS = {"spec_from_file_location", "SourceFileLoader", "run_path"}

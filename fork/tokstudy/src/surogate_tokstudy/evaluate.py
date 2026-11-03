@@ -219,10 +219,10 @@ def open_evalset(path: Path) -> tuple[dict[str, Any], str, list[EvalDoc]]:
 # --- scoring ---------------------------------------------------------------------------------------------------------
 
 
-def score_documents(
-    model, codec: Codec, docs: Sequence[EvalDoc], *, batch: int = 8, precision: str = "fp32", device=None
-) -> list[DocNLL]:
-    """Per-document NLLs of `docs` (already cut to their prefix) under `model`, in the order of `docs`."""
+def target_nll(model, encoded: Sequence, *, batch: int = 8, precision: str = "fp32", device=None) -> list[np.ndarray]:
+    """For every encoded sequence (docs.Encoded), the NLL in nats of each of its targets (positions after the first),
+    float64 [n - 1]. Sequences are batched by length with right padding; the model is causal, so padding never reaches
+    a real position (tests: batching and order do not change a sequence's NLL)."""
     import torch
     from torch.nn import functional as F
 
@@ -230,19 +230,8 @@ def score_documents(
     from .models.hnet import HNetLM
 
     dev = device or next(model.parameters()).device
-    encoded = []
-    eos_ids = {codec.special_ids[n] for n in EOS_NAMES if n in codec.special_ids}
-    for doc in docs:
-        enc = encode_doc(codec, doc)
-        if len(enc.ids) < 2 or not enc.special[0]:
-            raise TokstudyError(f"{doc.key}: needs a special first position and at least one target")
-        if enc.text_bytes != doc.text_bytes():
-            raise TokstudyError(
-                f"{codec.name}: the tokens of {doc.key} cover {enc.text_bytes} of {doc.text_bytes()} text bytes"
-            )
-        encoded.append(enc)
-    order = sorted(range(len(docs)), key=lambda i: len(encoded[i].ids))
-    results: dict[int, DocNLL] = {}
+    order = sorted(range(len(encoded)), key=lambda i: len(encoded[i].ids))
+    out: dict[int, np.ndarray] = {}
     was_training = model.training
     model.eval()
     try:
@@ -263,24 +252,47 @@ def score_documents(
             nll = F.cross_entropy(head.flatten(0, 1), x[:, 1:].flatten(), reduction="none").view(len(index), -1)
             nll = nll.double().cpu().numpy()
             for r, i in enumerate(index):
-                enc, n = encoded[i], len(encoded[i].ids)
-                row, targets = nll[r, : n - 1], enc.ids[1:]
-                special = enc.special[1:]
-                eos = special & np.isin(targets, list(eos_ids))
-                results[i] = DocNLL(
-                    docs[i].key,
-                    docs[i].domain,
-                    enc.text_bytes,
-                    float(row[~special].sum()),
-                    int((~special).sum()),
-                    float(row[eos].sum()),
-                    int(eos.sum()),
-                    float(row[special & ~eos].sum()),
-                    int((special & ~eos).sum()),
-                )
+                out[i] = nll[r, : len(encoded[i].ids) - 1].copy()
     finally:
         model.train(was_training)
-    return [results[i] for i in range(len(docs))]
+    return [out[i] for i in range(len(encoded))]
+
+
+def score_documents(
+    model, codec: Codec, docs: Sequence[EvalDoc], *, batch: int = 8, precision: str = "fp32", device=None
+) -> list[DocNLL]:
+    """Per-document NLLs of `docs` (already cut to their prefix) under `model`, in the order of `docs`."""
+    encoded = []
+    eos_ids = {codec.special_ids[n] for n in EOS_NAMES if n in codec.special_ids}
+    for doc in docs:
+        enc = encode_doc(codec, doc)
+        if len(enc.ids) < 2 or not enc.special[0]:
+            raise TokstudyError(f"{doc.key}: needs a special first position and at least one target")
+        if enc.text_bytes != doc.text_bytes():
+            raise TokstudyError(
+                f"{codec.name}: the tokens of {doc.key} cover {enc.text_bytes} of {doc.text_bytes()} text bytes"
+            )
+        encoded.append(enc)
+    results = []
+    for doc, enc, row in zip(
+        docs, encoded, target_nll(model, encoded, batch=batch, precision=precision, device=device), strict=True
+    ):
+        targets, special = enc.ids[1:], enc.special[1:]
+        eos = special & np.isin(targets, list(eos_ids))
+        results.append(
+            DocNLL(
+                doc.key,
+                doc.domain,
+                enc.text_bytes,
+                float(row[~special].sum()),
+                int((~special).sum()),
+                float(row[eos].sum()),
+                int(eos.sum()),
+                float(row[special & ~eos].sum()),
+                int((special & ~eos).sum()),
+            )
+        )
+    return results
 
 
 def bpb(rows: Sequence[DocNLL], domain: str, *, with_eos: bool = False) -> float:
@@ -368,6 +380,7 @@ def evaluate_point(
         "table": s.arm.table,
         "backend": train.BACKEND,
         "arm": s.arm.id,
+        "arm_kind": s.arm.kind,
         "arm_sha256": arm_sha256(s.arm),
         "run_id": s.record["run_id"],
         "seed": s.seed,
