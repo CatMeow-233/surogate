@@ -26,6 +26,8 @@
 | 双语平行数据（B-O12，必须签） | UN PC en-zh（UltraData 之外的例外，`bilingual-parallel-unpc`） | Bridge 数据（不在本研究内） |
 | 三张表的阈值、预算、种子与扩展规则（必须签） | [prereg/tlc.toml](../prereg/tlc.toml)、[prereg/bilingual.toml](../prereg/bilingual.toml)、原生 TOK-AB 表的 [prereg/tlc-T.toml](../prereg/tlc-T.toml) 中的 [建议] 值（研究 §8.4(a)–(e)、§9.2 的阈值；M6：\|Δ\| < 3σ_Δ 时补一个种子、至多 3 个；M10：与参照相差 < 2% 时各补 3 点 LR 再判；双语按阶段的种子：判定阶段 B0 3、B4 3、按初筛排名的第一名 3、第二名 2），签在 `[signature]`，在任何 pilot 结果出来之前；孪生门的 [prereg/tlc-twin.toml](../prereg/tlc-twin.toml)、[prereg/bilingual-twin.toml](../prereg/bilingual-twin.toml) 一并签 | 第 5、6 步 |
 | TLC 流的混合 | prereg 的 `[mixture]` 是 py 0.7 / en 0.3，按参照臂 N0 的 token 计（`[stream] measure = "N0"`，研究 M9 与 §3.3：70/30 按 token 定，由一个参照 tokenizer 定下文档清单，所有臂共用）；按第 1 步的备料预算约等于按字节 63/37 [估计]。另一读法是按字节 0.63/0.37（`measure = "bytes"`，依赖默认 freqtrim 的估计字节/token），签字时可改 | 第 6 步 |
+| X-1：「要不然就搞另類神經網絡分詞」的读法 | 神经分词（N1、B4）是参与比较的候选，不替代比较；另一读法“比较做不成就直接用神经分词”不采用（研究 §13.3） | 第 6 步 |
+| GAP-01b：TLC 题面与补全的边界（必须签，没有默认） | (a) id 5 的 TLC 标记 token 进学生词表，或 (b) orchestrator 传 prompt 长度的上游补丁；选 (a) 时先给 TLC 的 `train` 与 `freqtrim` 加 id 5 的选项，再建 TOK-AB 各臂（[TLC data.md 的“怎么选”](../../tlc/docs/data.md#怎么选)） | 第 2 步（TLC 的臂） |
 | 双语研究期间的去污染 | 文档集固定为 `en_word13 + zh_han25`（不依赖 tokenizer）；B-O11 冻结之后恢复 `token13` | 第 2 步 |
 | Track S 长度归一的单位 | 研究中按字节（`eval-tasks --length-unit byte`；本包的 `probe` 只按字节） | 第 7 步 |
 
@@ -93,7 +95,7 @@ $PY -m surogate_tlc.data.tokenizer freqtrim-check "$T/T1" --teacher "$QWEN/token
 $PY -m surogate_tlc.data.tokenizer freqtrim-check "$T/T2" --teacher "$QWEN/tokenizer.json"
 ```
 
-- 教师文件只在 owner 主机上取到自己的目录中，按 sha256 识别（研究用的是 revision `2e1fd397…`、sha256 前缀 `c0382117`）；`fine-a` 与 `fine-b` 在 TOK-AB 之前定一种。T3 只在 CPU 上测得的 BPM 跨边界率 ≤ 5% 时才进入 GPU 运行（第 3 步的 `align`）。
+- 教师文件只在 owner 主机上取到自己的目录中，按 sha256 识别（研究用的是 revision `2e1fd397…`、sha256 前缀 `c0382117`）；`fine-a` 与 `fine-b` 在 TOK-AB 之前定一种。T3 照跑；CPU 上测得的 BPM 跨边界率（第 3 步的 `align`）超过 5% 时它只作对照臂，判定不选它（实验笔记 §3.5、§11；[prereg/tlc-T.toml](../prereg/tlc-T.toml) 的 `bpm_cross_boundary_max`）。
 - 每个用 std::regex 回退的臂（T2、T3）先按 TLC 运行手册 G0 第 5 步过原生一致性检查（`tokenizer check --limit 10000`）。
 - 原生 TOK-AB 每臂建自己的 shard，行长按字节对齐：压缩最差的臂用 512 个 token，其余臂按第 3 步实测的字节/token 取更短的 8 的倍数（[TLC training.md 的“评测”](../../tlc/docs/training.md#评测)）。
 
@@ -236,7 +238,7 @@ $K -m surogate_tokstudy verdict --prereg fork/tokstudy/prereg/tlc-T.toml --nll d
 
 | 项目 | 冻结什么 | 怎么核对 | 截止 |
 |---|---|---|---|
-| TLC（子词之间） | 原生 TOK-AB 的胜者（G-TOK-a，[TLC data.md 的“Tokenizer”](../../tlc/docs/data.md#tokenizer)） | 四个 P0 行的模型目录与 shard 都由这一个 tokenizer 目录建成：shard manifest 与 `tlc_meta.json` 记着同一个 `tokenizer_sha256` | Phase 1b 之前 |
+| TLC（子词之间） | 原生 TOK-AB 的胜者（G-TOK-a，[TLC data.md 的“Tokenizer”](../../tlc/docs/data.md#tokenizer)）；G-TOK 还要求 GAP-01b 的路线已定（选 (a) 时 id 5 的标记 token 已在这个 tokenizer 里） | 四个 P0 行的模型目录与 shard 都由这一个 tokenizer 目录建成：shard manifest 与 `tlc_meta.json` 记着同一个 `tokenizer_sha256` | Phase 1b 之前 |
 | TLC（神经臂） | N1 只在 prereg 的五个条件都满足、且 owner 选定集成路线（原生新 op，或全部行改到 PyTorch）之后晋升；在那之前 TLC 仍用子词，G-TOK-b 不关闭 | `verdict` 的结果（S16） | Phase 1b 之前 |
 | 双语 | `verdict` 选出的臂（默认 B0）的 `tokenizer.json`：复制到双语运行手册使用的 `data/tokenizer/tokenizer.json`，之后每个运行都用它；B-O11 冻结后恢复 `token13` 去污染 | `sha256sum data/tokenizer/tokenizer.json` 等于 `data/tokstudy/bilingual/handoff.json` 中该臂的 sha256；它进入每个运行 id 与种子指纹 | G1′ 与 S_I 之前 |
 | 双语（B4 胜出） | 分块器属于 θ_S、在种子训练结束时冻结，`hnet.py`、`mamba2.py` 整文件移入 `fork/bilingual`，导入边界按 owner 的选项改 | spec 级改动，owner 签字 | 仅在 B4 胜出时 |

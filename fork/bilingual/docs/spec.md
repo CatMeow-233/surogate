@@ -39,6 +39,8 @@
 
 owner 的决定（2026-11-03，原文）：「分詞器得對比效果要不然就搞另類神經網絡分詞 語料用minicpm的ultradata那些的」。本项目的落实如下；研究的代码在 [fork/tokstudy](../../tokstudy/README.md)（臂、预注册与运行手册）与 [fork/corpora](../../corpora/README.md)（备料），本包不导入它们。
 
+后半句「要不然就搞另類神經網絡分詞」的读法是研究的 X-1 [建议，待 owner 签字，与 TLC 相同]：神经网络分词（下表的 B4）是参与比较的候选，而不是替代比较；另一读法“比较做不成就直接用神经分词”不采用，因为比较是可以做的。
+
 **B-O11（分词器）：按训练后的效果比较。** 全部臂在研究包中经本包真实的 trunk（`RoutedLM.forward_hidden`/`logits`）以相同的训练 FLOPs 训练，主指标是按语言分开的 bits per byte，Track S 的连续读数为次要指标（长度归一按字节，`eval.length_unit = byte`）。默认 [建议]：B0 不变。
 
 | 臂 | 定义 | 本包中的来源 |
