@@ -188,6 +188,7 @@ def test_the_module_entry_point_exits_1_on_a_refusal(tmp_path):
         [
             sys.executable,
             "-I",
+            "-B",
             "-c",
             f"import sys; sys.path.insert(0, {str(SRC)!r}); " + code,
             "x",

@@ -6,6 +6,8 @@ tokenizers==0.23.3
 safetensors==0.8.0
 pytest==9.1.1
 pytest-timeout==2.4.0
-# Optional, G0-ts: the Triton SSD path of mamba-ssm only, installed with MAMBA_SKIP_CUDA_BUILD=TRUE and
-# --no-build-isolation; whether that imports on sm_120 is untested [assumption]. The torch backend needs nothing.
+# Optional, G0-ts: the Triton SSD path (backend "triton") needs a full mamba-ssm CUDA build for sm_120 (nvcc, and
+# --no-build-isolation against the installed torch). A MAMBA_SKIP_CUDA_BUILD=TRUE install cannot import it:
+# mamba_ssm/__init__.py imports selective_scan_interface, which imports selective_scan_cuda unguarded (read from
+# the 2.3.2.post1 sdist). Otherwise use the torch backend, which needs nothing (docs/runbook.md, step 5.1).
 # mamba-ssm==2.3.2.post1

@@ -1,11 +1,12 @@
 """CPU tests run against this checkout: fork/tokstudy/src goes first on sys.path, then fork/tlc/src and
-fork/bilingual/src (the projects whose public pure-data APIs the study reads), and a package imported from anywhere
+fork/bilingual/src (the projects whose corpus and manifest readers, and the bilingual RoutedLM and config
+profiles, the study imports: README.md, 导入边界), and a package imported from anywhere
 else errors the session before any test runs. Nothing else is put on sys.path; the suite does not import the native
 `surogate` package.
 
 The suite is a CPU suite on every host: `pytest_configure` hides CUDA (CUDA_VISIBLE_DEVICES="") before any test
-imports torch, for this process and every subprocess it starts. GPU checks live in tests/gpu and run by hand in
-fork/.venv-tokstudy.
+imports torch, for this process and every subprocess it starts. The GPU checks will be added with S17 (there is no
+tests/gpu yet) and will run by hand in fork/.venv-tokstudy.
 
 TLC model directories (gate TW-1) are written by TLC's own code in a separate isolated interpreter whose sys.path
 starts with the checkout and fork/tlc/src (`tlc_model_dir`): TLC's initialisation compiles the row's IR with the

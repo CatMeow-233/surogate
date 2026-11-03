@@ -1,6 +1,7 @@
 """Canonical JSON, sha256 helpers, versioned formats and atomic writes. Knows no schema.
 
-The conventions of fork/bilingual and fork/corpora, in this package's own copy (no package imports another's):
+The conventions of fork/bilingual and fork/corpora, in this package's own copy (its documents carry the `tokstudy-`
+format prefix and its errors are TokstudyError; the projects' copies raise their own error types):
 canonical JSON is UTF-8 with sorted keys, separators (",", ":") and no NaN or infinity; every recorded hash is the
 lowercase hex sha256 of such bytes or of a file; every document carries `format: "tokstudy-<name>/<major>"` and
 readers refuse another name or an unknown major. Every write is atomic: the bytes go to `<target>.tmp-<pid>-<rand>`

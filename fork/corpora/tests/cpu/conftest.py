@@ -4,7 +4,7 @@ from anywhere else (an installed copy, another checkout) errors the session befo
 The export tests also read the exports back with the projects' own loaders, `surogate_tlc.data.corpus` and
 `surogate_bilingual.data.manifest`, imported from fork/tlc/src and fork/bilingual/src of the same checkout (tests
 only: the package itself never imports a project). Nothing here touches the network: the Hub is a local
-http.server (hubserver.py), and every parquet file is a fixture the tests write in a registry schema with content
+http.server (corpora_fixtures.FakeHub), and every parquet file is a fixture the tests write in a registry schema with content
 marked SYNTHETIC FIXTURE.
 """
 
