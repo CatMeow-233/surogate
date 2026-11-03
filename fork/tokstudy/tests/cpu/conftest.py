@@ -6,16 +6,23 @@ else errors the session before any test runs. Nothing else is put on sys.path; t
 The suite is a CPU suite on every host: `pytest_configure` hides CUDA (CUDA_VISIBLE_DEVICES="") before any test
 imports torch, for this process and every subprocess it starts. GPU checks live in tests/gpu and run by hand in
 fork/.venv-tokstudy.
+
+TLC model directories (gate TW-1) are written by TLC's own code in a separate isolated interpreter whose sys.path
+starts with the checkout and fork/tlc/src (`tlc_model_dir`): TLC's initialisation compiles the row's IR with the
+repository's Python `surogate` package (no native extension), which this process never imports.
 """
 
 import importlib
+import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
 FORK = Path(__file__).resolve().parents[3]
+REPO = FORK.parent
 SRC = FORK / "tokstudy" / "src"
 CHECKOUT = {
     "surogate_tokstudy": SRC,
@@ -100,3 +107,61 @@ def bpe_writer():
 @pytest.fixture(scope="session")
 def edge_texts():
     return EDGE_TEXTS
+
+
+# --- TLC model directories, written by TLC's code in an isolated interpreter ------------------------------------------
+
+# argv: REPO, OUT, overrides (JSON, may name "row"), init seed or "config". A SYNTHETIC zero-merge tokenizer (TLC's
+# special tokens, then the 256 byte tokens) stands in for a trained one; "config" prints the row's config.json only.
+TLC_MODEL_DIR_SCRIPT = """
+import json, sys
+from pathlib import Path
+sys.path[:0] = [sys.argv[1], sys.argv[1] + "/fork/tlc/src"]
+from surogate_tlc import hf
+overrides = json.loads(sys.argv[3])
+cfg = hf.row_config(overrides.pop("row", "A0"), **overrides)
+if sys.argv[4] == "config":
+    print(json.dumps(cfg))
+    sys.exit(0)
+from tokenizers import Tokenizer, models, pre_tokenizers
+from surogate_tlc import init, modeldir
+from surogate_tlc.data import tokenizer as tok
+out = Path(sys.argv[2])
+vocab = {s: i for i, s in enumerate(tok.SPECIAL_TOKENS)}
+for c in sorted(pre_tokenizers.ByteLevel.alphabet()):
+    vocab[c] = len(vocab)
+t = tok.finish_tokenizer(Tokenizer(models.BPE(vocab=vocab, merges=[])))
+t.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False)
+t.add_special_tokens(list(tok.SPECIAL_TOKENS))
+(out / "tok").mkdir(parents=True)
+t.save(str(out / "tok" / "tokenizer.json"))
+tok.write_config(out / "tok")
+init.init_model_dir(modeldir.write_model_dir(out / "model", cfg, out / "tok", init_seed=int(sys.argv[4])))
+"""
+
+
+def run_tlc(out: Path, overrides: dict, seed: int | str) -> str:
+    command = [sys.executable, "-I", "-B", "-c", TLC_MODEL_DIR_SCRIPT, str(REPO), str(out), json.dumps(overrides),
+               str(seed)]  # fmt: skip
+    result = subprocess.run(command, cwd=out.parent, capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return result.stdout
+
+
+@pytest.fixture(scope="session")
+def tlc_model_dir(tmp_path_factory):
+    """write(overrides, seed) -> a TLC model directory (config.json, model.safetensors from TLC's init), written by
+    TLC's code; overrides are hf.row_config arguments plus "row" (default "A0")."""
+
+    def write(overrides: dict, seed: int) -> Path:
+        out = tmp_path_factory.mktemp("tlc")
+        run_tlc(out, dict(overrides), seed)
+        return out / "model"
+
+    return write
+
+
+@pytest.fixture(scope="session")
+def tlc_default_config(tmp_path_factory) -> dict:
+    """TLC's config.json for row A0 at its default geometry (surogate_tlc.hf.row_config("A0"))."""
+    return json.loads(run_tlc(tmp_path_factory.mktemp("tlc-config"), {}, "config"))

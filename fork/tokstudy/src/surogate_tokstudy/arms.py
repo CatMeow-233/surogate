@@ -9,7 +9,7 @@ A registry holds the arms of exactly one table:
     id = "N0"
     kind = "subword"                     # subword | bytes | hnet
     tokenizer = {path = "tok/tokenizer.json", sha256 = "<64 hex>"}   # subword only; path relative to the file
-    model = {profile = "a0"}             # a profile name plus overrides (read by the training steps)
+    model = {profile = "a0"}             # profile, overrides, hnet: read by models.build
     seeds = [0, 1, 2]
     stages = ["screen", "decision"]
 
