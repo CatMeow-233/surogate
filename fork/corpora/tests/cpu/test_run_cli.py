@@ -269,3 +269,68 @@ def test_verify_samples_refuses_a_schema_mismatch_and_the_registry_refusals(tmp_
     argv[3] = "code-l3-py"
     assert main([*argv, "--profile", "tlc-python-all"]) == 1
     assert "model-generated" in capsys.readouterr().err
+
+
+def test_fetch_reads_at_the_plans_revision_and_refuses_a_registry_pinned_differently(
+    planned, fake_hub, monkeypatch, tmp_path
+):
+    """Code review: the plan was made at one revision; the registry entry was then re-pinned to another revision
+    serving the same bytes. fetch used to read at the new revision and the export recorded two revisions (spec
+    fragment vs provenance); now it refuses, and the files it reads are addressed at the plan's revision."""
+    import dataclasses
+
+    from surogate_corpora import sources
+
+    plan, client = planned
+    source = sources.SOURCES["stack3-py"]
+    recorded = plan.source("stack3-py")
+    assert (recorded["repo"], recorded["revision"], recorded["files"]) == (source.repo, source.revision, source.files)
+    assert all(plan.remote(f["path"]).revision == source.revision for f in plan.doc["files"])
+    moved = dataclasses.replace(source, revision="f" * 40)
+    for (repo, revision, path), data in list(fake_hub.files.items()):
+        if repo == source.repo and revision == source.revision:
+            fake_hub.files[(repo, moved.revision, path)] = data
+    monkeypatch.setitem(sources.SOURCES, "stack3-py", moved)
+    assert all(plan.remote(f["path"]).revision == source.revision for f in plan.doc["files"])
+    with pytest.raises(CorporaError, match="pinned differently now.*revision.*re-plan"):
+        run.fetch(plan, tmp_path / "never", client=client, downloaded="2026-11-03")
+    schema = dataclasses.replace(source, schema={**source.schema, "uuid": "int64"})
+    monkeypatch.setitem(sources.SOURCES, "stack3-py", schema)
+    with pytest.raises(CorporaError, match="schema_sha256"):
+        plan.profile()
+
+
+@pytest.mark.parametrize("stop_at", [0, 1])
+def test_a_resumed_fetch_drops_a_document_seen_before_the_interruption(
+    fake_hub, client_for, monkeypatch, tmp_path, stop_at
+):
+    """The exact-dedup set is rebuilt from the parts already written: a document that occurs in a unit before the
+    interruption and again in a unit after it is dropped once, whether or not the run was interrupted."""
+    rows = stack3_rows(40)
+    for r in rows:  # every row kept by tlc-python-all except vendored ones: make them all permissive and unvendored
+        r["source_meta.file_meta.license_type"] = "permissive"
+        r["source_meta.file_meta.is_vendor"] = False
+    serve_source(fake_hub, monkeypatch, "stack3-py", [rows], row_group_size=10)
+    client = client_for(fake_hub)
+    plan = build_plan(profiles.resolve("tlc-python-all"), budget_bytes=10**9, seed=1, client=client)
+    order = [u["rg"] for u in plan.units]
+    first, later = order[stop_at], order[stop_at + 1]
+    # the duplicate: the first row of a unit after the interruption repeats a row of the unit before it
+    rows[later * 10]["content"] = rows[first * 10]["content"]
+    serve_source(fake_hub, monkeypatch, "stack3-py", [rows], row_group_size=10)
+    plan = build_plan(profiles.resolve("tlc-python-all"), budget_bytes=10**9, seed=1, client=client)
+    assert [u["rg"] for u in plan.units] == order
+    clean = tmp_path / "clean"
+    whole = run.fetch(plan, clean, client=client, downloaded="2026-11-03", part_bytes=500)
+    assert whole["totals"]["drops"] == {"exact_dedup": 1}
+
+    def stop(index):
+        if index == stop_at:
+            raise KeyboardInterrupt
+
+    out = tmp_path / "resumed"
+    with pytest.raises(KeyboardInterrupt):
+        run.fetch(plan, out, client=client, downloaded="2026-11-03", part_bytes=500, after_unit=stop)
+    resumed = run.fetch(plan, out, client=client, downloaded="2026-11-03", part_bytes=500)
+    assert resumed["totals"]["drops"] == {"exact_dedup": 1}
+    assert _parts(out) == _parts(clean)

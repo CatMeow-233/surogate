@@ -101,7 +101,7 @@ fork/.venv-corpora/bin/python -m surogate_corpora compose --project bilingual --
 
 ## 数据契约
 
-**计划 `corpora-plan/1`。** 每个文件的每个 row group 是一个 unit，rank key = sha256(`seed\0repo\0revision\0path\0rg`)，按 rank key 升序取，直到估计保留字节达到 `预算 × (1 + margin)`；所以计划只比目标多出不到一个 unit，单元来自所有文件，绝不取“开头的行”（Ultra-FineWeb zh 的行按来源成簇，文件开头全是 Tele）。估计只看 profile 的元数据过滤器：Stack-v3 是通过的行的 `size_bytes` 之和，Ultra-FineWeb 是 content 列未压缩字节乘以通过的行的比例，没有元数据过滤器的 profile 是 content 列未压缩字节；去重、UTF-8、非拉丁比例等内容过滤由 `margin` 覆盖。计划还记录 profile 的完整定义，代码里的 profile 改了之后旧计划被拒绝；文件的 schema 与登记的不同也被拒绝。同样的输入给出逐字节相同的计划文件。
+**计划 `corpora-plan/1`。** 每个文件的每个 row group 是一个 unit，rank key = sha256(`seed\0repo\0revision\0path\0rg`)，按 rank key 升序取，直到估计保留字节达到 `预算 × (1 + margin)`；所以计划只比目标多出不到一个 unit，单元来自所有文件，绝不取“开头的行”（Ultra-FineWeb zh 的行按来源成簇，文件开头全是 Tele）。估计只看 profile 的元数据过滤器：Stack-v3 是通过的行的 `size_bytes` 之和，Ultra-FineWeb 是 content 列未压缩字节乘以通过的行的比例，没有元数据过滤器的 profile 是 content 列未压缩字节；去重、UTF-8、非拉丁比例等内容过滤由 `margin` 覆盖。计划还记录 profile 的完整定义，代码里的 profile 改了之后旧计划被拒绝；文件的 schema 与登记的不同也被拒绝。计划逐来源记下它读的 repo、revision、文件范围与 schema 的 sha256：`fetch` 按计划自己的 revision 读每个文件，登记里的来源后来改了其中任何一项（例如换了 revision）就拒绝并要求重新做计划，所以一份导出的 spec 片段与 provenance 记的是同一个 revision（测试：同样的字节放在新 revision 下也被拒绝）。同样的输入给出逐字节相同的计划文件。
 
 **导出目录。**
 
@@ -111,7 +111,7 @@ fork/.venv-corpora/bin/python -m surogate_corpora compose --project bilingual --
 - `spec_fragment.toml`：要贴进项目 spec 的 `[[source]]` 表，列出确切的分片路径（相对导出目录）、url、revision、许可、`downloaded` 与 `filters`（每个过滤器的 `名字(参数)`，最后是 `corpora export <plan_sha256>`）；双语条目带 `licence_verified = false`。
 - `attribution.jsonl`（代码导出）：每个仓库一行，`{"repo", "commit_ids", "spdx", "files", "bytes"}`。
 - `provenance.json`（`corpora-export/1`）：计划 sha、profile、代码 commit 与 dirty 标志、python 与 pyarrow 版本、下载日期；每个 unit 的文件大小、观察到的 ETag 与 xet hash、行数、读入与保留的行、按过滤器的丢弃数、取回字节；每个分片的路径、sha256、字节与文档数；合计。
-- `done.jsonl`：续跑清单。中断后重跑跳过已完成的 unit（不会重读），把分片截回最后记录的状态，从已写出的分片重建去重集合与署名清单；同一计划、profile 与代码给出逐字节相同的分片，中断与否都一样。续跑会重新打开文件，所以 provenance 里取回的字节（footer）可能与一次跑完的不同。
+- `done.jsonl`：续跑清单。中断后重跑跳过已完成的 unit（不会重读），把分片截回最后记录的状态，从已写出的分片重建去重集合与署名清单；同一计划、profile 与代码给出逐字节相同的分片，中断与否都一样（测试：同一篇文档出现在中断点前后两个 unit 里，续跑也只丢一次，`drops == {"exact_dedup": 1}`，分片与一次跑完的逐字节相同）。续跑会重新打开文件，所以 provenance 里取回的字节（footer）可能与一次跑完的不同。
 
 ## 落地记录（2026-11-03，本机无 GPU，CPU 与网络只读）
 

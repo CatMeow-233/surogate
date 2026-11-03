@@ -14,6 +14,9 @@
   unit. A plan whose units run out first records `budget_reached: false`.
 - `plan_sha256` is the sha256 of the canonical JSON of the plan without that field. The same inputs give a
   byte-identical plan file.
+- The plan pins what it read: per source the repo, the revision, the file pattern and the sha256 of the schema.
+  `fetch` reads every file at the plan's own revision, and refuses ("re-plan") when the registry now pins a source
+  differently, so one export never records two revisions (spec fragment and provenance both carry the plan's).
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .canonical import CorporaError, atomic_write_json, check_sha256, read_json, with_sha256
+from .canonical import CorporaError, atomic_write_json, check_sha256, read_json, sha256_json, with_sha256
 from .hub import HubClient, RemoteFile
 from .parquet import FooterInfo, RemoteFiles, RemoteParquet, iter_rows
 from .profiles import Pipeline, Profile, parse_params, resolve
@@ -56,19 +59,53 @@ class Plan:
     def file(self, path: str) -> Mapping[str, Any]:
         return next(f for f in self.doc["files"] if f["path"] == path)
 
+    def source(self, source_id: str) -> Mapping[str, Any]:
+        """The plan's own record of a source: repo, revision, file pattern, schema sha256."""
+        found = [s for s in self.doc["sources"] if s["id"] == source_id]
+        if len(found) != 1:
+            raise CorporaError(f"the plan records source {source_id!r} {len(found)} times")
+        return found[0]
+
     def remote(self, path: str) -> RemoteFile:
+        """A file of the plan at the plan's own repo and revision (never the registry's current one)."""
         entry = self.file(path)
-        source = get_source(entry["source"])
-        return RemoteFile(source.repo, source.revision, path, entry["size"], entry["lfs_sha256"], entry["xet_hash"])
+        source = self.source(entry["source"])
+        return RemoteFile(
+            source["repo"], source["revision"], path, entry["size"], entry["lfs_sha256"], entry["xet_hash"]
+        )
+
+    def check_sources(self) -> None:
+        """Refuses a plan whose sources the registry now pins differently (repo, revision, files, schema)."""
+        for recorded in self.doc["sources"]:
+            now = source_record(get_source(recorded["id"]))
+            changed = sorted(k for k in now if recorded.get(k) != now[k])
+            if changed:
+                raise CorporaError(
+                    f"source {recorded['id']} is pinned differently now than when the plan was made "
+                    f"({', '.join(f'{k}: {recorded.get(k)!r} -> {now[k]!r}' for k in changed)}); re-plan"
+                )
 
     def profile(self) -> Profile:
-        """The profile the plan was made with; refuses a plan whose profile the code now defines differently."""
+        """The profile the plan was made with; refuses a plan whose profile the code now defines differently, or
+        whose sources the registry now pins differently."""
         profile = resolve(self.doc["profile"], self.doc["params"], allow_unlicensed=self.doc["allow_unlicensed"])
         if profile.describe() != self.doc["profile_def"]:
             raise CorporaError(
                 f"profile {profile.name} is defined differently now than when the plan was made; re-plan"
             )
+        self.check_sources()
         return profile
+
+
+def source_record(source: SourceDef) -> dict[str, Any]:
+    """What a plan pins of a source."""
+    return {
+        "id": source.id,
+        "repo": source.repo,
+        "revision": source.revision,
+        "files": source.files,
+        "schema_sha256": sha256_json(dict(source.schema)),
+    }
 
 
 def load_plan(path: Path) -> Plan:
@@ -187,7 +224,7 @@ def build_plan(
         "profile_def": profile.describe(),
         "seed": seed,
         "budget": {"unit": profile.budget_unit, "value": budget_bytes, "margin": margin},
-        "sources": [{"id": s, "repo": get_source(s).repo, "revision": get_source(s).revision} for s in profile.sources],
+        "sources": [source_record(get_source(s)) for s in profile.sources],
         "files": files,
         "units": chosen,
         "estimate": {
