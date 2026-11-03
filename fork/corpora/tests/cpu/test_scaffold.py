@@ -20,7 +20,7 @@ REPO = CORPORA.parents[1]
 SRC = CORPORA / "src"
 PACKAGE = SRC / "surogate_corpora"
 
-PLANNED_COMMANDS = ["sources", "plan", "fetch", "verify", "verify-samples"]
+PLANNED_COMMANDS = ["sources", "plan", "fetch", "verify", "verify-samples", "compose"]
 FORBIDDEN_LOADED = ("pyarrow", "torch", "numpy", "surogate", "surogate_tlc", "surogate_bilingual", "surogate_tokstudy")
 
 

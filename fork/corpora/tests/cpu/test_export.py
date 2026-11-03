@@ -5,9 +5,9 @@ import json
 import unicodedata
 
 import pytest
-from corpora_fixtures import MARK, UFW_ZH_SOURCES, serve_source, stack3_rows, ufw_rows, unpc_rows
+from corpora_fixtures import MARK, UFW_ZH_SOURCES, stack3_rows, ufw_rows, unpc_rows
+from corpora_fixtures import export_fixture as _export
 from surogate_corpora import profiles
-from surogate_corpora.plan import build_plan
 from surogate_corpora.run import fetch
 from surogate_corpora.verify import verify_export
 
@@ -16,14 +16,6 @@ LT, VENDOR, SPDX = (
     "source_meta.file_meta.is_vendor",
     "source_meta.file_meta.detected_licenses",
 )
-
-
-def _export(hub, client_for, monkeypatch, out, source_id, profile, files_rows, rg=20, budget=10**9, **kwargs):
-    source, _ = serve_source(hub, monkeypatch, source_id, files_rows, row_group_size=rg)
-    client = client_for(hub)
-    plan = build_plan(profiles.resolve(profile, kwargs.pop("params", None)), budget_bytes=budget, seed=3, client=client)
-    doc = fetch(plan, out, client=client, downloaded="2026-11-03", **kwargs)
-    return plan, doc, source
 
 
 def _kept(plan, source, files_rows, rg, keep):

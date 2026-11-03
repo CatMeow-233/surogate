@@ -323,3 +323,18 @@ def serve_source(hub: FakeHub, monkeypatch, source_id: str, files_rows: Sequence
     blobs = [parquet_bytes(source.schema, rows, row_group_size) for rows in files_rows]
     hub.files.update(hub_files(source, blobs))
     return source, blobs
+
+
+def export_fixture(hub: FakeHub, client_for, monkeypatch, out: Path, source_id: str, profile: str,
+                   files_rows: Sequence[Sequence[Mapping[str, Any]]], rg: int = 20, budget: int = 10**9, **kwargs):  # fmt: skip
+    """Serve `files_rows` as the source's fixture files, plan the profile over them (seed 3) and fetch into `out`;
+    returns (plan, provenance, source)."""
+    from surogate_corpora import profiles
+    from surogate_corpora.plan import build_plan
+    from surogate_corpora.run import fetch
+
+    source, _ = serve_source(hub, monkeypatch, source_id, files_rows, row_group_size=rg)
+    client = client_for(hub)
+    plan = build_plan(profiles.resolve(profile, kwargs.pop("params", None)), budget_bytes=budget, seed=3, client=client)
+    doc = fetch(plan, out, client=client, downloaded="2026-11-03", **kwargs)
+    return plan, doc, source

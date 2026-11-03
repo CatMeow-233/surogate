@@ -16,9 +16,11 @@
 | S3 | 过滤器与注释器 `filters`、profile `profiles` | 已落地 |
 | S4 | 导出与 provenance `export`、检查 `verify` | 已落地 |
 | S5 | 可续跑的抓取循环 `run`、命令行、样本校验 | 已落地 |
-| 备料 | 在 owner 主机上按各 profile 的预算 `plan` → `fetch` → `verify`，再把 spec 片段贴进项目 spec | 未运行 |
+| 接线（工作流 S5） | `compose`：把几个导出目录合成一份项目语料 spec（路径改写、逐个 `verify`、按字节的配比） | 已落地 |
+| 备料 | 在 owner 主机上按各 profile 的预算 `plan` → `fetch` → `verify` → `compose`，再走各项目自己的去污染与划分 | 未运行 |
 
 工作流的 S1（“骨架加语料适配器”）对应实现规格的 S0 到 S5：S0 单独一个提交，S1–S5 一个提交。
+工作流的 S5（“按项目接线”）加了 `compose`：实现规格只说“把 spec 片段贴进项目 spec”，片段里的路径相对各自的导出目录，几个导出合成一份 spec 时要逐个改写，`compose` 把这一步做成可检查的命令。
 
 ## 目录
 
@@ -35,6 +37,7 @@
 | `surogate_corpora.export` | TLC、双语、平行三种写出器，分片、spec 片段、署名清单 |
 | `surogate_corpora.run` | `fetch`：按计划顺序处理 unit，每个 unit 后 fsync 并记入 `done.jsonl`；续跑时截回最后记录的状态 |
 | `surogate_corpora.verify` | `verify_export`（重算分片哈希与计数）与 `verify_samples`（datasets-server 样本行对登记 schema 与导出） |
+| `surogate_corpora.compose` | 由几个导出目录合成一份项目语料 spec：逐个 `verify_export`，检查 profile 写的是该项目的格式，改写 `files` 的相对路径，追加 owner 写的 `[[source]]`，报告按种类的保留字节与份额 |
 
 ## 环境
 
@@ -58,11 +61,17 @@ fork/.venv-corpora/bin/python -m surogate_corpora plan --profile tlc-python-perm
 fork/.venv-corpora/bin/python -m surogate_corpora fetch --plan "$CORPORA/plan-tlc-python.json" --out "$CORPORA/tlc-python"
 fork/.venv-corpora/bin/python -m surogate_corpora verify "$CORPORA/tlc-python"
 fork/.venv-corpora/bin/python -m surogate_corpora verify-samples ROWS.json --source ufw-zh --profile bilingual-zh-web --out "$CORPORA/check-zh"
+fork/.venv-corpora/bin/python -m surogate_corpora compose --project tlc --export "$CORPORA/tlc-python" --export "$CORPORA/tlc-english" \
+    --include "$CORPORA/synth.toml" --seed 0 --val-fraction 0.01 --out "$CORPORA/tlc-corpus.toml"
+fork/.venv-corpora/bin/python -m surogate_corpora compose --project bilingual --root "$BILINGUAL_CORPUS" \
+    --export "$BILINGUAL_CORPUS/ufw-zh-web" --export "$BILINGUAL_CORPUS/ufw-en" --export "$BILINGUAL_CORPUS/unpc" \
+    --include "$BILINGUAL_CORPUS/track_s.toml" --out "$BILINGUAL_CORPUS/spec.toml"
 ```
 
 - `plan --dry-run` 与 `fetch --dry-run` 只打印计划的保留字节与传输字节估计，什么都不写（`plan --dry-run` 仍要读 footer 与元数据列）。
 - `--param name=value` 设 profile 参数：Python profile 的 `non_latin_max`（默认 0.10，TLC 在 Phase 0 冻结），`tlc-english` 的 `score_min`（默认不设）。
 - `--allow-unlicensed` 是 owner 标志，只有数据来源消融 `tlc-python-unlicensed-ablation`（UltraData-Code-L2，没有逐文件许可字段）需要它。
+- `compose`：每个 `--export` 先过 `verify_export`（任何问题都拒绝），其 profile 必须写该项目的格式（TLC：`tlc-*`；双语：`bilingual-*`）；片段中 `files` 的路径改写为相对基准目录（TLC 是 spec 所在目录，可以用 `..`；双语是 `--root` 即 `manifest --root`，路径不能出根目录），其余键原样保留；`--include` 是 owner 写的 `[[source]]` 表（TLC 的合成绑定程序 `generated = true`、双语 Track S 的 D_seed 成分 `kind = "synthetic"`），原样追加，路径已相对基准目录；同名来源、已存在的输出都拒绝。TLC spec 另写 `seed`、`val_fraction`（默认 0 与 0.01）与可选的 `decontam`；双语 spec 只有 `[[source]]`（划分由 `split assign` 做）。文件开头的注释记下每个导出的计划与 provenance sha256，命令输出按种类的保留文本字节与份额（只算导出，不算 `--include`），即按字节的配比。
 - 每一种拒绝都以退出码 1 结束并写明原因；用法错误为 2。
 
 ## 来源与 profile

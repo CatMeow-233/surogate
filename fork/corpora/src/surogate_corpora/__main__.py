@@ -30,6 +30,8 @@ COMMANDS: dict[str, Command] = {
     "fetch": Command("run", "read the plan's row groups, filter and export (resumable)", "S5"),
     "verify": Command("verify", "re-check an export directory against its provenance", "S4"),
     "verify-samples": Command("verify", "check datasets-server sample rows against the registry", "S5", "samples_main"),
+    # Not in the spec's command table: the per-project wiring of the exports (the workflow's S5).
+    "compose": Command("compose", "one project corpus spec from several export directories", "S5"),
 }
 
 
